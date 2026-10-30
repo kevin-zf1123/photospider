@@ -28,42 +28,22 @@ Inherits [FILTER shared contract](FILTER_common_contract.md), [NUM](../../01-num
 | FRQ-03A | [Centered frequency shift](FRQ-03A_fftshift.md) | primitive | bitwise copy |
 | FRQ-03B | [Inverse centered frequency shift](FRQ-03B_ifftshift.md) | primitive | bitwise copy |
 
-Suffix letters identify distinct mathematical or interface objects, not quality tiers that a backend may select freely. A primitive may propose separately named strict and accelerated variants. A helper only orchestrates explicit stages. An external engine requires fixed resources and an approved executable configuration.
+Suffix letters identify distinct mathematical or interface objects, not quality tiers.
 
-## Runtime integration and remaining acceptance
+## Interface
 
-Both strict-only keys are registered by `register_frequency` in
-`plugins/ops/05-filter/frequency_operations.cpp`; bit-preserving execution is
-in `frequency_local.cpp`. No accelerated aliases or GPU backend are registered.
-Direct nodes take the explicit grid parameters documented by
-[FRQ-01](FRQ-01_contract.md#runtime-integration-and-remaining-acceptance), plus
-`axes`, a required canonical sorted comma-separated String of selected axes.
-The SDK `frequency::shift` updates the returned caller-owned index order.
-Each output reads only its own component's permuted tiles.
+Both keys are strict-only. Direct nodes take the explicit grid parameters of [FRQ-01](FRQ-01_contract.md#interface), plus `axes`, a required canonical sorted comma-separated String of selected axes. The SDK helper `frequency::shift` updates the returned caller-owned index order.
 
-Typed CPU invocation 9 supplies the [FRQ-01 cumulative-budget contract](FRQ-01_contract.md#runtime-integration-and-remaining-acceptance).
-Optional `max_work` remains a per-invocation limit; Run work accumulates through
-the separate borrowed service. Old FRQ ABI8 Plans require recompilation. The
-mathematical bit-copy and independent output contracts are unchanged.
+## Numeric Requirements
 
-## Shared Mathematics, Units, and Profiles
+E denotes an exact expression rounded once to RN_t; B denotes explicitly generated and fixed coefficients; S denotes explicit staged rounding. See [numeric reference](FILTER_numeric_reference.md). NUM defines NaN/Inf and floating-point overflow behavior; this family adds no category-wide finite-only rule. Copy behavior inherits NUM.
 
-Each member formula is defined in its linked specification. Members do not share undeclared implicit preprocessing. Parameters with the same name are reusable only when their units, boundary behavior, normalization, and RN stages match.
+Alpha semantics, spatial extension and structured outputs follow [color composition](FILTER_color_composition.md), the [boundary contract](FILTER_boundary_contract.md) and the [collection contract](FILTER_collections_contract.md).
 
-## Shared Execution and Numeric Requirements
+## Behavior and Acceptance
 
-E denotes an exact expression rounded once to RN_t; B denotes explicitly generated and fixed coefficients; S denotes explicit staged rounding. See [numeric reference](FILTER_numeric_reference.md). NUM defines NaN/Inf and floating-point overflow behavior; this family adds no category-wide finite-only rule. Strict bits, final FP32-scaled four-ULP bounds, gradual underflow, copy behavior, and exact discrete branches inherit NUM.
+Each output reads only its own component's permuted tiles. Outputs are independently requestable. Members are accepted against the [acceptance protocol](FILTER_oracle_protocol.md).
 
-Positive-weight normalized filters, signed kernels, local regression, and global inverse problems have different alpha semantics and must not share one generic blur rule. See [color composition](FILTER_color_composition.md). Spatial extension, anchors, and origins follow the [boundary contract](FILTER_boundary_contract.md). Structured outputs follow the [collection contract](FILTER_collections_contract.md). Shapes depend only on descriptors; each member defines mathematical support and fixed compiled reads.
-
-## Dependencies and Acceptance
-
-Each member’s support set is normative. Having a halo does not permit independent execution on an arbitrary cropped ROI; paging does not eliminate a complete-input dependency. Staged rounding, global connectivity, transforms, and iterative state follow the member definition. Outputs are independently requestable. Only selected computation and required algorithmic control contribute payload reads; no payload-validation phase is introduced.
-
-All members must meet the [acceptance protocol](FILTER_oracle_protocol.md). Mathematical references and their self-tests are documented in the [oracle README](../../../../oracle/ops/filter/README.md). D1/D2 describe specification maturity, not acceptance status.
-
-## Sources and Review
+## References
 
 [S09 · FFTW: DFT definition](../research-sources.md#s09); [S10 · FFTW: real-data array format](../research-sources.md#s10)
-
-Project boundary behavior, tie-breaking, numeric domains, parameters, public schemas, and proposed operation keys are defined by these specifications. Algorithm sources do not determine parameter defaults or grant rights to third-party software.

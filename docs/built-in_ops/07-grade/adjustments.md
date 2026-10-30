@@ -1,14 +1,12 @@
 # 调色与局部色调
 
-已实现的基础子集、精确参数和 Region 见[基础算子实现](../../kernel-architecture/Basic-Operations.md)；未标注实现的扩展条目保持 Proposed。分类表中的建议参数不覆盖现有接口。
-
 状态 Proposed；逐像素明确公式为D1，局部tone mapping、复杂色域压缩和商业控制匹配为D2。输入为描述明确的RGB/Lab等图像，可选mask；默认保留alpha。参考使用Float32颜色、Float64系数与统计，GPU FP32须单独验证。E/H/W为数学依赖；G4 已能按端口表达完整辅助表需求；既有 complete-input LUT 节点不自动获得 regional 实现。
 
 ## 调色目录
 
 | ID / 提议操作 | 输入输出与关键参数 | 数学/算法与相近功能 | 最小验收 |
 | --- | --- | --- | --- |
-| GRD-01 `grade.exposure` | linear RGB→RGB；EV=0，有限 | gain=2^EV；alpha保留；当前gain op最多16，包装范围须相容或新定义；E | .18,+1EV→.36，0EV identity |
+| GRD-01 `grade.exposure` | linear RGB→RGB；EV=0，有限 | gain=2^EV；alpha保留；E | .18,+1EV→.36，0EV identity |
 | GRD-02 `grade.offset_gain` | RGB+offset/gain；0/1 | affine `out=in*gain+offset`，不默认clip；Lift/Gamma/Gain独立mode；E | 0/1 identity、negative合法输出需G2 |
 | GRD-03 `grade.contrast` | RGB或Luma；contrast=1,pivot=.18线性建议 | `(x-p)*c+p`是明确线性版；log contrast另用log曝光轴；E | pivot不动，c=1 identity |
 | GRD-05 `grade.curves` | RGB+`[N,1或3]`→RGB | per-channel或master曲线，master位置/亮度特征明确；linear/PCHIP；E+whole表 | identity表；W1离散查表值 |
@@ -50,7 +48,7 @@ HDR高光暗部需区分global zone和local operator。全局只依赖每像素f
 
 ## 支持和实施
 
-已有 typed signed/HDR、RGB/XYZ/Lab 和独立 mask。OKLab、更多 wide-gamut 变换及专用调色节点仍须实现。调色默认对unassociated颜色操作，alpha原样；纯linear gain可优化为premul直接乘RGB。mask效果的混合空间明确，不能在Lab/encodedRGB/linearRGB之间静默切换。
+调色默认对unassociated颜色操作，alpha原样。mask效果的混合空间明确，不能在Lab/encodedRGB/linearRGB之间静默切换。
 
 master curve、RGB per-channel curves、luma curve、L* curve应在workflow中可见。LUT资源通过显式输入绑定，N或profile改变影响shape/契约时按静态路径处理；只改表值应以已允许的动态binding为目标，不假定当前端口都支持。
 

@@ -16,43 +16,18 @@ proposed_operation_keys:
 
 # FMT-14B: OKLab chroma reduction
 
-Inherit the complete [FMT-14 family](FMT-14_gamut_mapping_contract.md), including
-its normative B algorithm, interface, metadata, finite-domain raw, errors,
-resource obligations and strict numerical reference. The specification remains Proposed; the strict CPU operation is registered with fixed invocation ABI 8. See [implementation and validation](../FMT-14-15_implementation.md).
+Inherits the [FMT-14 family](FMT-14_gamut_mapping_contract.md), including its normative B algorithm, interface, finite-domain raw form and errors. The strict CPU operation is the only key.
 
-## Ports, parameters and output
+## Interface
 
-One `input` Float32/Float64 Tensor. Output `values` preserves dtype, shape and RGB slots; alpha and unrelated channels copy unchanged.
-Select one native relative linear RGB group, or explicit raw ordered slots.
-Interpretation is explicit static configuration; layout defaults to auto; materialize is supported and
-view rejected. All metadata/geometry/member parameters are static. No implicit
-basis, transfer, range encoding or tone conversion occurs.
+One `input` Float32/Float64 Tensor. Output `values` preserves dtype, shape and RGB slots; alpha and unrelated channels copy unchanged. Select one native relative linear RGB group, or explicit raw ordered slots. Interpretation is explicit static configuration; layout defaults to auto; materialize is supported and view is rejected. All description/geometry/member parameters are static. No basis, transfer, range encoding or tone conversion is implied.
 
-## Computation and exact request behavior
+## Mathematics
 
-Every requested RGB component consumes the full source triple and the family fixed 32/64-step algorithm.
-Use the corresponding family section for every branch and rounding boundary.
-There is no spatial halo or data-dependent demand elision. Static admission
-still runs for empty or bypass-only requests. Mapping hidden colors does not read
-alpha. Mathematical source support is closed on fixed input tiles; no incremental
-dirty-propagation service is defined.
+Every requested RGB component consumes the full source triple and the family's fixed 32/64-step algorithm. The family section gives every branch and rounding boundary. There is no spatial halo or data-dependent demand elision. Static admission runs also for empty or bypass-only requests. Hidden colors are mapped without reading alpha. Finite-domain conditions are unchecked caller premises. No sample-dependent identity branch makes the node eligible for view.
 
-## Storage, errors and implementation
+## Acceptance
 
-Native CPU strict primitive; no acceleration/GPU promise. Each selected output
-tile has independent dense storage and preallocated bounded scratch. The call
-publishes after its required tasks succeed and retires in order. Finite-domain
-conditions are unchecked caller premises. Resource, cancellation and required
-upstream failures retain their operational status and drain accepted work;
-already retired Results remain valid while owned.
-No sample-dependent identity branch makes the whole node eligible for view.
+An in-gamut sample verifies bit identity; an out-of-gamut sample is reconstructed independently through every stored XYZ/OKLab/candidate step. The result passes FMT-14D. No maximum-chroma or minimum-Delta-E claim.
 
-## Independent acceptance and conceptual public workflow
-
-Use an in-gamut sample to verify bit identity, then an out-of-gamut sample and independently reconstruct every stored XYZ/OKLab/candidate step. The result passes FMT-14D. No maximum-chroma or minimum-Delta-E claim.
-
-Also run the family sparse/ROI, dtype, metadata, resource and lifetime cases.
-Conceptual workflow: explicit source decoding/basis conversion -> this member ->
-consumer of mapped RGB or diagnostic mask. Implementations must supply an actual
-public workflow and independent oracle before marking this spec implemented.
-Source comparisons and algorithm compatibility limits are recorded in the family.
+Conceptual workflow: explicit source decoding/basis conversion -> this member -> consumer of mapped RGB.

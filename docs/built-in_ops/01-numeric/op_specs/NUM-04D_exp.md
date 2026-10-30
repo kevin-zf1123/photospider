@@ -16,80 +16,18 @@ implementation_status: implemented
 
 # NUM-04D: exp
 
-Numeric profile: strict retains the exact reference defined below. Floating
-arithmetic in accelerated profiles follows the shared
-[final FP32 four-ULP contract](NUM_accelerated_contract.md), including its
-range/fallback rules. Discrete results, copies, selected endpoints and special
-values remain exact.
+Numeric profile: strict is the exact reference defined below. Floating arithmetic in accelerated profiles follows the shared [final FP32 four-ULP contract](NUM_accelerated_contract.md). Discrete results, copies, selected endpoints and special values are exact. Inherits the [NUM baseline](NUM_common_contract.md) and the [NUM-04 unary contract](NUM-04_unary_contract.md); explicit rules below take precedence.
 
-Inherit the [NUM baseline](NUM_common_contract.md) for specification status,
-registration, shared execution and acceptance requirements; explicit rules below
-and in the named family contract take precedence.
+Computes the natural exponential e^x of each Float32/Float64 value, preserving dtype and shape. Integer inputs require explicit conversion. There are no static parameters. Keys: `numeric.exp_strict`, `numeric.exp_accelerated_apple_silicon`, `numeric.exp_accelerated_x86_64`.
 
-For each observed Float32/Float64 x, compute the natural exponential e^x and
-preserve dtype/shape. Inherit [NUM-04 common requirements](NUM-04_unary_contract.md)
-for the parameter-free input/values interface, generic output, fixed tile execution,
-and structural-validation demand, NaN bits, lifetime, resource accounting and public
-acceptance. Integer inputs require explicit conversion.
+## Mathematics
 
-## Numeric profile
+Strict is RN_dtype(exp(exact(x))), correctly rounded directly to the output dtype. Accelerated final outputs obey the shared FP32 four-ULP contract, including Float64 outputs compared directly on the FP32 absolute-error scale. A reference of zero, in the FP32 subnormal range or outside the FP32 range is evaluated strictly. NaN, infinity, classification and signed zero match strict exactly.
 
-Strict is RN_dtype(exp(exact(x))), correctly rounded directly to output dtype.
-Accelerated final outputs obey the shared FP32 4 ULP contract, including
-Float64 outputs compared directly on the FP32 absolute-error scale. Zero, FP32
-subnormal-range and out-of-FP32-range references use strict. NaN, infinity,
-classification and signed zero match strict exactly.
+Both +-0 map to exactly 1. +Inf maps to +Inf, -Inf maps to +0, and input NaNs are quieted with payload and sign retained. Correct floating overflow maps to +Inf; correct underflow may produce a positive subnormal or +0. All are successful numeric results; there is no domain failure for a generic floating input. A fixed profile gives identical bits for the same inputs and dtype regardless of batching or scheduling; platform profiles can differ within the accepted tolerance.
 
-Both ±0 map to exactly 1. +Inf maps to +Inf, -Inf maps to +0, and input NaNs
-are quieted with payload/sign retained. Correct floating overflow maps to +Inf;
-correct underflow may produce positive subnormal or +0, all as successful numeric
-results. There is no domain Status failure for a generic floating input.
+## Acceptance
 
-An accelerated argument range without an established bound/classification path
-falls back to strict. Formal keys retain profile identity, but per-value
-evaluation/fallback counters are unavailable (N/A) in fixed invocations. Resource/cancellation/upstream failure cannot be erased
-by a mathematical fallback. Fixed profile, inputs and dtype must give identical
-bits across batching/SIMD widths and scheduling; platform profiles can differ
-within the accepted tolerance.
+Check exp(+-0)=1, both infinities, signed NaN payload quieting, and positive/negative finite inputs with independently resolved destination rounding. Include neighbors around the overflow boundary, the normal/subnormal boundary and the underflow-to-zero boundary for both dtypes, and hard-to-round inputs. Strict compares bits; accelerated checks finite ULP distance and exact classification/NaN/zero behavior separately against an independent high-precision interval reference.
 
-## Reference and implementation requirements
-
-Classify nonfinite/zero operands by bits first. Strict implementation must resolve
-correct rounding, using proved correctly rounded math or high-precision directed
-enclosures with explicit tie handling. Range reduction and overflow/underflow
-classification must avoid constructing an enormous exp value merely to recognize
-an out-of-range result. Fixed precision and measured residual alone are not a
-correct-rounding proof. Use the admitted fixed limb workspace and query cancellation during refinement. Return `ResourceExhausted` if the bounded precision cannot resolve rounding.
-
-Accelerated implementations publish their actual library/algorithm/version and
-supported argument ranges with accuracy justification; no blanket std::exp or
-vector-library name establishes the four-ULP bound. Unverified cases take strict
-fallback. Work is per selected sample plus actual reduction/refinement cost;
-scratch and temporary growth remain under inherited host budgets. SIMD tails do not read beyond the complete logical input.
-
-## Independent acceptance
-
-Check exact exp(±0)=1, both infinities, signed NaN payload quieting, and a set of
-positive/negative finite inputs with independently resolved destination rounding.
-Include neighbors around the overflow boundary, normal/subnormal boundary and
-underflow-to-zero boundary for both dtypes. Strict compares bits. Accelerated
-checks finite ULP distance and separate exact classification/NaN/zero behavior.
-Include hard-to-round inputs and forced input-range fallback.
-
-Use a public WorkflowDocument fixture binding `[0,-Inf,+Inf]`; values must be
-`[1,+0,+Inf]`, with no attached domain description. Also execute nonzero/disjoint regions,
-changed NaN payloads, altered host rounding settings and common lifetime/
-budget/cancellation cases. An independent high-precision interval oracle is
-required; calling the production function twice is not acceptance.
-
-The maintained implementation and public run command are documented below; local timing is recorded in the implementation notes.
-
-## Maintained implementation and validation
-
-This operation is registered in `plugins/ops/01-numeric/numeric_unary.cpp` and
-exposed through `photospider/ops/numeric/unary.hpp`. It uses one fixed CPU invocation per selected output tile, validated input views and preallocated output/scratch. Its numerical path follows
-[the shared implementation notes](../math-implementation.md).
-
-Other inputs retain strict evaluation; the Float32 certificate does not admit
-narrowed Float64 arguments. See the [adapter update](../adapter-performance.md) and
-[exp implementation, validation and performance report](../exp-performance.md).
+Fixture: `[0,-Inf,+Inf]` gives `[1,+0,+Inf]`.

@@ -12,57 +12,40 @@ clarification_status: resolved
 
 # GEN-05F: path distance coordinate
 
-Inherit [GEN-05](GEN-05_gradient_coordinates_contract.md), [GEN
-common](GEN_common_contract.md), and the applicable [random](NOI_random_contract.md) and
-[geometry](PTH_geometry_contract.md) contracts. A key includes algorithm version and profile; within one version/profile,
-output bits and discrete decisions are fixed.
+Inherits [GEN-05](GEN-05_gradient_coordinates_contract.md) and [GEN common](GEN_common_contract.md).
 
-## Interface and representation
+## Interface
 
 PathSet and positive scale[1] in px; t[H,W].
 
-## Parameters and domain
+### Parameters and domain
 
-canvas/dtype; explicit distance_source=centerline_unsigned/fill_signed/stroke_signed;
-provide required fill/stroke parameters.
+canvas/dtype; explicit distance_source=centerline_unsigned/fill_signed/stroke_signed; provide required fill/stroke parameters.
 
-## Mathematical specialization
+Public SDK helper, declared in `photospider/ops/generation.hpp`:
 
-Compose the corresponding PTH-11 member followed by NUM division. Preserve the
-published-distance rounding stage; do not replace the workflow with one rounded
-true-distance/scale expression.
+```cpp
+Result<WorkflowNodeOutput> ps::generation::path_distance_coordinate(
+    WorkflowDocument* document, WorkflowInput path, WorkflowInput scale,
+    std::uint64_t height, std::uint64_t width,
+    std::string distance_source = "centerline_unsigned",
+    Parameters parameters = {},
+    std::vector<WorkflowInput> distance_inputs = {},
+    Profile profile = Profile::Strict);
+```
 
-## Runtime implementation
+`distance_source` selects the PTH-11 member: `centerline_unsigned`, `fill_signed` or `stroke_signed`. `distance_inputs` follow the geometry port (for example the stroke width input required by `stroke_signed`), and `parameters` holds the complete PTH-11 canvas and fill/stroke settings. `scale` is Float32/64 `[1]` with the dtype of the published distance; it is broadcast onto the output and divides the distance through NUM division. The helper returns the division output. No monolithic GEN-05F operation key exists.
 
-`generation::path_distance_coordinate` is the public C++ authoring helper in `photospider/ops/generation.hpp`. It chooses the explicit PTH-11 distance member, publishes its `distance`, broadcasts the positive scale (same dtype as the published distance), then invokes NUM division. `stroke_signed` additionally requires the explicit stroke width input. The returned workflow output preserves the distance rounding stage and supports all three declared distance sources; no monolithic GEN-05F registry key is introduced.
+## Mathematics
 
-## Dependencies, resources and failures
+Compose the corresponding PTH-11 member followed by NUM division. Preserve the published-distance rounding stage; do not replace the workflow with one rounded true-distance/scale expression.
 
-Execution support: **Regional**. Lower each selected complete output tile to
-fixed tasks with explicit query/sample and control-member tile reads. Close each
-read on its source grid; payload validity over the consumed support is a caller
-premise. Empty output selection performs static preparation without payload tasks.
-Shared computation uses explicit task dependencies and private intermediate
-Results under GEN-common.
+## Behavior
 
-Regional distance output; full path controls may be required.
+Support class: Regional.
 
-All output, scratch, indices, algorithmic work and retained owners are accounted. Poll
-cancellation in bounded loops. Preserve static structural failures and actual
-resource, cancellation, backend and upstream statuses. Member-specific no-solution,
-refinement or quality failures apply to valid inputs and the explicitly declared
-algorithm; numerical-premise violations have no prescribed runtime diagnostic.
-Never replace budget/cancellation failure with a lower-quality successful prefix. Views,
-lifetime and actual returned coverage inherit GEN-common.
+Each output pixel may depend on the complete path.
 
-## Independent fixtures and acceptance
+## Acceptance
 
-Distance 2 with scale 4 gives 0.5; open-path signed fill requires explicit fill
-interpretation.
-
-Check selected-tile/full-output equivalence, source-grid read closure, legal
-strides/offsets, separate/joint outputs, version/profile identity, low budgets, cancellation,
-associations and retained owners as applicable. The [oracle
-coverage](../oracle-coverage.md) describes the available finite reference subset; it is
-not runtime completion. The registered CPU implementation uses the bounded algorithms and failure rules specified here. No unverified GPU or third-party bit
-identity is implied by these requirements.
+Distance 2 with scale 4 gives 0.5; open-path signed fill requires explicit fill interpretation.

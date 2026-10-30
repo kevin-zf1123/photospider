@@ -12,7 +12,7 @@
 
 1.
 2.
-3. 本地 `photospider` 工作区 HEAD `18d2126`：类型、ABI、注册与Region源码；详见当前实现页。本次只增加本目录文档。
+3. 本地 `photospider` 工作区源码：类型、ABI、注册与 Region。
 4.
 5. ShaderToy `wcGBDD`、`s3XGz4`：实际尝试读取，未取得源码。下方URL仅登记待核验参考，不作为算法证据。
 6. Kosloff GI2009 PDF：官方索引正文可取得，完整PDF读取失败；只采用已读段落与独立数学推导。旧Resolve20 Colorist Guide和Adobe PDF1.7的部分索引材料用于研究线索，最终本文不以未通读部分声明完整产品兼容。

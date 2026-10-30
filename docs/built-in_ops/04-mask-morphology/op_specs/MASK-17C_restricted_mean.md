@@ -16,54 +16,28 @@ registered_operation_keys:
 
 # MASK-17C: Mask-restricted local mean with denominator validity
 
-Inherit the complete [family contract](MASK-17_apply_contract.md) and
-[MASK-common](MASK_common_contract.md). This Proposed member is registered in the bundled strict CPU set through
-fixed invocation ABI 8.
+Inherits the [family contract](MASK-17_apply_contract.md) and [MASK-common](MASK_common_contract.md).
 
-## Ports, parameters and output inference
+## Interface
+
+Registered operation key: `mask.restricted_mean_strict`.
 
 image: Float32/64[C,H,W], mask: same-dtype Coverage[H,W] -> values: Float32/64[C,H,W], valid: Binary[H,W]
 
-Required static parameters: MASK-05 footprint schema; empty_policy zero|error. Values and controls use the stated
-port order. Infer ordinary output dimensions from descriptors/statics only;
-Static Tensor capacities, payload counts and source-association rules, where relevant, are those of the family.
-No hidden default, conversion, color/alpha inference or optional port is added.
+Static parameters: MASK-05 footprint schema; empty_policy zero|error.
 
-## Mathematics and exact request behavior
+## Mathematics
 
 Exact all-sample weighted numerator and weight-sum denominator; explicit zero-denominator behavior on the finite input domain.
 
-H mask support S; all image samples in S for requested value channels, including zero weights; valid alone has no image Data. Empty Q adds no runtime payload work; static schema checks still apply.
-The family defines mathematical Data/Control support, border extension and
-rounding stages. Lower the selected complete output tiles to fixed input-tile
-reads, using a finite conservative superset for runtime-dependent addressing.
-There is no payload Validation read set or runtime dependency discovery.
+Support: mask support S; all image samples in S for requested value channels, including zero weights; valid alone has no image Data.
 
-## Implementation, resource and failure obligations
+Binary flags use the associated value output floating dtype and exact 0/1.
 
-Exact choices/copies stay exact; arithmetic uses the inherited
-rounding boundary and unchecked numerical premises. Account for output, scratch,
-exact state, retained source owners and all simultaneous intermediates. Poll
-inside long loops/refinement. Selected outputs of one call share its publication
-outcome; failure exposes no partial call Result. Already retired call exports
-remain valid. Preserve host upstream/cancellation/resource status and immutable
-owner lifetime.
-
-## Independent acceptance and public workflow
+## Acceptance
 
 image=[0,10], weights=[1,0] and a footprint covering both ->0, not5; weights[1,1] ->5; allzero ->valid0.
 
-Independent reference entry: `restricted_mean` in
-[`mask17/reference.py`](../../../../oracle/ops/mask_morphology/mask17/reference.py).
-Its small-image oracle and fixtures are not a production implementation and
-do not exercise kernel registration, resource accounting or compiled tile reads.
-Run the [suite commands](../../../../oracle/ops/mask_morphology/README.md),
-then add the relevant common fixed-tile support, valid special-value, static
-structural-parameter, dtype, correctly paired association, cancellation and
-owner-lifetime checks before implementation acceptance. Invalid payload or
-numerical-premise fixtures diagnose oracle requests only; they do not require
-production rejection.
+## References
 
-Sources and compatibility limits remain in the family and [research notes](../research-sources.md).
-
-Binary flags use the associated value output floating dtype and exact 0/1.
+Sources and compatibility limits are in the family contract and the [research notes](../research-sources.md).

@@ -21,56 +21,28 @@ research_sources:
 
 Linear or discrete percentile.
 
-Inherit [FIL-05](FIL-05_contract.md), [FILTER common contract](FILTER_common_contract.md), [NUM numeric and precision contract](../../01-numeric/op_specs/NUM_common_contract.md), and [FMT metadata and straight-color contract](../../02-format-color/op_specs/FMT_common_contract.md). Together, the family and member specifications define the target. Do not override RN stages, underflow behavior, or accelerated error bounds.
+Inherits [FIL-05](FIL-05_contract.md), the [FILTER common contract](FILTER_common_contract.md), [NUM](../../01-numeric/op_specs/NUM_common_contract.md) and [FMT](../../02-format-color/op_specs/FMT_common_contract.md).
 
-## Ports, shape, and semantics
+## Interface
+
+Operation keys: `filter.percentile_strict`, `filter.percentile_accelerated_apple_silicon`, `filter.percentile_accelerated_x86_64`.
 
 Ports and support match FIL-05A: input field and binary UInt8 footprint produce an output of the input shape.
 
-## Explicit parameters and legal domain
+### Parameters
 
 Require the FIL-05A footprint, axes, anchor, boundary, `cval`, and empty policy, plus `q∈[0,1]` and interpolation (`linear`, `lower`, `higher`, `nearest_even`, or `midpoint`). These are static parameters; constructors do not supply defaults.
 
-NUM special-value, floating-point overflow, signed-zero, payload, rounding, and precision behavior follows the corresponding operation and [FILTER common contract](FILTER_common_contract.md). Do not reject NaN/Inf under a family-wide rule or convert ordinary floating-point overflow into failure. Static structural, parameter-type and capacity-arithmetic errors retain pre-execution diagnostics. Numerical-domain premises are unchecked; resource, cancellation and upstream failures retain their contracts. Every parameter is explicit in the node; constructors have no implicit defaults. Interpret floating-point parameters as their stored values.
-
-## Mathematical reference and rounding
+## Mathematics
 
 Order samples as in FIL-05A. Compute exact `h=(N−1)*q`, `i=floor(h)`, `j=ceil(h)`, `f=h−i`. Linear returns `RN_t((1−f)a_i+f*a_j)`; if f=0, copy the selected sample bits. `lower`/`higher` select i/j. `nearest_even` rounds h to an integer index using ties-to-even. `midpoint` copies when i=j and otherwise returns `RN_t((a_i+a_j)/2)`.
 
-The numeric class and E/B/S meanings are defined in [FILTER numeric reference](FILTER_numeric_reference.md). Retain every declared rounding stage; helper calls do not introduce extra intermediate rounding unless the member says so. Signed zero, discrete choices, gradual underflow, and output range follow the member and NUM contracts.
+Footprint premises and boundary support follow FIL-05A. q is static control. Compute the integer indices from exact q; do not pre-round h to floating point. Do not substitute a different library quantile default.
 
-Boundary coordinates use the complete logical image; ROI and tile edges are not new image boundaries. Lowering closes mathematical sample support on fixed input member-tile grids. Data-dependent selection uses a finite static superset of every address the task may consume; runtime selection does not expand the Plan. Data and control are algorithmic inputs, with no separate Validation read set. Empty retained selections introduce no payload tasks. Output schemas derive only from static parameters and input schemas. Numerical, encoding and association premises remain unchecked under the common contract.
-
-Fixed reads, footprint premises and boundary support follow FIL-05A. q is static control. Compute the integer indices from exact q; do not pre-round h to floating point. Do not substitute a different library quantile default.
-
-Complexity uses P=HW samples, C independent planes, A taps, and T iterations where applicable; arbitrary-precision limb cost is additional and is not a measured benchmark. Follow FILTER admission, work/memory/stage accounting, cancellation, failure, and owner-lifetime rules. A failed call publishes no successful Result export; previously retired call exports remain valid, and final RET results require successful Run completion. Do not spill implicitly, lower precision silently, or fall back to retired implementations.
-
-## Oracle, fixtures, and acceptance
+## Acceptance
 
 Check exact endpoints q=0 and q=1. On `[0,10]` at q=1/4, linear interpolation returns 2.5. At q=1/2, nearest-even selects index 0. Include large N and q values near index boundaries to detect double rounding.
 
-The linked reference function is a small mathematical oracle, not a production kernel or a complete port-schema/preflight simulator. ExactRational uses exact rational expressions followed by IEEE rounding. For transcendental functions, only a DirectedMPFR interval that uniquely determines the result is a strict golden; otherwise report Inconclusive. Fixture identifiers describe reference-case scope only and make no claim about runtime implementation, full rank/batch behavior, metadata, compiled ROI/tile behavior, budgets, cancellation, or ownership. See the [runtime acceptance protocol](FILTER_oracle_protocol.md).
-
-See the member's linked reference source and oracle README.
-
-Fixture coverage identifiers: `percentile_linear_float32`, `percentile_linear_float64`, `median_even_lower`, `median_even_higher`, `median_even_nearest_even`, `median_even_midpoint`, `rank_signed_zero_copy`.
-
-Reference callable: `percentile(image,footprint,anchor,*,q=Q(1,2),interpolation='linear',boundary='reflect_half',cval=0,empty='error',dtype='float64')` in [spatial.py](../../../../oracle/ops/filter/fil05/spatial.py). These oracle helper defaults do not define graph-node constructors; every node parameter remains explicitly required.
-
-## Backend and registration
-
-`rank.cpp` implements the three CPU profile keys listed above. Rank positions use the exact stored binary64 `q`, including subnormal q and nearest-even ties. The five interpolation policies preserve original NaN order, stable signed-zero ties, pure copies and the specified infinity cases. Footprint values remain unchecked caller premises.
-
-These are CPU/Host fixed-invocation-ABI-8 implementations. Strict and accelerated variants share certified arithmetic and exact fallback. Float64 inputs retain their precision and exponent range; final accelerated error does not accumulate across stages, and exact ordering, copying, exceptional values and gradual underflow are preserved. The available Apple Silicon profile was exercised against independent references. The guarded x86_64 profile is implemented but was not executed on the Apple test host.
-
-Runtime checks use the public compiler, preparation, submission and Result-read interfaces. Numerical references, selected/empty output requests and relevant metadata, resource, cancellation and ownership paths have separate runtime evidence. Implementation does not change Proposed acceptance status or draft maturity.
-
-## Execution model
-
-`static parameters + schemas -> compile fixed reads/tasks -> prepare -> unchecked arithmetic with declared rounding stages -> complete tiles -> ordered call retirement`
-
-This sketch introduces no implicit color conversion, alpha premultiplication, frequency correction, or zero-fill for missing data. complete-input and staged-buffer requirements are those declared by the member and family.
-
-## Sources and open items
+## References
 
 [S04](../research-sources.md#s04).

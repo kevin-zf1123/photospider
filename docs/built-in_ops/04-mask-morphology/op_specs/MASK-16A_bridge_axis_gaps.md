@@ -16,57 +16,24 @@ registered_operation_keys:
 
 # MASK-16A: Bridge bounded horizontal and vertical barrier gaps
 
-Inherit the complete [family contract](MASK-16_close_gap_contract.md) and
-[MASK-common](MASK_common_contract.md). This Proposed member is registered in the bundled strict CPU set through
-fixed invocation ABI 8. Implementation: `plugins/ops/04-mask-morphology/gaps.cpp`
-on branch `ops-impl`.
+Inherits the [family contract](MASK-16_close_gap_contract.md) and [MASK-common](MASK_common_contract.md).
 
-## Ports, parameters and output inference
+## Interface
+
+Registered operation key: `mask.bridge_axis_gaps_strict`.
 
 barrier: Binary[H,W] -> temporary: Binary[H,W]
 
-Required static parameters: maximum_gap Int64>=0. Values and controls use the stated
-port order. Infer ordinary output dimensions from descriptors/statics only;
-Static Tensor capacities, payload counts and source-association rules, where relevant, are those of the family.
-No hidden default, conversion, color/alpha inference or optional port is added.
+Static parameters: maximum_gap Int64>=0.
 
-## Mathematics and exact request behavior
+## Mathematics
 
-H: cross-shaped axis support with reach maximum_gap+1, not square; max_gap0 only Q. Empty Q adds no runtime payload work; static schema checks still apply.
-The family defines mathematical Data/Control support, border extension and
-rounding stages. Lower the selected complete output tiles to fixed input-tile
-reads, using a finite conservative superset for runtime-dependent addressing.
-There is no payload Validation read set or runtime dependency discovery.
+Support: cross-shaped axis support with reach maximum_gap+1, not square; max_gap0 only Q.
 
-## Implementation, resource and failure obligations
-
-Use the family reference algorithm and its stated work/scratch bounds. Strict
-CPU is the initial target; no implicit accelerated/GPU/third-party fallback is
-registered. Exact choices/copies stay exact; arithmetic uses the inherited
-rounding boundary and unchecked numerical premises. Account for output, scratch,
-exact state, retained source owners and all simultaneous intermediates. Poll
-inside long loops/refinement. Selected outputs of one call share its publication
-outcome; failure exposes no partial call Result. Already retired call exports
-remain valid. Preserve host upstream/cancellation/resource status and immutable
-owner lifetime.
-
-## Independent acceptance and conceptual workflow
+## Acceptance
 
 barrier=[1,0,1,0,0,1], maximum_gap1 -> [1,1,1,0,0,1].
 
-Independent reference entry: `bridge_axis_gaps` in
-[`mask16/reference.py`](../../../../oracle/ops/mask_morphology/mask16/reference.py).
-Its small-image oracle and fixtures are not a production implementation and
-do not exercise kernel registration, resource accounting or compiled tile reads.
-Run the [suite commands](../../../../oracle/ops/mask_morphology/README.md),
-then add the relevant common fixed-tile support, valid special-value, static
-structural-parameter, dtype, correctly paired association, cancellation and
-owner-lifetime checks before implementation acceptance. Invalid payload or
-numerical-premise fixtures diagnose oracle requests only; they do not require
-production rejection.
+## References
 
-Conceptual DAG: explicit input preparation -> this member -> an explicit
-mask/measurement/image consumer appropriate to the listed output. A real
-Compiler/ExecutionContext workflow is still required after registration; this
-document does not invent a callable public API. Sources and compatibility
-limits are recorded in the family and [research notes](../research-sources.md).
+Sources and compatibility limits are in the family contract and the [research notes](../research-sources.md).

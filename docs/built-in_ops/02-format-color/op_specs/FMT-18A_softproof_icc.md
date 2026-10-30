@@ -16,39 +16,20 @@ proposed_operation_keys:
 
 # FMT-18A: ICC proof-rendered display colors
 
-Inherit the complete [FMT-18 family](FMT-18_softproof_contract.md) and applicable
-[FMT-12 foundation](FMT-12_icc_transform_contract.md). The CPU implementation is available; the decision status remains Proposed. See [implementation, validation and performance](../FMT-12-13-18_implementation.md).
+Inherits the [FMT-18 family](FMT-18_softproof_contract.md) and the [FMT-12 foundation](FMT-12_icc_transform_contract.md).
 
-## Ports, parameters and output inference
+## Interface
 
-One input Float32/Float64 tensor Tensor, one selected complete group (or explicit
-raw ordered slots). Source profile and endpoint interpretation are explicit static parameters. Proof/display profiles are mandatory. rendering_intent defaults to relative, proofing_intent to absolute, bpc to off, execution to optimized. Output values uses the display profile and preserves/remaps alpha and AOVs according to FMT-12.
-All settings/resources are static. The described and finite-only raw paths
-retain the family's explicit parameter, unit and structural requirements. No profile or
-physical display condition is inferred from names or the current monitor.
+One input Float32/Float64 tensor, one selected complete group (or explicit raw ordered slots). The source profile and endpoint interpretation are explicit static parameters. Proof and display profiles are mandatory. rendering_intent defaults to relative, proofing_intent to absolute, bpc to off, execution to optimized. Output `values` uses the display profile and preserves/remaps alpha and AOVs according to FMT-12. All settings and resources are static. The described and finite-only raw paths retain the family's explicit parameter, unit and structural requirements. No profile or physical display condition is inferred from names or the current monitor.
 
-## Algorithm and exact support
+## Behavior
 
-Use the specified four-stage SOFTPROOFING chain with GAMUTCHECK disabled. Preserve profile intent/BPC rules and explicit double unit adaptation; equal profiles do not imply a copy.
-Any requested color consumes all source colors at that position. No halo,
-alpha dependence or hidden-color suppression. Bypass-only samples remain independent bit copies.
-Static construction is required even for empty requests; it does not scan pixels.
+The specified four-stage SOFTPROOFING chain is used with GAMUTCHECK disabled. Profile intent/BPC rules and explicit double unit adaptation apply; equal profiles do not imply a copy. Any requested color consumes all source colors at that position. There is no halo, alpha dependence or hidden-color suppression; bypass-only samples are independent bit copies. Static construction is required even for empty requests. Only auto/materialize layouts; forced view fails. B is not built or evaluated by this member. The external engine configuration determines numerical behavior; no NUM precision label or commercial CMM equivalence is claimed.
 
-## Resources, precision and failures
+## Acceptance
 
-Only auto/materialize layouts; forced view fails. Selected output tiles use
-independent dense allocations and fixed preallocated scratch. Inherit immutable
-owner lifetimes, call-retirement publication and all FMT-12 host-engine resource
-hooks. B is not built or evaluated by this member.
-The external engine/build identity determines numerical behavior. No native NUM
-precision label or commercial CMM equivalence is claimed. Failures preserve their
-actual status/reason and required observation scope with no algorithm fallback.
+The family direct-CMM fixtures, model/unit cases and exact regions. Paper/black patches are compared under relative/absolute proofing and requested/effective BPC; alpha bypass is verified separately.
 
-## Independent acceptance and conceptual use
+## Conceptual DAG
 
-Apply the family direct-CMM/oracle fixtures, model/unit cases, exact regions,
-metadata, budget/cancellation and lifetime checks. Compare paper/black patches under relative/absolute proofing and requested/effective BPC; verify alpha bypass separately.
-A conceptual workflow branches working input into proof colors and an independent
-warning mask, then optionally composes an overlay. Public API examples and
-measured fixed-profile results are in [implementation, validation and performance](../FMT-12-13-18_implementation.md). Primary sources and
-compatibility limits remain in the family.
+The working input branches into proof colors (A) and an independent warning mask (FMT-18B), then optionally composes an overlay.

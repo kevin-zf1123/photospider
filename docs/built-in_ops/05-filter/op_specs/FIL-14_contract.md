@@ -20,7 +20,7 @@ research_sources:
 
 Complex values use separate real and imaginary tensors; orientation axes and phase sign are explicit.
 
-Inherits the [FILTER common contract](FILTER_common_contract.md), [NUM numerical/precision contract](../../01-numeric/op_specs/NUM_common_contract.md), and [FMT format/color contract](../../02-format-color/op_specs/FMT_common_contract.md). Members have CPU implementations and retain Proposed specification status; their specifications describe the registered primitives and SDK helpers.
+Inherits the [FILTER common contract](FILTER_common_contract.md), [NUM](../../01-numeric/op_specs/NUM_common_contract.md) and [FMT](../../02-format-color/op_specs/FMT_common_contract.md).
 
 ## Members
 
@@ -30,24 +30,14 @@ Inherits the [FILTER common contract](FILTER_common_contract.md), [NUM numerical
 | FIL-14B | [Gabor correlation response](FIL-14B_gabor_response.md) | primitive | E |
 | FIL-14C | [Named Gabor filter bank](FIL-14C_gabor_bank.md) | authoring_helper | S |
 
-Member suffixes denote distinct mathematical/interface objects, not backend-selectable quality tiers. Primitives may propose separately named strict and accelerated variants; helpers only orchestrate explicit stages; external engines need fixed resources and approval before an executable configuration can be specified.
+## Numeric semantics
 
-## Shared mathematics, units, and profiles
+Numeric classes E, B and S, and NaN/Inf, signed-zero, overflow and underflow behavior, follow the [numeric reference](FILTER_numeric_reference.md) and the corresponding NUM operations. Positive-weight normalization, signed kernels, local regression and global inverse problems have distinct alpha semantics; see [color composition](FILTER_color_composition.md). Spatial extension, anchors and origins follow the [boundary contract](FILTER_boundary_contract.md); structured outputs follow the [collections contract](FILTER_collections_contract.md). Shapes depend only on descriptors.
 
-See each member document in the table above for its formulas. Members share no undeclared implicit preprocessing; parameters with the same name are reusable only when units, boundaries, normalization, and RN stages match.
+## Behavior
 
-## Shared execution and numerical obligations
+Each member's declared support is normative. A halo does not make an arbitrarily cropped ROI an independent image boundary, and a whole-image dependency stays whole-image. Staged rounding, global connectivity, transforms and iterative state follow each member's definition.
 
-E means one final RN_t rounding of the complete exact expression, B means explicitly generated and fixed coefficients, and S means explicitly declared stage rounding; see the [numerical reference](FILTER_numeric_reference.md). Except for NUM finite-domain preconditions explicitly stated by a member, FILTER imposes no category-wide finite-only rule. Ordinary floating-point arithmetic produces NaN/Inf under the corresponding NUM special-value rules; ordinary floating-point overflow is not generally converted to operation failure. Member-defined strict bits, FP32-scaled four-ULP bounds, gradual underflow, copy, and exact discrete branches continue to inherit NUM.
-
-Positive-weight normalization, signed kernels, local regression, and global inverse problems differ and cannot share one alpha-blurring rule. See [color composition](FILTER_color_composition.md). Spatial extension/anchor/origin follow the [boundary contract](FILTER_boundary_contract.md); structured outputs follow the [collections contract](FILTER_collections_contract.md). Shapes depend only on descriptors; each member defines mathematical support and fixed compiled reads.
-
-## Dependencies and acceptance
-
-Each member’s support set is normative. A halo does not mean arbitrary cropped ROIs can run independently; paging does not eliminate a whole-image dependency. Follow each member’s definition for staged rounding, global connectivity, transforms, and iterative state. Only selected computation and required algorithmic control contribute payload reads; no payload-validation phase is introduced.
-
-All members must pass the [common acceptance protocol](FILTER_oracle_protocol.md). The [oracle README](../../../../oracle/ops/filter/README.md) describes the independent mathematical references and their self-tests. Runtime acceptance separately checks the compiled operations and workflows, including Region, resource, cancellation and ownership behavior. D1/D2 indicate draft maturity, not pass rates.
-
-## Sources and review
+## References
 
 [S01 · OpenCV Image Filtering](../research-sources.md#s01)；[S26 · scikit-image filters](../research-sources.md#s26)

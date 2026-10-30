@@ -16,75 +16,23 @@ implementation_status: implemented
 
 # NUM-04R: sincpi
 
-Numeric profile: strict retains the exact reference defined below. Floating
-arithmetic in accelerated profiles follows the shared
-[final FP32 four-ULP contract](NUM_accelerated_contract.md), including its
-range/fallback rules. Discrete results, copies, selected endpoints and special
-values remain exact.
+Numeric profile: strict is the exact reference defined below. Floating arithmetic in accelerated profiles follows the shared [final FP32 four-ULP contract](NUM_accelerated_contract.md). Discrete results, copies, selected endpoints and special values are exact. Inherits the [NUM baseline](NUM_common_contract.md), the [trigonometric contract](NUM-04_trigonometric_contract.md) and the [unary contract](NUM-04_unary_contract.md); explicit rules below take precedence.
 
-Inherit the [NUM baseline](NUM_common_contract.md) for specification status,
-registration, shared execution and acceptance requirements; explicit rules below
-and in the named family contract take precedence.
+For finite nonzero x, computes the mathematical `sin(pi*x)/(pi*x)`. The input float is its exact real value; pi denotes exact mathematical pi. Extends the function at both signed zeros by +1 and at both infinities by +0. Input NaNs preserve payload and sign and are quieted. All of these are successful numeric outputs. This is an independently named operation with no normalization or angle-unit parameter.
 
-For finite nonzero x, compute the mathematical `sin(pi*x)/(pi*x)`. Interpret the
-input float as its exact real value; pi denotes exact mathematical pi.
-Extend the function at both signed zeros by +1 and at both infinities by +0.
-Input NaNs preserve payload/sign and are quieted. All these are successful
-numeric outputs. This is an independently named operation with no normalization
-or angle-unit parameter.
+## Interface
 
-## Interface and numerical quality
+One input `input` and output `values` have identical shape and dtype, Float32 or Float64. Integer inputs require explicit cast. The output carries no domain description. Both platform accelerated keys reject incompatible platforms.
+Keys: `numeric.sincpi_strict`, `numeric.sincpi_accelerated_apple_silicon`, `numeric.sincpi_accelerated_x86_64`.
 
-One input `input` and output `values` have identical shape and dtype, Float32 or
-Float64. Integer inputs require explicit cast. Output carries no domain description. Inherit
-all [unary contract](NUM-04_unary_contract.md) requirements for fixed tile reads, structural validation, ownership, errors, resources and
-cancellation. Both platform accelerated keys reject incompatible platforms.
+## Mathematics
 
-Strict correctly rounds the entire mathematical quotient directly to the output
-dtype. It is not defined as a rounded sine followed by a rounded division.
-Accelerated finite nonzero results permit at most four FP32-scaled ULP from
-strict; NaN/Inf/zero classification and sign and specified landmarks match strict
-exactly. Use [exp's fallback rules](NUM-04D_exp.md) when an approximation cannot
-meet the bound, with per-value diagnostics N/A. Insufficient refinement or memory
-budget yields ResourceExhausted rather than an unverified numeric result.
+Strict correctly rounds the entire mathematical quotient directly to the output dtype; it is not a rounded sine followed by a rounded division. Accelerated finite nonzero results permit at most four FP32-scaled ULP from strict; NaN/Inf/zero classification and sign and specified landmarks match strict exactly. The bound applies to the whole function, and pi*x is never formed in the input dtype. A correctly rounded sinpi alone does not establish a correctly rounded sincpi.
 
-Avoid spurious intermediate overflow and loss of accuracy around zero. A stable
-series or bounded approximation may be used, but acceptance concerns the whole
-function. In the normalized function, constructing pi*x in the input dtype is
-not a full-range algorithm. A correctly rounded sinpi backend alone does not
-establish correctly rounded sincpi or a four-ULP final quotient.
+The function is even for real inputs. Nonzero exact results that underflow to zero retain their mathematical sign. NaN sign preservation follows the common bit policy independently of mathematical evenness. Every nonzero integer input returns exactly +0 in every profile; such inputs are detected exactly, without narrowing to Int64 or multiplying by a rounded pi.
 
-The function is even for real inputs. Nonzero exact results that underflow to
-zero retain their mathematical sign. NaN sign preservation follows the common
-bit policy independently of mathematical evenness.
+## Acceptance
 
-## Acceptance and status
+Independent directed high-precision reference for the whole quotient. Cases: +-0 gives +1, +-Inf gives +0, NaN payloads, tiny subnormals, largest finite inputs, oscillatory sign changes and hard rounding cases.
 
-Use an independent directed high-precision oracle for the whole quotient,
-refining until destination rounding is resolved. Test ±0 -> +1, ±Inf -> +0,
-NaN payloads, tiny subnormals, the transition away from the flat region around
-one, largest finite inputs, oscillatory sign changes and hard rounding cases.
-Verify exact special bits and accelerated final error, not just an internal
-sine error. Apply shared strided/disjoint demand, resource, structural-validation,
-lifetime and cancellation tests through actual public WorkflowDocument execution
-through the maintained public workflow; local timing is recorded in the implementation notes.
-
-Every nonzero integer input returns exactly +0 in every profile. Detect such
-inputs exactly without narrowing to Int64 or multiplying by rounded pi.
-A conceptual public fixture is [-1,-0.5,-0,+0,0.5,1] ->
-[+0,RN_dtype(2/pi),1,1,RN_dtype(2/pi),+0]. Strict uses these rounded values;
-accelerated may differ within four ULP at the nonzero non-landmark results.
-
-## Maintained implementation and validation
-
-This operation is registered in `plugins/ops/01-numeric/numeric_unary.cpp` and
-exposed through `photospider/ops/numeric/unary.hpp`. It uses one fixed CPU invocation per selected output tile, validated input views and preallocated output/scratch. Its numerical path follows
-[the shared implementation notes](../math-implementation.md).
-
-Float32 accelerated sincpi covers all finite binary32 inputs using exact integer-unit reduction. For `n = round_even(abs(x))` and `r = abs(x)-n`, it evaluates a central sincpi polynomial and reconstructs `(-1)^n*(r/abs(x))*sincpi(r)`. The central polynomial, hardware division and multiply use SIMD binary64 intermediates before final Float32 rounding. The `n=0` branch uses the central polynomial directly; zero returns one, nonzero integers return positive zero, and finite magnitudes at least `2^23` are all integers.
-
-The maintained analytic certificate includes coefficient, arithmetic and final
-reference rounding errors under the existing four-step contract. Float64
-arguments retain their existing implementation. Nonfinite values and inputs
-outside the polynomial admission use the existing semantic/fallback layer. See
-[the proof, validation and performance report](../trig-performance.md).
+Fixture: `[-1,-0.5,-0,+0,0.5,1]` gives `[+0,RN_dtype(2/pi),1,1,RN_dtype(2/pi),+0]`. Strict uses these rounded values; accelerated may differ within four ULP at the nonzero non-landmark results.

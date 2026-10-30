@@ -9,9 +9,7 @@ implementation_status: implemented
 
 # NOI-05: Cellular and finite-site distance
 
-F1/F2 are distance order statistics of a defined site set. A fixed 3x3 search is not an
-unconditional exact reference. Published station coordinates define the geometry. F2-F1
-is not generally Euclidean distance to a Voronoi boundary.
+F1/F2 are distance order statistics of a defined site set. A fixed 3x3 search is not an unconditional exact reference. Published station coordinates define the geometry. F2-F1 is not generally Euclidean distance to a Voronoi boundary.
 
 ## Members
 
@@ -20,18 +18,6 @@ is not generally Euclidean distance to a Voronoi boundary.
 | [NOI-05A](NOI-05A_cellular2d_l2.md) | cellular2d l2 |
 | [NOI-05B](NOI-05B_nearest_point_distances.md) | nearest point distances |
 
-## Shared execution and numerical rules
+## Shared rules
 
-Inherit [GEN common](GEN_common_contract.md), and applicable
-[random](NOI_random_contract.md) and [path geometry](PTH_geometry_contract.md) rules.
-Members declare Regional, Halo or complete-input from actual mathematical dependencies,
-independently of static structure checks. GPU capability is member/backend-specific.
-Same version/profile means bit-identical output; numerical error, geometry error and
-topology guarantees are separate. Source associations are unchecked caller premises; producers preserve declared ownership and lifetime by construction.
-
-## Acceptance and implementation boundary
-
-Use member-specific independent fixtures plus actual public workflow execution. The
-[oracle coverage](../oracle-coverage.md) identifies finite exact helpers, Measured
-diagnostics and remaining unsupported cases. It cannot establish public schema support,
-GPU admission or complete domain certification. Registered CPU implementations and public authoring helpers are described by the member specifications. Backend admission and resource-quality claims retain their explicit member boundaries.
+Members inherit [GEN common](GEN_common_contract.md) and the [random contract](NOI_random_contract.md).

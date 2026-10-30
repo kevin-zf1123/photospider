@@ -16,10 +16,16 @@ implementation_status: implemented
 
 # NUM-10E: scatter_minimum
 
-Inherit the [fixed scatter contract](NUM-10_scatter_contract.md) for ports, shape/dtype rules, unchecked index premises, task dependencies, numerical classification, scratch and lifetime. Each input Result contains one tensor; output `values` uses ordinary base axes in `photospider.tensor`/`samples`. Empty selection emits no tasks.
+Inherits the [scatter contract](NUM-10_scatter_contract.md) for ports, shape/dtype rules, unchecked index premises, numerical classification and the base-axis semantics. Each input Result contains one tensor; output `values` uses ordinary base axes in `photospider.tensor`/`samples`.
 
-Select the numerical minimum of base and matching updates. The first source NaN is quieted with its payload preserved. Mixed signed zeros select -0. Integer comparisons remain integer comparisons.
+## Mathematics
 
-If no update hits a coordinate, copy base bits without arithmetic, including signaling NaNs. Every nonempty call constructs the stable index table once in a shared task without index validation. Output tasks compute only selected tiles and read the shared stable index table, their base region and all possible update positions for their non-axis region. Base remains immutable. Indices and normalized positions satisfy unchecked caller premises. Operational resource/cancellation failures prevent successful call publication.
+The result is the numerical minimum of the base and matching updates. The first source NaN is quieted with its payload preserved. Mixed signed zeros select -0. Integer comparisons remain integer comparisons. If no update hits a coordinate, the base bits are copied without arithmetic, including signaling NaNs. Base is not modified.
 
-For base `[10,20,30]`, indices `[1,1,2]`, updates `[2,3,4]` and axis 0, expect `[10,2,4]`. Temporary acceptance uses independent grouping and raw-bit or exact arithmetic references. Cover duplicate order, no-hit signaling NaNs, first-NaN precedence, infinities, zero signs, integer boundaries, partial/empty output, changing indices, source strides, precise read sets, artifacts and concurrent Runs. See [fixed indexing execution](../indexing-execution.md). Specification status remains Proposed.
+## Behavior
+
+Each selected output sample depends on its base sample and on all update positions along the scatter axis for its non-axis region, plus the complete indices vector. Indices and normalized positions satisfy the unchecked caller premises. Empty selection reads nothing.
+
+## Acceptance
+
+Base `[10,20,30]`, indices `[1,1,2]`, updates `[2,3,4]`, axis 0 gives `[10,2,4]`. Cases: duplicate order, no-hit signaling NaNs, first-NaN precedence, infinities, zero signs, integer boundaries, partial/empty output.

@@ -15,28 +15,24 @@ oracle_scope: mathematical_reference
 
 # RES-10B: Blind image/PSF estimation with asynchronous early stopping
 
-This family uses [RES native floating-point contract](RES_native_contract.md).
+This is an independent early-stopping profile, not a stop-mode switch on the fixed-step member. It inherits the input/output, shape, boundary, recurrence and numeric contract from [RES-10](RES-10_contract.md) and the fixed-step member [RES-10A_blind_psf_projected_gradient.md](RES-10A_blind_psf_projected_gradient.md). Arithmetic follows the [RES native floating-point contract](RES_native_contract.md).
 
-This is an independent early-stopping profile. It does not add a stop-mode switch to the fixed-step member. Inherit the full input/output, shape, boundary, recurrence, numeric and resource contract from [RES-10](RES-10_contract.md) and the corresponding fixed-step member [RES-10A_blind_psf_projected_gradient.md](RES-10A_blind_psf_projected_gradient.md). Require explicit `y_axis`, `x_axis`, `anchor_y`, `anchor_x`, `max_iterations`, check interval, `epsilon_x`, `epsilon_k`, `step_image`, `step_psf`, `image_l2` and `psf_l2`; factories have no defaults. Boundary is fixed to wrap.
+## Interface
 
-## Recurrence and state
+Operation key: `restoration.blind_psf_projected_gradient_early_stop`.
+
+Require explicit `y_axis`, `x_axis`, `anchor_y`, `anchor_x`, `max_iterations`, check interval, `epsilon_x`, `epsilon_k`, `step_image`, `step_psf`, `image_l2` and `psf_l2`; factories have no defaults. Boundary is fixed to wrap.
+
+## Mathematics
 
 Use RES-10A’s alternating projected-gradient updates and joint objective E. Evaluate both residuals after a complete alternating iteration, at the same image/PSF pair. Keep PSF and image states in the native input dtype.
 
 Image, residual, gradient and PSF states follow main-input dtype `t`; public values are those native states. Fixed-step profiles never stop early; this is an independent profile with an explicit `max_iterations` bound.
 
-## Stopping criterion
+### Stopping criterion
 
 After a complete alternating update, evaluate both native projected-gradient residuals at the same `(x,k)` pair using `eta_x=step_image` and `eta_k=step_psf`. The gradients are recomputed at that pair. Stop only if both `max_i abs(G_x[i])<=epsilon_x` and `max_(j in support) abs(G_k[j])<=epsilon_k`, as defined in the shared iterative contract. Thresholds are explicit, finite, nonnegative and have their separate residual units. The check does not mutate the solver state and does not prove global optimality or PSF uniqueness.
 
-## Asynchronous lifecycle
-
-Use [FILTER iterative contract](FILTER_iterative_contract.md) for the native paired-state gradient predicate, check scheduling, coherent ownership, dropped busy triggers, termination races, cancellation, resource admission and cleanup. Do not expose checkpoints, iteration diagnostics, or public stopping-result fields. The result is the accepted state defined by that shared contract; it is not a cached cross-call result.
-
-## Errors and resource limits
-
-Parameter/control-model domains remain member-specific. Ordinary numeric propagation follows native arithmetic; a non-finite value needed by a stopping check makes that check inconclusive and it does not request convergence. Static structural and parameter-type errors retain pre-execution diagnostics. Numerical/model premises are caller obligations; resource exhaustion, cancellation, backend/upstream failures and explicit valid-input no-solution outcomes retain their defined operational behavior. Charge retained check states and concurrent work to the execution budget. Do not silently change algorithm, precision, or iteration limit.
-
 ## Acceptance
 
-Verify the fixed recurrence independently, then verify the criterion on hand-computed states, a case that meets it, a case that does not, non-finite check behavior, max-iteration termination, and the shared lifecycle contract. Runtime registration and implementation are not implied by this proposal.
+Verify the fixed recurrence independently, then verify the criterion on hand-computed states, a case that meets it, a case that does not, non-finite check behavior and max-iteration termination.

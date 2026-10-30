@@ -16,66 +16,25 @@ implementation_status: implemented
 
 # NUM-04H: tan
 
-Numeric profile: strict retains the exact reference defined below. Floating
-arithmetic in accelerated profiles follows the shared
-[final FP32 four-ULP contract](NUM_accelerated_contract.md), including its
-range/fallback rules. Discrete results, copies, selected endpoints and special
-values remain exact.
+Numeric profile: strict is the exact reference defined below. Floating arithmetic in accelerated profiles follows the shared [final FP32 four-ULP contract](NUM_accelerated_contract.md). Discrete results, copies, selected endpoints and special values are exact. Inherits the [NUM baseline](NUM_common_contract.md), the [trigonometric contract](NUM-04_trigonometric_contract.md) and the [unary contract](NUM-04_unary_contract.md); explicit rules below take precedence.
 
-Inherit the [NUM baseline](NUM_common_contract.md) for specification status,
-registration, shared execution and acceptance requirements; explicit rules below
-and in the named family contract take precedence.
+Computes tan(x), interpreting x as an exact floating-point value in radians. Input/output dtype is Float32 or Float64 and shape is unchanged. The output is `values`, with no attached domain description; there are no static parameters. Keys: `numeric.tan_strict`, `numeric.tan_accelerated_apple_silicon`, `numeric.tan_accelerated_x86_64`.
 
-Compute tan(x), interpreting x as an exact floating-point value in radians. Inherit all interface, rounding, error,
-resource, demand, backend and acceptance requirements from the
-[trigonometric contract](NUM-04_trigonometric_contract.md) and
-[unary contract](NUM-04_unary_contract.md).
-
-Input/output dtype is Float32 or Float64 and shape is unchanged. The named
-output is values, with no attached domain description; there are no static numeric parameters.
-
-## Function-specific values
+## Mathematics
 
 | Input | Output |
 | --- | --- |
 | +0 / -0 | Same signed zero |
-| ±Inf | Fixed positive quiet NaN |
+| +-Inf | Fixed positive quiet NaN |
 | NaN | Quiet input NaN, preserving payload/sign |
 
-Other finite inputs use the shared correctly rounded strict or <=4-ULP
-accelerated contract, with the shared special-value requirements.
-Do not infer a pole from proximity to a rounded radian pi/2. This function
-uses the actual finite input; the separate tanpi operation can express an exact pole.
-The final tan error includes range reduction and any division/polynomial error;
-separate four-ULP allowances for a sine and cosine followed by division do not
-establish four ULP for tangent. Strict reference overflow, if present, produces
-the correctly signed infinity as a successful numeric output; accelerated must
-match the reference classification.
+Other finite inputs use the shared correctly rounded strict or <=4-ULP accelerated contract.
+No pole is inferred from proximity to a rounded radian pi/2; the actual finite input is used (the separate tanpi operation expresses an exact pole). The final tan error includes range reduction and division/polynomial error; separate four-ULP allowances for sine and cosine followed by division do not establish four ULP for tangent. Reference overflow, if present, produces the correctly signed infinity as a successful numeric output; accelerated matches the reference classification.
 
-## Acceptance and current status
+## Acceptance
 
-The conceptual public fixture is `[+0,-0]` -> `[+0,-0]`.
-Build a WorkflowDocument with that floating array bound to input,
-compile one selected key and inspect output bits
-through ExecutionContext. Repeat in both dtypes and platform profiles, including
-disjoint requests and exact declared input tiles.
+Fixture: `[+0,-0]` gives `[+0,-0]`.
 
-For a nontrivial finite fixture, input=[1] represents exactly one radian.
-Strict tan(1) has Float32 bits `0x3fc75923` and Float64 bits
-`0x3ff8eb245cbee3a6`. Accelerated results obey the shared four-ULP bound;
-this fixture does not turn 1 radian into a special-angle identity requirement.
-Independent alternating-series rational enclosures for sin(1)/cos(1), with
-positive-denominator interval division for tan(1), and direct destination
-rounding establish these reference bits without using the production libm.
+Nontrivial finite fixture: input `[1]` is exactly one radian. Strict tan(1) has Float32 bits `0x3fc75923` and Float64 bits `0x3ff8eb245cbee3a6`. Accelerated results obey the shared four-ULP bound; 1 radian carries no special-angle identity. The reference bits come from independent rational enclosures of the series, with direct destination rounding.
 
-Also test ordinary small/large finite radian inputs, signed zero, NaN payloads,
-infinity, neighbors of rounded pi multiples, independent correct
-rounding and accelerated ULP/classification. Apply all shared resources, concurrent Runs,
-lifetime and cancellation cases. A real public executable, run commands and
-the maintained public run command is documented below; local timing is recorded in the implementation notes.
-
-## Maintained implementation and validation
-
-This operation is registered in `plugins/ops/01-numeric/numeric_unary.cpp` and
-exposed through `photospider/ops/numeric/unary.hpp`. It uses one fixed CPU invocation per selected output tile, validated input views and preallocated output/scratch. Its numerical path follows
-[the shared implementation notes](../math-implementation.md).
+Also test small/large finite radian inputs, signed zero, NaN payloads, infinity, and neighbors of rounded pi multiples; strict compares bits, accelerated compares ULP distance and classification.

@@ -10,11 +10,13 @@ implementation_status: implemented_manual_acceptance
 
 # NUM-11: reductions
 
-The seven operations `reduce_sum`, `reduce_minimum`, `reduce_maximum`, `reduce_mean`, `reduce_count`, `reduce_variance` and `reduce_std` each have strict, Apple Silicon CPU accelerated and x86-64 CPU accelerated formal keys. The strict key follows its exact reference. Accelerated floating arithmetic follows the shared [final FP32 four-ULP contract](NUM_accelerated_contract.md), including its range and fallback rules. Discrete results, selections, copies and special values remain exact. Inherit the [NUM baseline](NUM_common_contract.md) for status, registration, shared execution and acceptance requirements; explicit rules in this contract and member specs take precedence.
+## Interface
+
+The seven operations `reduce_sum`, `reduce_minimum`, `reduce_maximum`, `reduce_mean`, `reduce_count`, `reduce_variance` and `reduce_std` each have strict, Apple Silicon CPU accelerated and x86-64 CPU accelerated formal keys. The strict key follows its exact reference. Accelerated floating arithmetic follows the shared [final FP32 four-ULP contract](NUM_accelerated_contract.md). Discrete results, selections, copies and special values remain exact. Inherit the [NUM baseline](NUM_common_contract.md) for registration and shared requirements; explicit rules in this contract and member specs take precedence.
 
 Each input port accepts a Result containing exactly one tensor member at any member key. The operation reads its complete `sample_shape()`, including batch axes. Input rank is 1..8, extents are positive, and logical element count is at most 2^40. Each operation publishes `values`, a Result with schema `photospider.tensor` and one `samples` tensor. The output keeps input rank, sets every reduced axis extent to one, uses ordinary axes, and drops batch topology. A full reduction therefore produces rank-preserving all-one extents, not a rank-zero scalar. No reduction group is empty under these shape rules.
 
-`axes` is a required static String containing a nonempty canonical comma-separated list of distinct nonnegative decimal axis indices within rank. Entries use ASCII digits without whitespace, plus signs or leading zeros; constructors sort axes in increasing order. Axis order in a direct node does not change grouping. There is no `keepdims` parameter. Each output coordinate groups every input coordinate that matches its nonreduced axes and spans the full extent of each reduced axis. All operations use complete schema validation before execution.
+`axes` is a required static String containing a nonempty canonical comma-separated list of distinct nonnegative decimal axis indices within rank. Entries use ASCII digits without whitespace, plus signs or leading zeros; constructors sort axes in increasing order. Axis order in a direct node does not change grouping. There is no `keepdims` parameter. Each output coordinate groups every input coordinate that matches its nonreduced axes and spans the full extent of each reduced axis.
 
 ## Dtype and mathematical domains
 
@@ -37,19 +39,17 @@ V = sum((x - mean)^2) / (N - ddof)
 
 and round V once to the selected floating type. Do not round the mean, squares or partial sums. Integer inputs enter this formula exactly. Its exact numerator is nonnegative; clamping a negative approximate variance is not a substitute for the formula. For `reduce_std`, compute the exact same V and return `RN_dtype(sqrt(V))` without first rounding V. Both operations propagate the first NaN using the shared payload conversion. If there is an infinity and no NaN, return the fixed positive quiet NaN. A finite constant group has variance and standard deviation +0. Finite positive results may round to +Inf or +0.
 
-## Fixed tasks and metadata-only count
+## Behavior
 
-The six numerical reducers lower one ABI 8 CPU task per selected output tile. The task declares every input tile intersecting the Cartesian product of its nonreduced coordinate ranges and the full extents of its reduced axes. It computes only the output groups in that tile, in logical row-major order. Input tile granularity can include additional samples; those samples do not add output groups or change numerical order. Empty selection emits no task. Complete schema and static parameter checks run before lowering; prepare validates every declared read, output view, kernel contract and scratch capacity.
+Each numerical output group is computed over every input coordinate that matches its nonreduced axes, in logical row-major order, spanning the full extent of each reduced axis.
 
-`reduce_count` declares a schema-only input reference with no payload tile or producer dependency. Each selected output tile becomes a task that fills its separate dense Int64 allocation with the static product of reduced extents. It uses zero arithmetic scratch. An upstream sample producer remains elided when no other selected consumer needs its payload. An external input binding still supplies the declared schema; empty payload coverage suffices for count. Schema and parameter changes require a newly compiled Plan.
-
-Numerical tasks borrow fixed input views and use a preallocated `ReductionState` workspace containing exact aggregate or moments arithmetic. Mutable state is private to each invocation; prepared contexts hold immutable metadata and read-slot tables. Coordinates have rank at most eight. Cancellation is queried at each output group and within exact arithmetic. Operational failures discard unpublished output and drain accepted work before releasing owners. Successful output tiles retain independent owners beyond Run/context lifetime. The compiler bounds graph construction, the executor admits block resources and structural work, and exact-arithmetic callbacks query cancellation; they do not impose a per-sample execution-work counter. Managed resource accounting is not an RSS bound.
+`reduce_count` depends only on the input schema: it fills the output with the static product of reduced extents and reads no sample payload, so an upstream sample producer is not required by it.
 
 ## Errors and acceptance
 
-Compilation rejects malformed or empty axes, duplicate/out-of-rank axes, unsupported dtype or shape, invalid static parameters and input sizes above 2^40. `0<=ddof<N` is an unchecked numerical premise; static preparation checks its Int64 type without a value-domain rejection. Integer result representability is an unchecked caller obligation; diagnostics for violating it are unspecified. Floating infinity, NaN and underflow are numerical results. Resource and cancellation failures retain their operational categories; failed Runs publish no final RET.
+Compilation rejects malformed or empty axes, duplicate/out-of-rank axes, unsupported dtype or shape, invalid static parameters and input sizes above 2^40. `0<=ddof<N` is an unchecked numerical premise; only its Int64 type is checked. Integer result representability is an unchecked caller obligation. Floating infinity, NaN and underflow are numerical results.
 
-The seven member specifications define formulas and acceptance cases. Use independent exact rational totals/moments and squared-midpoint square-root rounding to check raw output bits. Cover sparse and empty requests, input tile boundaries, negative strides, batch/atomic geometry, NaN priority and count without upstream payload. The [fixed reduction execution page](../reductions-execution.md) describes the current implementation and validation scope. The specifications remain Proposed.
+Check raw output bits against exact rational totals/moments and squared-midpoint square-root rounding. Cases: NaN priority, input tile boundaries and count without upstream payload.
 
 ## Individual specifications
 

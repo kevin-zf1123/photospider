@@ -1,4 +1,4 @@
-# 候选依赖与实现方式选择
+# 候选依赖
 
 | 组件 | 已核验版本 / 许可标识 | 可承接职责 | 必须适配的边界 |
 | --- | --- | --- | --- |
@@ -12,22 +12,6 @@
 | OpenCV | 阅读4.13.0与部分5.0官方API；未锁版本 | 几何、滤波、配准、光流、修复候选 | correlation方向、中心坐标、边界、dtype、内部线程和内存 |
 
 这些库的职责可并存：OIIO读取图像不替代OCIO/ICC语义选择，LibRaw解码不替代camera profile与创意显影，OpenEXR读取Deep不替代Deep合成，模型runtime不替代模型质量。少量逐元素和小核算子可直接实现，避免为简单公式引入大依赖。
-
-## 算法到后端
-
-| 类型 | CPU参考方式 | 优化候选 | 选择依据 |
-| --- | --- | --- | --- |
-| E逐元素/小矩阵 | 明确Float32阶段或Float64参考 | SIMD/Metal | 转换/dispatch开销与数值范围 |
-| H局部核 | 直接非对称核oracle | separable、滑窗、SIMD、GPUtile | 核结构、半径、ROI、临时空间 |
-| W全局频域 | 配对DFT norm和padding | FFT、overlap-add/save | 不把大核自动全部送FFT |
-| S scan/reduce | 固定顺序/稳定累加 | 并行prefix、分块确定性归约 | 跨tile状态、精度与allocation |
-| R任意采样 | Float64 map+参考sampler | 合成map、mip/EWA、GPUtexture | aliasing/负瓣/invalid map、保守demand |
-| 迭代/图算法 | 具名solver与收敛 | 预条件、并行solver | 残差、全局边界、取消粒度 |
-| ML | 固定模型与pre/post reference | 受支持execution provider | 同一模型/数据域的误差、内存、吞吐 |
-
-近似快速模式应显式命名并给质量参数。`CpuExact` 与 `NativeGpu` 选择执行放置；
-NativeGpu 不替新算法定义数值语义，必须由 operation/profile 说明并验证。不要为每个
-operation 创建自己的线程池、GPU 资源系统或文件缓存；宿主/内核继续拥有其资源和生命周期。
 
 ## 来源
 

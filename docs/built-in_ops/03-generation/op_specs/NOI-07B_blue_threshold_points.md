@@ -16,63 +16,28 @@ operation_keys:
 
 # NOI-07B: blue threshold points
 
-Inherit [NOI-07](NOI-07_blue_noise_contract.md), [GEN common](GEN_common_contract.md),
-and the applicable [random](NOI_random_contract.md) and
-[geometry](PTH_geometry_contract.md) contracts. A key includes algorithm version and profile; within one version/profile,
-output bits and discrete decisions are fixed.
+Inherits [NOI-07](NOI-07_blue_noise_contract.md) and [GEN common](GEN_common_contract.md).
 
-## Runtime implementation
+## Interface
 
-The registered CPU key `noise.rank_threshold_points_v1_strict` implements generic
-rank thresholding. Descriptor parameters follow NOI-07A. Height, width and
-`threshold_count` are required; origins/offsets default to zero, `max_count`
-defaults to 1,048,576 and `max_work` bounds actual work. There is no dtype parameter:
-`points` is the canonical DynamicPoints v1 bundle. A complete-bundle task fills
-positions/ordinal IDs/count and zero padding. A zero threshold reads no rank payload.
-Capacity exhaustion returns ResourceExhausted/CapacityLimit without a successful
-prefix. No named blue-quality or GPU key is registered.
-
-## Interface and representation
+Operation keys: `noise.rank_threshold_points_v1_strict`.
 
 Rank/resource as NOI-07A; [DynamicPoints v1](GEN-08_point_distributions_contract.md) Result, at most one point per canvas pixel.
 
-## Parameters and domain
+### Parameters and domain
 
 canvas,offsets,threshold_count K=0..N; nonnegative static hard output capacity max_count, with physical P=max(1,max_count). Zero capacity permits an empty result only; generating a selected point beyond the logical capacity fails operationally.
 
-## Mathematical specialization
+Descriptor parameters follow NOI-07A. Required Int64 parameters: `height`, `width`, `threshold_count`. Origins and offsets default to 0; Int64 `max_count` defaults to 1048576. There is no `dtype` parameter; output `points` is the canonical DynamicPoints v1 bundle (positions, ordinal IDs, count, zero padding). Selecting more points than `max_count` fails with ResourceExhausted/CapacityLimit and publishes no prefix. A zero threshold reads no rank payload.
 
-Select rank<K, publish global pixel centers RN64 in y/x scan order with ordinal IDs. One
-complete resource period yields exactly K points; cropped/repeated coverage changes
-count. K=0 is empty. No continuous Poisson-disk or minimum-distance claim.
+## Mathematics
 
-## Dependencies, resources and failures
+Select rank<K, publish global pixel centers RN64 in y/x scan order with ordinal IDs. One complete resource period yields exactly K points; cropped/repeated coverage changes count. K=0 is empty. No continuous Poisson-disk or minimum-distance claim.
 
-Execution support: **complete input**. Lower the complete mathematical input
-support and required output member tiles into explicit tasks. Share global work
-through private intermediate Results and fixed dependencies. Required members
-publish on successful call retirement. Empty output selection performs static
-preparation without payload tasks; there is no runtime dependency discovery or
-dirty propagation.
+## Behavior
 
-count/fill the selected canvas support without a resource-validity scan, O(HW); capacity exhaustion fails. This capacity is not
-GEN-08C/D's normal count target.
+Support class: complete input. The output covers the selected canvas support; resource validity is not scanned. `max_count` is a hard capacity, not the normal count target of GEN-08C/D.
 
-All output, scratch, indices, algorithmic work and retained owners are accounted. Poll
-cancellation in bounded loops. Preserve static structural failures and actual
-resource, cancellation, backend and upstream statuses. Member-specific no-solution,
-refinement or quality failures apply to valid inputs and the explicitly declared
-algorithm; numerical-premise violations have no prescribed runtime diagnostic.
-Never replace budget/cancellation failure with a lower-quality successful prefix. Views,
-lifetime and actual returned coverage inherit GEN-common.
-
-## Independent fixtures and acceptance
+## Acceptance
 
 Full-period counts, nested thresholds, crop/origin invariance and capacity rejection.
-
-Check selected-tile/full-output equivalence, source-grid read closure, legal
-strides/offsets, separate/joint outputs, version/profile identity, low budgets, cancellation,
-associations and retained owners as applicable. The [oracle
-coverage](../oracle-coverage.md) describes the available finite reference subset; it is
-not runtime completion. No unverified GPU or third-party bit
-identity is implied by these requirements.

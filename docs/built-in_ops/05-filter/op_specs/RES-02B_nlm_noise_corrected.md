@@ -18,67 +18,40 @@ oracle_scope: mathematical_reference
 
 Noise-corrected NLM.
 
-Inherits the [RES-02 family contract](RES-02_contract.md), [FILTER common contract](FILTER_common_contract.md), [RES native floating-point contract](RES_native_contract.md), and [FMT metadata/straight semantics](../../02-format-color/op_specs/FMT_common_contract.md). The family formula and this member together define the complete draft; native fp32/fp64 arithmetic follows RES_native_contract; NUM strict bits and FP32-scaled four-ULP guarantees do not apply.
+Inherits the [RES-02 family contract](RES-02_contract.md), [FILTER common contract](FILTER_common_contract.md), [RES native floating-point contract](RES_native_contract.md), and [FMT metadata/straight semantics](../../02-format-color/op_specs/FMT_common_contract.md). Native fp32/fp64 arithmetic follows the RES native floating-point contract; NUM strict bits and FP32-scaled four-ULP guarantees do not apply.
 
-## Ports, Shape, and Semantics
+## Interface
 
-`input,guide,noise_sigma` → `output` with the input shape, layout and batch metadata. `noise_sigma` is one Float64 Tensor with logical sample shape `{1}`, invariant across all spatial locations, independent planes and scaled guide components; it is converted once to the input dtype for each invocation. Input/guide compatibility is specified by the [family public API](RES-02_contract.md#cpu-implementation-and-public-api).
+Operation key: `restoration.nlm_noise_corrected`.
 
-Ports carry Results with fixed Tensor member schemas. Unless the member defines an explicit color interpretation, samples are raw numerical values; channel count does not imply RGB or alpha. Color interpretation is explicit configuration. Positive extents, axes and explicit broadcasting are checked during static construction. Materialized output tiles have independent allocations. FilterBands and FrequencyGrid are proposed SDK/workflow representations under the collection contract; lowering records each selected output's fixed reads and writes.
+### Ports
 
-## Static Parameters and Valid Domains
+`input,guide,noise_sigma` → `output` with the input shape, layout and batch metadata. `noise_sigma` is one Float64 Tensor with logical sample shape `{1}`, invariant across all spatial locations, independent planes and scaled guide components; it is converted once to the input dtype for each invocation. Input/guide compatibility is specified by the [family public API](RES-02_contract.md#interface).
 
-Require patch_radius≥0, search_radius≥0, h>0 and noise_sigma≥0. Supply `guide_components` (G), `metric_scale`, `y_axis`, `x_axis` and `component_axis` explicitly. Parameter types, shape constraints and the optional resource ceiling are listed in the [family public API](RES-02_contract.md#cpu-implementation-and-public-api).
+### Parameters
 
-Use native IEEE fp32/fp64 arithmetic under [RES native floating-point contract](RES_native_contract.md). No cross-backend NaN payload or exact-expression rounding is promised. Callers guarantee the member's finite-parameter, control-model and numerical-domain premises; production execution does not validate those premises. Copy/bypass behavior and unconsumed data follow the dependency contract. Supply every parameter explicitly; constructors provide no defaults, except for constants fixed by a mathematical profile. Interpret real parameters as their stored Float64 values, not as infinitely precise decimal text.
+Require patch_radius≥0, search_radius≥0, h>0 and noise_sigma≥0. Supply `guide_components` (G), `metric_scale`, `y_axis`, `x_axis` and `component_axis` explicitly. Parameter types and shape constraints are listed in the [family public API](RES-02_contract.md#interface).
 
-## Mathematical Reference and Rounding Boundaries
+Use native IEEE fp32/fp64 arithmetic under [RES native floating-point contract](RES_native_contract.md). No cross-backend NaN payload or exact-expression rounding is promised. Finite-parameter, control-model and numerical-domain premises are unchecked caller obligations. Supply every parameter explicitly; constructors provide no defaults, except for constants fixed by a mathematical profile. Interpret real parameters as their stored Float64 values, not as infinitely precise decimal text.
+
+## Mathematics
 
 Numeric classification: **F**, native fp32/fp64. See [RES native floating-point contract](RES_native_contract.md).
 
 Use the family patch rules. For p≠q, w=exp(-max(D-2*sigma²,0)/h²) in the input dtype. This is a homoscedastic correction approximation; it does not exactly correct covariance from repeated reflected patch samples and is not claimed statistically unbiased. Distances, weights, numerator and denominator use native input precision; the self-weight of 1 guarantees a positive denominator.
 
-Preserve the declared algorithmic stages, masks, support, copy branches and iteration order. Within a stage, native arithmetic, FMA, vectorization and reduction regrouping are permitted under [RES native floating-point contract](RES_native_contract.md). An explicitly called member keeps its own interface contract.
+Preserve the declared algorithmic stages, masks, support, copy branches and iteration order. Within a stage, native arithmetic and reduction regrouping follow the [RES native floating-point contract](RES_native_contract.md). An explicitly called member keeps its own interface contract.
 
-## Fixed reads, algorithmic control and schemas
+## Behavior
 
-Guide support is search+patch, at most H(s+r). Input reads only candidate centers in the search window. A zero-underflow weight retains guide Control demand; input[p] may then remain unconsumed. With search_radius=0, only the input center is read.
+Guide support is search+patch, at most H(s+r). Input reads only candidate centers in the search window. A weight that underflows to zero still depends on the guide data; input[p] is then not consumed. With search_radius=0, only the input center is read.
 
-Boundary coordinates use the complete logical image; ROI and tile edges are not new image boundaries. Lowering closes mathematical sample support on fixed input member-tile grids. Data-dependent selection uses a finite static superset of every address the task may consume; runtime selection does not expand the Plan. Data and control are algorithmic inputs, with no separate Validation read set. Empty retained selections introduce no payload tasks. Output schemas derive only from static parameters and input schemas. Numerical, encoding and association premises remain unchecked under the common contract.
+ROI and tile edges are not image boundaries; boundary coordinates use the complete logical image.
 
-## Algorithm, Resources, and Execution
-
-The CPU implementation reuses symmetric candidate-pair distances and computes nonnegative separable patch sums in the working dtype. Per displacement, SSD generation is O(PG), patch summation is O(P(2r+1)), and weight/application work is O(P), with explicit halo work for each selected output tile. It does not use subtractive sliding sums or an integral SSD image. Native AVX2/FMA, NEON and scalar paths share the same candidate set and support. Scratch, work admission and cancellation are defined in the [family implementation section](RES-02_contract.md#resources-and-runtime).
-
-In complexity expressions, P=HW, C is the number of independent planes, A is the number of taps, and T is the number of steps. The shared protocol defines work, memory, and stage admission; cancellation; failure status; and owner lifetime. A failed call publishes no successful Result export; previously retired call exports remain valid, and final RET results require successful Run completion. Do not spill automatically, silently reduce precision, or call a retired implementation as a fallback.
-
-## Oracle, Fixtures, and Acceptance
+## Acceptance
 
 A constant guide yields the candidate mean. search_radius=0 is identity. Check patch_radius=0 and single-pixel search against analytic weights. For member B, sigma=0 reduces to member A. Rescaling guide units requires corresponding rescaling of h and sigma.
 
-The reference evaluates the mathematical formula on small inputs. Existing ExactRational/DirectedMPFR fixtures remain ideal mathematical references, not bitwise goldens for native execution. Acceptance compares native results using dtype-aware absolute/relative error and algorithm invariants under [RES native floating-point contract](RES_native_contract.md); it separately verifies runtime schemas, support and ownership.
-
-`res02.restoration.nlm(image, guide, *, patch_radius=1, search_radius=1, h_parameter=1, metric_scale=None, noise_sigma=None, dtype='float64')` → [Source file](../../../../oracle/ops/filter/res02/restoration.py).
-
-
-The same module also provides `nlm_native` (independent direct-patch staged native arithmetic) and `nlm_enclosure` (outward bounds on the full high-precision mathematical output). The mathematical `nlm` certifies final rounding using directed MPFR and exactly simplifies equal-mean exponent groups. Unresolved non-rational midpoint cases remain Inconclusive. These are standalone oracle helpers, not operator constructors; their Python convenience defaults do not define operation parameter defaults.
-
-The oracle README (../../../../oracle/ops/filter/README.md) documents reference scope. Runtime acceptance under the [runtime acceptance protocol](FILTER_oracle_protocol.md) must cover parameter boundaries, full rank/batch coverage, metadata, compiled ROI/tile behavior, budgets, cancellation, and ownership.
-
-## Backend and Registration Gates
-
-The CPU key is registered through `register_restoration_nlm`. Both dtypes have native AVX2/FMA, NEON and scalar implementations. GPU execution is not provided by this member. Native numerical validation follows [RES native floating-point contract](RES_native_contract.md); no NUM four-ULP fallback is required.
-
-Float64 paths retain native Float64 inputs, arithmetic, outputs and exponent range; no Float32 conversion or NUM strict fallback is introduced.
-
-## Conceptual DAG (Not an Existing API)
-
-`static parameters + schemas → compile fixed reads/tasks → prepare → native arithmetic with declared algorithmic stages → complete tiles → ordered call retirement`
-
-This diagram introduces no implicit color conversion, hidden alpha premultiplication, automatic spectral correction, or zero-filling of missing data. Whether execution is complete-input or requires multistage buffers is specified by this member and its family contract.
-
-## References and Conformance Notes
+## References
 
 [S18 · Buades, Coll, Morel: Non-Local Means Denoising](../research-sources.md#s18)
-
-External sources provide algorithmic or definitional background. The finite window, rounding, tie-breaking, units, and execution profile are explicit contract choices; bitwise identity with any library or commercial product is not claimed.

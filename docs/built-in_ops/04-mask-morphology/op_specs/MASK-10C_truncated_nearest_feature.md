@@ -16,64 +16,28 @@ registered_operation_keys:
 
 # MASK-10C: Local truncated nearest-feature distance
 
-Inherit the complete [family contract](MASK-10_distance_transform_contract.md) and
-[MASK-common](MASK_common_contract.md). This Proposed member is registered in the bundled strict CPU set through
-fixed invocation ABI 8.
+Inherits the [family contract](MASK-10_distance_transform_contract.md) and [MASK-common](MASK_common_contract.md).
 
-## Ports, parameters and output inference
+## Interface
+
+Registered operation key: `mask.truncated_nearest_feature_strict`.
 
 input: Binary[H,W] -> distance: Float32/64[H,W], within: Binary[H,W]
 
-Required static parameters: A parameters plus limit>0 finite Float64. Values and controls use the stated
-port order. Infer ordinary output dimensions from descriptors/statics only;
-Static Tensor capacities, payload counts and source-association rules, where relevant, are those of the family.
-No hidden default, conversion, color/alpha inference or optional port is added.
+Static parameters: A parameters plus limit>0 finite Float64. Authoring recommendation: exterior=none. Both none and background are supported; the node must explicitly serialize exterior.
 
-Authoring recommendation: exterior=none. Both none and background are
-supported; the node must explicitly serialize exterior.
-
-## Mathematics and exact request behavior
+## Mathematics
 
 Exact radius search, saturate to limit (or limit²), equality counted within; no nearest coordinate output.
 
-H: exact closed metric-radius stencil around Q, clipped input support. Empty Q adds no runtime payload work; static schema checks still apply.
-The family defines mathematical Data/Control support, border extension and
-rounding stages. Lower the selected complete output tiles to fixed input-tile
-reads, using a finite conservative superset for runtime-dependent addressing.
-There is no payload Validation read set or runtime dependency discovery.
+Support: exact closed metric-radius stencil around Q, clipped input support.
 
-## Implementation, resource and failure obligations
+Binary flags use the associated value output floating dtype and exact 0/1.
 
-The native implementation is in [distance_transform.cpp](../../../../plugins/ops/04-mask-morphology/distance_transform.cpp);
-its algorithm, scratch and strict-path limits are described in the family.
-Exact choices/copies stay exact; arithmetic uses the inherited
-rounding boundary and unchecked numerical premises. Account for output, scratch,
-exact state, retained source owners and all simultaneous intermediates. Poll
-inside long loops/refinement. Selected outputs of one call share its publication
-outcome; failure exposes no partial call Result. Already retired call exports
-remain valid. Preserve host upstream/cancellation/resource status and immutable
-owner lifetime.
-
-## Independent acceptance and public workflow
+## Acceptance
 
 input=[1,0,0], limit=1,l2,foreground,none -> distance=[0,1,1], within=[1,1,0].
 
-Independent reference entry: `truncated_nearest_feature` in
-[`mask10/reference.py`](../../../../oracle/ops/mask_morphology/mask10/reference.py).
-Its small-image oracle and fixtures are not a production implementation and
-do not exercise kernel registration, resource accounting or compiled tile reads.
-Run the [suite commands](../../../../oracle/ops/mask_morphology/README.md),
-then add the relevant common fixed-tile support, valid special-value, static
-structural-parameter, dtype, correctly paired association, cancellation and
-owner-lifetime checks before implementation acceptance. Invalid payload or
-numerical-premise fixtures diagnose oracle requests only; they do not require
-production rejection.
+## References
 
-Use the registered operation key above with explicit static parameters and
-input Results in the listed port order. Compile with `Compiler`, then execute
-with `ExecutionContext::prepare`, `submit` and `RunHandle::join`. Select the
-listed output keys; partial requests retain global output coordinates.
-Sources and compatibility limits remain in the family and
-[research notes](../research-sources.md).
-
-Binary flags use the associated value output floating dtype and exact 0/1.
+Sources and compatibility limits are in the family contract and the [research notes](../research-sources.md).

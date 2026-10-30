@@ -14,81 +14,36 @@ operation_keys:
 
 # PTH-07A: trim path
 
-Inherit [PTH-07](PTH-07_trim_dash_contract.md), [GEN common](GEN_common_contract.md),
-and the applicable [random](NOI_random_contract.md) and
-[geometry](PTH_geometry_contract.md) contracts. A key includes algorithm version and profile; within one version/profile,
-output bits and discrete decisions are fixed.
+Inherits [PTH-07](PTH-07_trim_dash_contract.md) and [GEN common](GEN_common_contract.md).
 
-## Interface and representation
+## Interface
+
+Operation keys: `path.trim_path_v1_strict`.
 
 Core/Bezier PathSet,start[1],end[1]; trimmed CoreVerbs PathSet with source mappings.
 
-## Parameters and domain
+### Parameters and domain
 
-units=normalized_arc/arc_px; each subpath range is valid as an unchecked premise; closed_wrap default
-false; attribute_policy.
+units=normalized_arc/arc_px; each subpath range is valid as an unchecked premise; closed_wrap default false; attribute_policy.
 
-## Mathematical specialization
+Outputs: `path`, `source_map` and `report`. Int64 parameters: `max_output_segments` (default 4096), `max_refinements` (default 4096), `limb_capacity` (default 128).
 
-Convert endpoints to true subpath arc positions. a=b yields empty. Ordinary0<=a<=b<=L;
-closed explicit wrap with a>b emits[a,L] then[0,b] as one open subpath. Full range
-preserves original closed state/geometry bits. Invert boundaries, exact de Casteljau
-trim then RN64 controls; connection and publication geometry are unchecked caller
-premises, with no completed-output validation. Preserve source-position width
-using source snapshot and original lengths; explicit rebind alone reapplies full
-profile.
+The source map is an exact rational affine parameter map. If a true-arc cut needs an unrepresentable irrational mapping, the default `attribute_policy=reject_unmappable` fails; explicit `drop_unmappable` omits that mapping and reports the drop. A rounded cut parameter is never encoded as an exact source correspondence. Rational inverse parameters are retained exactly even when non-dyadic: for a monotone collinear polynomial cut the parameter `1/3` is representable. Only a proved irrational root enters the unmappable policy; an exhausted rationality certificate fails refinement.
 
-## Runtime implementation
+## Mathematics
 
-`path_trim.cpp` uses certified true-length inversion and de Casteljau restriction. The outputs are `path`, `source_map` and `report`. Defaults include `max_output_segments=4096`, `max_integration_panels=1048576`, `max_refinements=4096`, `limb_capacity=128` and 64 MiB of algorithm scratch.
+Convert endpoints to true subpath arc positions. a=b yields empty. Ordinary0<=a<=b<=L; closed explicit wrap with a>b emits[a,L] then[0,b] as one open subpath. Full range preserves original closed state/geometry bits. Invert boundaries, exact de Casteljau trim then RN64 controls; connection and publication geometry are unchecked caller premises, with no completed-output validation. Preserve source-position width using source snapshot and original lengths; explicit rebind alone reapplies full profile.
 
-The source map is an exact rational affine parameter map. If a true-arc cut needs an unrepresentable irrational mapping, the default `attribute_policy=reject_unmappable` fails; explicit `drop_unmappable` omits that mapping and reports the drop. A rounded cut parameter is never encoded as an exact source correspondence.
+### Source width mapping
 
-Normalized and pixel-arc cuts retain their exact target expressions when using the shared PTH-04B traversal. Analytic irrational-length junctions and rational inverse parameters are resolved before constructing a source map. For monotone collinear polynomial cuts, continued-fraction reconstruction can retain non-dyadic rational parameters such as `1/3`; only a proved irrational root enters the unmappable policy, while an exhausted rationality certificate fails refinement.
+For every output fragment retain the source snapshot, subpath and ordered source arc intervals. Before publication, local fragment arc s maps to source a+s; a wrapped fragment uses [a,L] then [0,b]. After rounded-control publication the exact source parameter mapping is retained rather than equating new arc length with old arc length. A per-subpath pixel-domain query uses source s; a normalized subpath query uses s/source_L; a whole-PathSet normalized query uses (source_prefix+source_s)/source_total_L. Workflow-paired path_width Results and independent width inputs use the same mapping. If the formal representation cannot express it, reject_unmappable fails; explicit drop removes only unmappable fields and reports their keys and reasons. No interpolation is guessed and no rebind is implicit.
 
-## Dependencies, resources and failures
+## Behavior
 
-Execution support: **complete input**. Lower the complete mathematical input
-support and required output member tiles into explicit tasks. Share global work
-through private intermediate Results and fixed dependencies. Required members
-publish on successful call retirement. Empty output selection performs static
-preparation without payload tasks; there is no runtime dependency discovery or
-dirty propagation.
+Support class: complete input.
 
-complete-input O(segments+inverse work). Source-map reject/drop applies only
-when the selected map representation cannot express the computed mapping, such
-as a non-rational arc cut in the v1 rational affine map. Rounding compatibility,
-connections and topology remain unchecked premises; there is no publication
-scan or guessed interpolation.
+Source-map reject/drop applies only when the selected map representation cannot express the computed mapping, such as a non-rational arc cut in the v1 rational affine map. Rounding compatibility, connections and topology remain unchecked premises; there is no publication scan or guessed interpolation.
 
-All output, scratch, indices, algorithmic work and retained owners are accounted. Poll
-cancellation in bounded loops. Preserve static structural failures and actual
-resource, cancellation, backend and upstream statuses. Member-specific no-solution,
-refinement or quality failures apply to valid inputs and the explicitly declared
-algorithm; numerical-premise violations have no prescribed runtime diagnostic.
-Never replace budget/cancellation failure with a lower-quality successful prefix. Views,
-lifetime and actual returned coverage inherit GEN-common.
+## Acceptance
 
-## Independent fixtures and acceptance
-
-100px line25..75, empty interval, closed wrap, full-range bit identity and three width
-domains. Include diagonal irrational-length junction cuts and exact `t=1/3` maps for the monotone quadratic `C(t)=-1+3.5t-1.5t^2` and cubic `C(t)=27t^3`; distinguish these from proved irrational cuts.
-
-Check selected-tile/full-output equivalence, source-grid read closure, legal
-strides/offsets, separate/joint outputs, version/profile identity, low budgets, cancellation,
-associations and retained owners as applicable. The [oracle
-coverage](../oracle-coverage.md) describes the available finite reference subset; it is
-not runtime completion. The registered CPU implementation uses the bounded algorithms and failure rules specified here. No unverified GPU or third-party bit
-identity is implied by these requirements.
-
-## Source width mapping
-
-For every output fragment retain source snapshot, subpath and ordered source arc
-intervals. Before publication, local fragment arc s maps to source a+s; a wrapped
-fragment uses [a,L] then [0,b]. After rounded-control publication retain the exact
-source parameter mapping rather than equating new arc length with old arc length.
-Per-subpath pixel domain queries source s; normalized subpath queries s/source_L;
-whole-PathSet normalized queries (source_prefix+source_s)/source_total_L. Workflow-paired path_width Results and
-independent width inputs use the same mapping. If the formal representation cannot express it,
-reject_unmappable fails; explicit drop removes only unmappable fields and reports
-keys/reasons. No guessed interpolation or implicit rebind.
+100px line25..75, empty interval, closed wrap, full-range bit identity and three width domains. Include diagonal irrational-length junction cuts and exact `t=1/3` maps for the monotone quadratic `C(t)=-1+3.5t-1.5t^2` and cubic `C(t)=27t^3`; distinguish these from proved irrational cuts.

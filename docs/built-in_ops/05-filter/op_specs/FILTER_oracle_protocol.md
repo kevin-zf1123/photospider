@@ -8,113 +8,46 @@ document_maturity: D1_draft
 implementation_status: not_implemented
 ---
 
-# Mathematical, quality and runtime acceptance
+# Mathematical and quality acceptance
 
 ## Evidence classes
 
 | Class | Establishes | Does not establish |
 | --- | --- | --- |
-| ExactRational | Declared rational expression/stage with direct IEEE rounding | Full special-value coverage or production ownership |
+| ExactRational | Declared rational expression/stage with direct IEEE rounding | Full special-value coverage |
 | DirectedMPFR | Directed interval endpoints round to the same bits | Unbounded completion or all-input certificates |
 | HighPrecisionDiagnostic | Approximate high-precision/reference error trends | Strict golden or truncation-error proof |
-| ContractFixture | Executable support/schema/control assertions | Runtime implementation |
-| PinnedThirdPartyComparison | Actual fixed implementation/config/resource comparison | Unconditional bit identity, quality ground truth or NUM compliance |
+| ContractFixture | Support/schema/control assertions | Numerical correctness |
+| PinnedThirdPartyComparison | Comparison against a fixed third-party implementation, configuration and resource set | Unconditional bit identity or quality ground truth |
 
-Two agreeing precisions do not constitute a certificate. Generated vectors require
-independent analytic assertions. Python plane lists do not implement tensor layout,
-Result ownership or the compiler. See [oracle coverage](../oracle-coverage.md) and
-[execution instructions](../../../../oracle/ops/filter/README.md).
+Two agreeing precisions do not constitute a certificate. Generated vectors require independent analytic assertions.
 
 ## Mathematical acceptance
 
-For E/B/S members, use direct rational-to-binary32/64 rounding and directed MPFR where specified. Keep independent finite-matrix and transform references. For native RES01–12, those references supply ideal mathematical comparisons, while dtype-aware native tests check the implemented stages and invariants. RL tests construct the finite A and its true transpose. Blind PSF tests compare the sorted-threshold projection and native feasibility error. Mean-domain Anscombe inverses require documented truncation/root tolerances and independent range tests; final correct-rounding certification is no longer a native registration gate.
+For E/B/S members, use direct rational-to-binary32/64 rounding and directed MPFR where specified. Keep independent finite-matrix and transform references. For native RES01-12, those references supply ideal mathematical comparisons, while dtype-aware native tests check the implemented stages and invariants. RL tests construct the finite A and its true transpose. Blind PSF tests compare the sorted-threshold projection and native feasibility error. Mean-domain Anscombe inverses require documented truncation/root tolerances and independent range tests.
 
-Fixtures cover both dtypes, signed zeros, subnormal/normal boundaries, halfway cases,
-overflow to infinity, exceptional arithmetic (payload/priority only where explicitly required), selected and
-excluded poison values, odd/even shapes, large kernels, singleton axes, nonzero
-origins and identity branches. Deterministic fixtures record input/expected bits.
-Partial finite-domain references explicitly report unsupported cases as Inconclusive,
-not as evidence that legal NUM inputs are invalid.
+Fixtures cover both dtypes, signed zeros, subnormal/normal boundaries, halfway cases, overflow to infinity, exceptional arithmetic (payload/priority only where explicitly required), selected and excluded poison values, odd/even shapes, large kernels, singleton axes, nonzero origins and identity branches. Partial finite-domain references report unsupported cases as Inconclusive, not as evidence that legal NUM inputs are invalid.
 
 ## Ordinary floating-point transform acceptance
 
-FRQ-01A/B and FRQ-02A/B use F arithmetic. Their independent DFT oracles retain
-exact/directed mathematical references, but runtime outputs are compared by error,
-not mandatory bit equality. For finite fixtures without intermediate or output
-overflow, let epsilon be the output dtype's machine epsilon and
-K=1+ceil(log2(H*W)). Require relative plane L2 error at most 64*epsilon*K and
-maximum absolute component error at most
-64*epsilon*K*abs(scale)*sum(abs(complex_input)). Test an all-zero input separately
-without dividing by a zero reference norm. These are fixture acceptance limits,
-not an all-input error theorem or an OpenCV/MATLAB guarantee. For an RFFT energy
-comparison, weight interior stored x frequencies twice and DC/Nyquist once.
+FRQ-01A/B and FRQ-02A/B use F arithmetic. Their independent DFT references are exact or directed mathematical references, but outputs are compared by error, not mandatory bit equality. For finite fixtures without intermediate or output overflow, let epsilon be the output dtype's machine epsilon and K=1+ceil(log2(H*W)). Require relative plane L2 error at most 64*epsilon*K and maximum absolute component error at most 64*epsilon*K*abs(scale)*sum(abs(complex_input)). Test an all-zero input separately without dividing by a zero reference norm. These are fixture acceptance limits, not an all-input error theorem or an OpenCV/MATLAB guarantee. For an RFFT energy comparison, weight interior stored x frequencies twice and DC/Nyquist once.
 
-Include both dtypes and normalization modes, singleton/non-power-of-two/prime
-axes, independent batches, nonadjacent/reversed axes, selected outputs and
-independently edited valid inverse spectra. Verify RFFT boundary conjugate pairs
-and structural imaginary zeros. Nonfinite/range fixtures check safe ordinary
-floating-point completion and specified structural behavior, without exact NaN
-payload, written-order propagation or zero-sign goldens. No runtime numerical
-validation is introduced.
-
-For these four members H06 uses the F error criteria and floating environment;
-H07 is inapplicable because there is no named accelerated profile. All resource,
-shape, publication and fixed-read requirements still apply. Cold and warm runs
-must work with zero refinement stages.
+Include both dtypes and normalization modes, singleton/non-power-of-two/prime axes, independent batches, nonadjacent/reversed axes, selected outputs and independently edited valid inverse spectra. Verify RFFT boundary conjugate pairs and structural imaginary zeros. Nonfinite/range fixtures check ordinary floating-point completion and specified structural behavior, without exact NaN payload, written-order propagation or zero-sign goldens.
 
 ## Native RES acceptance
 
-RES01–12 use [RES_native_contract](RES_native_contract.md). H06 checks native dtype-aware error, floating environment and explicit structural/copy behavior; it does not require whole-expression bits or NUM NaN payload priority. H07 is inapplicable because no strict/accelerated quality split is specified. H08 charges native buffers, work and algorithm stages rather than arbitrary-precision limbs. All other applicable runtime, support and ownership requirements remain.
+RES01-12 use [RES_native_contract](RES_native_contract.md). Acceptance checks native dtype-aware error and explicit structural/copy behavior; it does not require whole-expression bits or NUM NaN payload priority.
 
-RES01A covers exact rank selection of native residual/deviation samples, odd/even counts, ties, sparse masks with excluded poison, arbitrary spatial axes and independent planes, insufficient selected samples, and the Float64 scale conversion. RES01B covers input precision, native parameter conversion, FMA variance, square root of that native variance, clamps and each output subset. Benchmark fixtures must not turn valid no-solution shapes into numeric speedup entries.
+RES01A covers exact rank selection of native residual/deviation samples, odd/even counts, ties, sparse masks with excluded poison, arbitrary spatial axes and independent planes, insufficient selected samples, and the Float64 scale conversion. RES01B covers input precision, native parameter conversion, FMA variance, square root of that native variance, clamps and each output subset.
 
-RES02A/B acceptance covers native Float32/Float64 stages, independent direct-patch and directed-MPFR references, G=1..4, arbitrary spatial axes and independent planes, reflected full-image support, selected ROI/tile closure, s=0 raw copy with no guide/sigma demand, work/stage/capacity limits, cancellation and owner release. Numerical error measurements must state their fixture scope and conditioning assumptions. RES03–12 remain subject to their member-specific algorithm/profile gates.
+RES02A/B acceptance covers native Float32/Float64 stages, independent direct-patch and directed-MPFR references, G=1..4, arbitrary spatial axes and independent planes, reflected full-image support, selected ROI/tile closure and s=0 raw copy with no guide/sigma demand. Numerical error measurements state their fixture scope and conditioning assumptions. RES03-12 are subject to their member-specific algorithm/profile acceptance.
 
 ## Native algorithms and third-party comparison
 
-BM3D, CBM3D and SMAA 1x are native algorithms with independently pinned third-party
-comparisons. Record version, build, resource identity/license, input representation,
-parameters, stages and sampling behavior. Align algorithm steps and explain numerical
-differences. Neither a manifest nor a citation supplies actual pixel evidence. Required
-resource/profile details must be resolved before a complete executable profile is
-claimed. There is no external-engine fallback disguised as native registration.
+BM3D, CBM3D and SMAA 1x are native algorithms with independently pinned third-party comparisons. Record version, build, resource identity/license, input representation, parameters, stages and sampling behavior. Align algorithm steps and explain numerical differences. A manifest or citation is not pixel evidence.
 
 ## Image-quality acceptance
 
-Effect-oriented members require mathematical acceptance and quantitative quality
-scores by use case. Use multiple relevant metrics with each critical threshold met;
-do not let a weighted total hide failure on a critical metric. Reliable references
-from known synthetic degradation or measured pairs form the primary dataset;
-unpaired real images supplement it. Third-party output is not ground truth.
-Metric formulas, datasets, sample aggregation and thresholds are established during
-implementation; this specification fixes the principles, not those values. No
-mandatory manual-review gate or universal cross-effect score is implied.
+Effect-oriented members require mathematical acceptance and quantitative quality scores by use case. Use multiple relevant metrics with each critical threshold met; a weighted total does not hide failure on a critical metric. Reliable references from known synthetic degradation or measured pairs form the primary dataset; unpaired real images supplement it. Third-party output is not ground truth. Metric formulas, datasets, sample aggregation and thresholds are fixed per member; this document fixes the principles only.
 
-## Public runtime acceptance
-
-| ID | Required evidence |
-| --- | --- |
-| H01 | Compile/preparation diagnostics for parameter presence/type/syntax and static schema/shape/axis constraints; illegal-payload diagnostics belong only to oracle tools |
-| H02 | Complete-input mathematics versus nonzero ROI/complete-tile selections where applicable |
-| H03 | Specified sparse arithmetic support and excluded mask/tap operands, with fixed finite supersets for runtime kernel/radius selection |
-| H04 | Fixed algorithmic control reads and immutable Run bindings for guide/mask/kernel/radius inputs |
-| H05 | Independent/joint output selection, shared operational failure within a call, ordered retirement and validity of previously retired exports |
-| H06 | Strict bits across parallelism/fenv, gradual underflow and NUM special values |
-| H07 | Named ISA accelerated final bounds and strict fallback |
-| H08 | Capacity/work/stage/limb limits, cancellation and no spill/degradation |
-| H09 | Immutable owners/read windows beyond context lifetime and final release |
-| H10 | Explicit FMT interpretation, straight/alpha, arbitrary group slots, Lab units and AOV |
-| H11 | Correct conjugate-pair construction on valid inputs, explicit original shape, compiled band selection and edited reconstruction |
-| H12 | Static Plan/profile/resource/parameter identity and independent Run state |
-| H13 | Actual BM3D/CBM3D/SMAA comparisons with pinned configurations |
-| H14 | Same-semantics benchmarks with temporary peaks and numerical-refinement costs |
-| H15 | Asynchronous stopping state retention, triggers, races and safe cleanup |
-
-For RES-01..14, H08 applies the [RES work-admission and cancellation rules](FILTER_common_contract.md#res-work-admission-and-cancellation). Verify work/stage rejection independently from cancellation checkpoints. Check the documented bounds for fixed codelets, generic inner loops and scalar/SIMD tails; trigger cancellation during representative long-running blocks, verify terminal cancellation and draining, and record latency with the backend, dtype and workload. The checkpoint criterion is the member's bounded algorithmic blocks rather than a uniform 1024-scalar-operation interval. This requirement applies independently of the member's numerical profile or implementation status.
-
-These are acceptance requirements, not completed runtime tests. Mathematical oracle
-success does not establish registration, backend availability, performance or quality.
-Production acceptance supplies valid numerical and association payloads;
-malformed-reference fixtures establish only oracle input diagnostics. Output
-conformance is checked by acceptance tools, without producer or consumer runtime
-validation passes.
+Production acceptance supplies valid numerical and association payloads.

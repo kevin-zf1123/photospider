@@ -44,11 +44,11 @@ HDR、全景和景深合成在产品中分别包含对齐、去鬼影、投影�
 
 仅有曝光比时HDR重建存在全局尺度不确定性，默认输出相对辐射度；绝对物理亮度需要额外辐射度校准，不能只凭曝光metadata推定。
 
-## CPU/GPU、Region与资源
+## Region 与数据范围
 
-sensor局部校正可H/E，demosaic按算法支持半径，色彩校准E。配准、HDR响应估计、全景优化和无界图像列表暂W；全尺寸多图直接堆入内存不一定可行，可复用内核 managed resources 与 mandatory backing，但须给源分块、pyramid、临时磁盘和校验的实际预算。当前内核没有由本规格自动增加多图/时间执行能力。
+sensor局部校正可H/E，demosaic按算法支持半径，色彩校准E。配准、HDR响应估计、全景优化和无界图像列表暂W；多图与时间执行需要专用规格。
 
-Float32/64是中间数据建议，UInt16等原始容器支持需G1；signed field/image v2 已支持负值，仍须符合各端口的颜色/alpha 子集。参考CPU实现不允许缺省自动tone curve改变输入物理意义。GPU demosaic/warp/fusion需对应oracle，不能只验证文件能打开。
+Float32/64是中间数据建议，UInt16等原始容器支持需G1；signed field/image 可表示负值，并符合各端口的颜色/alpha 子集。算子不得缺省应用自动 tone curve 改变输入物理意义。
 
 W11提供最小RAW/HDR链路。额外采用synthetic CFA常量和高对比斜边、不同曝光的同一线性场、明确mask的坏点和暗场作为可复现测试；真实相机样本另记录许可与metadata。
 

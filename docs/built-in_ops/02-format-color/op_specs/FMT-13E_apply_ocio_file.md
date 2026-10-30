@@ -15,52 +15,23 @@ proposed_operation_keys:
 
 # FMT-13E: frozen file transform
 
-Inherit [FMT-13](FMT-13_ocio_transform_contract.md). E applies an admitted
-v2.5.2 FileTransform reader to immutable resources, including CLF/CTF and LUT
-formats. It is a Proposed native engine adapter, not CRV LUT interpolation.
+Inherits [FMT-13](FMT-13_ocio_transform_contract.md). E applies an admitted v2.5.2 FileTransform reader to immutable resources, including CLF/CTF and LUT formats. It is not CRV LUT interpolation.
 
-## File and coordinate contract
+## Interface
 
-Require frozen file bytes/logical path and complete forward entry_space/exit_space
-declarations. Add a frozen config/context when symbolic dependencies require it;
-otherwise use the family's explicit empty resolver. No runtime filesystem path
-is an independently mutable resource. Retain reader-required format/version and
-filename information in the frozen logical resource mapping.
+Frozen file bytes/logical path and complete forward entry_space/exit_space declarations are required. A frozen config/context is added when symbolic dependencies require it; otherwise the family's explicit empty resolver applies. No runtime filesystem path is an independently mutable resource. Reader-required format/version and filename information are retained in the frozen logical resource mapping.
 
-direction defaults forward. Inverse must be constructible by the engine and may
-be approximate/lossy. interpolation defaults default; default/best resolve to the
-actual reader choices. Concrete nearest/linear/tetrahedral is accepted only where
-the affected LUT stages support it. Reject unsupported cubic or other modes and
-do not accept a warning-based substitution for a concrete request. Compound
-files retain non-LUT stages and any file-defined range/encoding operations.
-An explicit ccc_id selects a record where supported; empty follows the pinned
-reader's default and the construction trace records the actual record.
+direction defaults forward. Inverse must be constructible by the engine and may be approximate/lossy. interpolation defaults to default; default/best resolve to the actual reader choices. Concrete nearest/linear/tetrahedral is accepted only where the affected LUT stages support it; unsupported cubic or other modes are rejected, with no warning-based substitution for a concrete request. Compound files retain non-LUT stages and any file-defined range/encoding operations. An explicit ccc_id selects a record where supported; empty follows the pinned reader's default and the actual record is recorded.
 
-The file's own encoded bit-depth/scale declarations are interpreted by the
-reader; public coordinates remain the declared endpoint coordinates with the
-family's only automatic public dtype adaptation RN32/widen. Do not infer that
-a file containing an ICC section implements the FMT-12 CMM contract or admits
-four-channel CMYK. The same three-component/alpha-independent admission applies.
+The file's own encoded bit-depth/scale declarations are interpreted by the reader; public coordinates remain the declared endpoint coordinates with RN32/widen as the only automatic public dtype adaptation. A file containing an ICC section does not implement the FMT-12 CMM contract or admit four-channel CMYK. The same three-component/alpha-independent admission applies.
 
-## Execution and acceptance
+## Behavior
 
-One input/output tensor preserves dtype/shape/slots. Finite samples, exact point
-support, unchecked requested-output numerical premises, optimized/reference and ownership follow
-the family. Entry/exit labels do not add transforms. Raw does not automatically
-publish target semantics. Materialize requested output; view is forbidden.
+One input/output tensor preserves dtype/shape/slots. Finite samples, exact point support, unchecked output premises and optimized/reference follow the family. Entry/exit labels add no transforms. Raw does not publish target semantics. Output is materialized; view is forbidden.
 
-- Independently constructed identity, constant and nontrivial 1D/3D LUTs check
-  units, interpolation and engine inverse behavior. Include CLF/CTF with a
-  non-LUT stage and explicit range processing.
-- Record default/best effective interpolation; concrete unsupported mode fails
-  rather than producing a different interpolation result. Missing record IDs
-  and unreadable/malformed resources fail.
-- Two frozen packages with the same logical filename and different LUT bytes
-  must select their own immutable resources, processor construction and compiled
-  invocation identities. A missing proxy resource must not read a real host
-  file at the same path. Construction allocation/work failures cannot cause fallback.
-- Check structural alpha admission, valid finite narrowing, hidden colors, bypass,
-  exact cross-tile requests and both execution configurations.
+## Acceptance
 
-Public resource helpers, executable operation usage, independent oracle commands
-and measured validation coverage are recorded in [implementation, validation and performance](../FMT-12-13-18_implementation.md).
+- Independently constructed identity, constant and nontrivial 1D/3D LUTs check units, interpolation and engine inverse behavior, including CLF/CTF with a non-LUT stage and explicit range processing.
+- Default/best effective interpolation is recorded; a concrete unsupported mode fails. Missing record IDs and unreadable/malformed resources fail.
+- Two frozen packages with the same logical filename and different LUT bytes select their own immutable resources. A missing resource does not read a real host file at the same path.
+- Structural alpha admission, valid finite narrowing, hidden colors, bypass, exact cross-tile requests and both execution configurations.

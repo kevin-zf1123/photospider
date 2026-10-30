@@ -12,56 +12,47 @@ clarification_status: resolved
 
 # PTH-05C: pair a path with linear width
 
-Inherit [PTH-05](PTH-05_width_profiles_contract.md), [GEN
-common](GEN_common_contract.md), and the applicable [random](NOI_random_contract.md) and
-[geometry](PTH_geometry_contract.md) contracts. A key includes algorithm version and profile; within one version/profile,
-output bits and discrete decisions are fixed.
+Inherits [PTH-05](PTH-05_width_profiles_contract.md) and [GEN common](GEN_common_contract.md).
 
-## Interface and representation
+## Interface
 
 PathSet, stops[K], widths[K] Float64 and explicit domain/binding fields; return the unchanged complete PathSet value paired with a photospider.ops.path_width v1 Result.
 
-## Parameters and domain
+### Parameters and domain
 
-Three domains as PTH-05A; replace_existing default false, the absence of a conflicting width key is an unchecked caller premise;
-the standard key is width and the shared geometry contract specifies its schema. Normalized stops0..1; px profile covers associated length.
+Three domains as PTH-05A; replace_existing default false, the absence of a conflicting width key is an unchecked caller premise; the standard key is width and the shared geometry contract specifies its schema. Normalized stops0..1; px profile covers associated length.
 
-## Mathematical specialization
+Public SDK helpers, declared in `photospider/ops/generation.hpp`:
+
+```cpp
+struct PathWithWidth final {
+  WorkflowInput path;
+  WorkflowNodeOutput width;
+};
+Result<PathWithWidth> ps::generation::attach_linear_width(
+    WorkflowDocument* document, WorkflowInput path, WorkflowInput profiles,
+    WorkflowInput bindings, WorkflowInput stops, WorkflowInput widths,
+    Parameters parameters = {}, bool replace_existing = false,
+    const WorkflowNodeOutput* existing_width = nullptr);
+
+Result<WorkflowNodeOutput> ps::generation::evaluate_linear_width_binding(
+    WorkflowDocument* document, WorkflowInput target, WorkflowInput binding,
+    std::vector<WorkflowInput> sources, Parameters parameters = {},
+    const WorkflowInput* source_map = nullptr);
+```
+
+`attach_linear_width` returns the original geometry `WorkflowInput` and a separate width Result produced by `path.linear_width_binding_v1_strict`. Its ordered binding inputs are the source geometry, Int64 `profiles[P,3]` (domain, stop_begin, stop_end), Int64 `bindings[B,3]` (target_subpath, profile_row, source_subpath), `stops` and `widths` (Float64 `[K]`); the output records source slot 0 and the source identity. The geometry is never copied into a replacement Result. Replacing an explicitly supplied existing width requires `replace_existing=true`.
+
+`evaluate_linear_width_binding` consumes the source Results in the order of the binding's source slots and an optional `path_source_map`, and uses `path.bound_linear_width_values_v1_strict` (or `path.bound_linear_width_mapped_values_v1_strict` with a map) to publish RN64 per-vertex widths, a Float64 value of the target control capacity, for the variable-round stroke, outline and stroke-SDF operations. Interior vertices use the following positive-length segment and final endpoints use the preceding segment's end; a closed seam reuses its single published M width. Without a map, segment and subpath identity are a caller premise. ObjectIds are never used to discover inputs.
+
+## Mathematics
 
 Return the original PathSet value with the same ObjectId and geometry bits, and construct a separate path_width Result containing scalar Linear profiles, explicit source domains and source associations. The workflow pairs these two outputs. The public `generation::attach_linear_width` helper denotes that explicit pairing; it adds no field or implicit attribute to the geometry Result. The v1 path_width schema represents Linear width only. Independent PCHIP consumers use an explicit profile or separately specified bounded conversion.
 
-## Runtime implementation
+## Behavior
 
-`generation::attach_linear_width` returns the original geometry `WorkflowInput` and a separate width Result produced by `path.linear_width_binding_v1_strict`. Ordered binding inputs are the source geometry, Int64 profile rows `[P,3]` (domain, stop begin, stop end), Int64 binding rows `[B,3]`, stops and widths; the output inserts source slot 0 and records the source identity. It never copies the geometry into a replacement Result.
+Support class: complete input. The width metadata is built from explicit inputs, and source IDs are recorded without validation. The original geometry value is returned directly, preserving its identity.
 
-`generation::evaluate_linear_width_binding` consumes explicitly ordered source ResultRefs and an optional `path_source_map`, using the bound-width runtime members to produce per-vertex widths for stroke consumers. It performs no ObjectId lookup. Authoring-time replacement of an explicitly supplied existing width requires `replace_existing=true`.
-
-## Dependencies, resources and failures
-
-Execution support: **complete input**. Lower the complete mathematical input
-support and required output member tiles into explicit tasks. Share global work
-through private intermediate Results and fixed dependencies. Required members
-publish on successful call retirement. Empty output selection performs static
-preparation without payload tasks; there is no runtime dependency discovery or
-dirty propagation.
-
-Construct the width metadata from explicit inputs in O(bindings+K), recording source IDs without validation. Return the original geometry value directly, preserving its identity and avoiding a copy.
-
-All output, scratch, indices, algorithmic work and retained owners are accounted. Poll
-cancellation in bounded loops. Preserve static structural failures and actual
-resource, cancellation, backend and upstream statuses. Member-specific no-solution,
-refinement or quality failures apply to valid inputs and the explicitly declared
-algorithm; numerical-premise violations have no prescribed runtime diagnostic.
-Never replace budget/cancellation failure with a lower-quality successful prefix. Views,
-lifetime and actual returned coverage inherit GEN-common.
-
-## Independent fixtures and acceptance
+## Acceptance
 
 Three domains, valid source snapshot pairing and unchanged geometry bits.
-
-Check selected-tile/full-output equivalence, source-grid read closure, legal
-strides/offsets, separate/joint outputs, version/profile identity, low budgets, cancellation,
-associations and retained owners as applicable. The [oracle
-coverage](../oracle-coverage.md) describes the available finite reference subset; it is
-not runtime completion. The registered CPU implementation uses the bounded algorithms and failure rules specified here. No unverified GPU or third-party bit
-identity is implied by these requirements.

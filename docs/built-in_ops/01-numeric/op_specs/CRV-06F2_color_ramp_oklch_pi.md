@@ -18,60 +18,26 @@ clarification_status: complete
 
 # CRV-06F2: color_ramp_oklch_pi
 
-Dynamic inputs inherit the [family Result tensor-port contract](CRV-06_color_ramp.md#result-tensor-ports): each is a Result with exactly one tensor member, under any structurally valid schema id/version/member key. Shape checks use complete `sample_shape()` values, including batch axes.
+Dynamic inputs inherit the [family Result tensor-port contract](CRV-06_color_ramp.md#interface): each is a Result with exactly one tensor member, under any structurally valid schema id/version/member key. Shape checks use complete `sample_shape()` values, including batch axes.
 
-Numeric profile: strict retains the exact reference defined below. Floating
-arithmetic in accelerated profiles follows the shared
-[final FP32 four-ULP contract](NUM_accelerated_contract.md), including its
-range/fallback rules. Discrete results, copies, selected endpoints and special
-values remain exact.
+Numeric profile: strict retains the exact reference defined below. Floating arithmetic in accelerated profiles follows the shared [final FP32 four-ULP contract](NUM_accelerated_contract.md). Discrete results, copies, selected endpoints and special values remain exact.
 
-## Interface and purpose
+## Interface
 
-This independent OKLCh ramp uses floating pi-multiple source hue.
-The ordered dynamic inputs are input, stops, colors; output is named values.
-colors is Float32/Float64[K,3], ordered L, C, h.
-input and stops independently accept Float32/Float64. stops is [K] with
-1<=K<=65536; input has rank 1..7, and values has shape sample_shape(input)+[3].
-All logical element limits, matching K and finite-value rules come from the
-[complete OKLCh contract](CRV-06F_color_ramp_oklch.md).
+This independent OKLCh ramp uses floating pi-multiple source hue. The ordered dynamic inputs are input, stops, colors; output is named values. colors is Float32/Float64[K,3], ordered L, C, h. input and stops independently accept Float32/Float64. stops is [K] with 1<=K<=65536; input has rank 1..7, and values has shape sample_shape(input)+[3]. All logical element limits, matching K and finite-value rules come from the [complete OKLCh contract](CRV-06F_color_ramp_oklch.md).
 
-Static String parameters are color_description, dtype, out_of_domain
-and output_hue_unit. Constructors default dtype to colors dtype,
-out_of_domain to clamp, output_hue_unit to pi_multiple.
-Both radian and pi_multiple output units remain available. color_description
-explicitly identifies the input representation, OKLCh, fixed D65 white
-and no alpha. The output parameter selects the floating hue unit; the Result carries no description.
+Static String parameters are color_description, dtype, out_of_domain and output_hue_unit. Constructors default dtype to colors dtype, out_of_domain to clamp, output_hue_unit to pi_multiple. Both radian and pi_multiple output units remain available. color_description explicitly identifies the input representation, OKLCh, fixed D65 white and no alpha. The output parameter selects the floating hue unit; the Result carries no description.
 
-## Inherited executable contract
+The public authoring helper is `color_ramp_oklch_pi_node`.
 
-All original-hue interpolation, C=0 hue retention, correct final
-rounding and unit-conversion rules are normative from CRV-06F.
-Strict is correctly rounded; accelerated finite arithmetic follows the shared
-FP32-scaled final-result bound. No GPU variant is specified.
-Exact hit/clamp directly converts the original hue; no source hue is discarded
-because chroma is zero. A mismatched platform is not silently redirected.
+## Mathematics and behavior
 
-Inherit the family's [fixed execution and caller preconditions](CRV-06_color_ramp.md#fixed-execution-and-caller-preconditions), including complete-color output tiles, conservative table dependencies, fixed scratch, cancellation and retained output lifetime. Selected hue and rational-denominator preconditions remain active at zero chroma or saturation. Unfinished certified arithmetic returns ResourceExhausted.
+All original-hue interpolation, C=0 hue retention, correct final rounding and unit-conversion rules are normative from CRV-06F. Strict is correctly rounded; accelerated finite arithmetic follows the shared FP32-scaled final-result bound. Exact hit/clamp directly converts the original hue; no source hue is discarded because chroma is zero.
 
-## Workflow and acceptance
+Caller preconditions and dependency support follow the [family contract](CRV-06_color_ramp.md#behavior). Selected hue and rational-denominator preconditions remain active at zero chroma or saturation.
 
-Bind the ordered ports above, stops=[0,1], matching color_description, and
-explicit static parameters. colors=[[20,2,0],[80,4,1]], input=[0.5] gives [[50,3,0.5]].
-The example uses the default output unit; values carries only tensor structure and samples.
+## Acceptance
 
-Use the shared independent arithmetic oracle, per-profile/dtype/unit fixtures,
-multi-turn and large-angle cases, full versus sparse complete-color requests, unused remote rows, strides, low-budget failures, cancellation and
-owner-lifetime acceptance. Include source/destination precision mixing and finite huge hues.
-The implementation section links the constructor and shared arithmetic contract.
+With stops=[0,1], matching color_description and explicit static parameters: colors=[[20,2,0],[80,4,1]], input=[0.5] gives [[50,3,0.5]]. The example uses the default output unit; values carries only tensor structure and samples.
 
-## Maintained implementation and validation
-
-The public helper `color_ramp_oklch_pi_node` is declared in
-[`color_ramps.hpp`](../../../../plugins/ops/include/photospider/ops/numeric/color_ramps.hpp).
-`color_ramps.cpp` prepares immutable model/unit/profile state and executes the
-fixed CPU tile kernel. Original hue values use exact rational interpolation;
-Cross-unit conversion in either direction multiplies or divides by certified pi,
-with a 4096-bit precision ceiling. Same-unit RationalPi expressions cancel pi
-symbolically. Validate the Result path and numerical profile independently for each change. See the [family contract](CRV-06_color_ramp.md#maintained-implementation-and-validation)
-for the shared behavior and acceptance requirements.
+Acceptance also covers per-profile/dtype/unit fixtures, multi-turn and large-angle cases, unused remote rows and source/destination precision mixing. Include source/destination precision mixing and finite huge hues.

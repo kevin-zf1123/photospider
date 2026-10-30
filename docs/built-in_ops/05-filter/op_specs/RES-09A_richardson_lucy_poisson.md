@@ -17,15 +17,19 @@ oracle_scope: mathematical_reference
 
 Inherit the [RES-09 family contract](RES-09_contract.md), [FILTER common contract](FILTER_common_contract.md), [RES native floating-point contract](RES_native_contract.md), and [FMT](../../02-format-color/op_specs/FMT_common_contract.md).
 
-## Ports
+## Interface
+
+Operation key: `restoration.richardson_lucy_poisson`.
+
+### Ports
 
 `observation, psf, initial, background, mask` → independently requestable `estimate, unobserved`. `unobserved` is UInt8 and has the observation’s spatial shape. Inputs share H/W except explicitly broadcast scalar controls. This is a raw numerical operation; it does not infer color or alpha from channel count.
 
-## Required parameters and model domain
+### Parameters
 
 Require explicit `max_iterations>=0`, `y_axis`, `x_axis`, kernel `anchor_y`, `anchor_x`, `boundary∈{constant0,wrap}`, `broadcast_axes`, output dtype and output requests. This member’s epsilon is zero (fixed). Factories have no defaults, including for boundary, anchor, broadcast axes and output requests. PSF taps are nonnegative with positive native sum. Mask values lie in `[0,1]`; finite Poisson-model observation, estimate and background values must be nonnegative. The stated nonnegative numerical/model domains are unchecked caller premises. For NaN/Inf values, use native arithmetic propagation; do not blanket-reject them as finite-only data. Mask-zero taps set `r=+0` without reading observation.
 
-## Recurrence
+## Mathematics
 
 Normalize the PSF by native input-dtype division to define finite operator `A`; compute its actual transpose `Aᵀ` by scatter over the finite domains and native sensitivity `s=Aᵀm`. Do not infer the transpose by merely flipping the PSF. Initialize `x` from `initial` converted to main-input dtype `t`. Each full synchronous Jacobi step is:
 
@@ -36,21 +40,7 @@ Normalize the PSF by native input-dtype division to define finite operator `A`; 
 
 For RES-09A, epsilon is exactly zero: if the computed native denominator is zero, `y=0` gives `r=0`, while `y>0` is `InvalidDomain`. RES-09B has strictly positive epsilon and therefore does not take that zero-denominator branch. Use the same stored native sensitivity in each division; structural unobserved support follows the family contract independently of rounded sensitivity zeros. No flux renormalization is imposed per step. Do not clip output or replace negative values by zero. Zero steps produce an estimate bit-copy. No data-dependent early stop is permitted for these members.
 
-## Demand and resource behavior
-
-Estimate demand reads complete-input plane and full PSF. `unobserved`-only demand does not read observation/background/initial payload. An estimate-only zero-step request copies initial but still validates PSF/mask descriptors needed for the other requested output or preflight. Unrequested payload is not read. The output descriptor depends on input descriptors and static parameters.
-
-The direct algorithm costs `O(max_iterations*P*C*A)` and retains the finite `A` and `Aᵀ` plans plus native sensitivity and state buffers. Any FFT path must reproduce the finite operator and rounding stages, not use circular convolution. Budget work and memory; on insufficiency fail without spill, hidden approximation or partial publication. Cancellation and owner lifetime follow shared contracts.
-
-## Oracle and acceptance
-
-The oracle function `res09.restoration.rl(observation, psf, initial, background, mask, *, iterations=1, epsilon=0, anchor=(0,0), boundary="constant", dtype="float64", request_estimate=True, request_unobserved=True)` and `res09.restoration.forward_adjoint(...)` are in [res09/restoration.py](../../../../oracle/ops/filter/res09/restoration.py). Map the proposed `max_iterations` parameter to oracle argument `iterations`, and map the oracle tuple `anchor=(y,x)` from public `anchor_y` and `anchor_x`. Reference fixtures include: `rl_delta_one_step` (ExactRationalStaged), `rl_masked_nonfinite_observation` (ExactRationalStaged), `rl_true_adjoint_dot` (ExactRational), and `rl_zero_prediction_positive_observation` (ContractFixture). These fixtures cover the listed reference cases only; they do not prove runtime support or the full port/preflight contract. Also verify zero-step identity, mask-zero no-read behavior, exact adjoint, output-demand independence, boundary sensitivity, parameter errors, resource failure and cancellation. See [oracle README](../../../../oracle/ops/filter/README.md).
-
-The proposed native keys are unregistered and unimplemented; dtype-aware native acceptance follows RES_native_contract. No runtime or performance evidence is implied.
-
 ### Exceptional ratio branch
 
 Under the caller-supplied control/model premises, a zero mask excludes observation arithmetic.
-For a positive mask, a NaN observation or prediction propagates to a NaN ratio; it is neither the finite y=0 branch nor the finite y>0 no-solution branch. No NaN payload priority is promised. Valid finite zero denominators retain the explicit zero/positive
-observation rules above. Scalar fixtures are provided by `special.rl_ratio`;
-complete exceptional solver trajectories remain outside the finite-rational oracle.
+For a positive mask, a NaN observation or prediction propagates to a NaN ratio; it is neither the finite y=0 branch nor the finite y>0 no-solution branch. No NaN payload priority is promised. Valid finite zero denominators retain the explicit zero/positive observation rules above.

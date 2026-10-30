@@ -16,73 +16,24 @@ registered_operation_keys:
 
 # MASK-04D: CIEDE2000 color range
 
-Inherit [MASK-common](MASK_common_contract.md) and the
-[family contract](MASK-04_color_range_contract.md). Numerical rules follow
-01-numeric. This Proposed member is registered in the bundled strict CPU set
-through fixed invocation ABI 8.
+Inherits [MASK-common](MASK_common_contract.md) and the [family contract](MASK-04_color_range_contract.md).
 
-## Ports, parameters and output inference
+## Interface
 
-image: Float32/Float64 planar[C,H,W], target: Float64[3] -> values: Coverage[H,W]
-in the image dtype. channels selects one complete CIELAB group in l,a*,b* order.
-Required statics: channels; input_description; kL,kC,kH positive finite Float64; inner,outer
-finite Float64 with 0<=inner<=outer; curve linear|smoothstep. No raw mode or
-implicit color conversion. Target coordinates have the same effective Lab
-interpretation as the image; the native l coordinate is L*/100. Constructors
-recommend factors 1,1,1 but serialize them. Missing/irrelevant statics fail.
+Registered operation key: `mask.lab2000_range_strict`.
 
-## Exact formula and numerical stages
+image: Float32/Float64 planar[C,H,W], target: Float64[3] -> values: Coverage[H,W] in the image dtype. channels selects one complete CIELAB group in l,a*,b* order. Required statics: channels; input_description; kL,kC,kH positive finite Float64; inner,outer finite Float64 with 0<=inner<=outer; curve linear|smoothstep. No raw mode or implicit color conversion. Target coordinates have the same effective Lab interpretation as the image; the native l coordinate is L*/100. Constructors recommend factors 1,1,1 but serialize them. Missing or irrelevant statics are rejected.
 
-Use the CIEDE2000 equations (2)-(22) in [S26](../research-sources.md#s26).
-Interpret physical L* as exact 100*l without an intermediate rounding. Decimal
-formula constants (0.17, 0.24, 0.32, 0.20, 0.015, 0.045, and angle constants)
-are the exact stated rational values; pi and transcendental functions denote
-real mathematical values. Stored samples and parameters denote actual binary
-values. Use four-quadrant atan2 in degrees [0,360), with zero hue for zero
-adjusted chroma. If either adjusted chroma is zero, hue difference is zero and
-mean hue is the sum. Otherwise a difference of exactly +/-180 degrees takes
-the inclusive unwrapped branch; larger magnitudes wrap by 360. For the wrapped
-mean, sum<360 adds 360 and sum>=360 subtracts 360 before dividing by two.
-Signed zeros do not choose a different angular branch. Keep the rotation cross
-term R_T*(deltaC/(kC*S_C))*(deltaH/(kH*S_H)). No approximate epsilon replaces a
-branch predicate and no negative-roundoff clamping changes the real formula.
+## Mathematics
 
-Let d be that exact nonnegative distance. If inner=outer, return [d<=inner].
-Otherwise return 1 at d<=inner, +0 at d>=outer, and
-RN_T(1-F((d-inner)/(outer-inner))) inside. The distance is not first rounded to
-Float32/Float64. Identity colors have d=0. Model factors are unrelated to the
-statistical covariance regularization epsilon. Correctly rounded transcendental
-certification may refine; resource exhaustion fails rather than guessing.
+Use the CIEDE2000 equations (2)-(22) in [S26](../research-sources.md#s26). Interpret physical L* as exact 100*l without an intermediate rounding. Decimal formula constants (0.17, 0.24, 0.32, 0.20, 0.015, 0.045, and angle constants) are the exact stated rational values; pi and transcendental functions denote real mathematical values. Stored samples and parameters denote actual binary values. Use four-quadrant atan2 in degrees [0,360), with zero hue for zero adjusted chroma. If either adjusted chroma is zero, hue difference is zero and mean hue is the sum. Otherwise a difference of exactly +/-180 degrees takes the inclusive unwrapped branch; larger magnitudes wrap by 360. For the wrapped mean, sum<360 adds 360 and sum>=360 subtracts 360 before dividing by two. Signed zeros do not choose a different angular branch. Keep the rotation cross term R_T*(deltaC/(kC*S_C))*(deltaH/(kH*S_H)). No approximate epsilon replaces a branch predicate and no negative-roundoff clamping changes the real formula.
 
-## Demand, failures and verification
+Let d be that exact nonnegative distance. If inner=outer, return [d<=inner]. Otherwise return 1 at d<=inner, +0 at d>=outer, and RN_T(1-F((d-inner)/(outer-inner))) inside. The distance is not first rounded to Float32/Float64. Identity colors have d=0. Model factors are unrelated to the statistical covariance regularization epsilon.
 
-For nonempty output selection, mathematical support is the selected image
-components and complete target, lowered for complete output tiles to fixed
-input-tile reads. No unrelated alpha/AOV or whole-image statistics are required.
-Empty selection adds no payload work. Finite consumed coordinates are caller
-premises; unsupported or structurally inconsistent descriptions fail preparation.
-Refinement state and retained inputs are budgeted and cancellable. No native
-engine adapter or commercial compatibility is implied.
+## Behavior
 
-The MPFR interval oracle certifies the complete expression and exact branches;
-unresolved certification reports Uncertified under its bounded manual limit.
-Author decimal test data checks formula behavior only, not strict bits. Test
-zero chroma, +/-180 hue differences, mean-hue wrap, identical colors, finite
-non-unit factors, threshold equality, both dtypes, selected-channel demand,
-invalid structural parameters and low budgets. Invalid numerical-premise
-fixtures test oracle diagnostics only. Native acceptance requires a real public
-workflow and host-level read/resource/lifetime checks.
+For nonempty output selection, the output depends on the selected image components and the complete target. No unrelated alpha/AOV or whole-image statistics are required. Finite consumed coordinates are caller premises; unsupported or structurally inconsistent descriptions fail preparation, and `input_description` is required even for empty output selection. Every successful response is the RN_T result of the exact expression. No commercial compatibility is implied.
 
-Oracle entry: `lab2000_range` in [reference.py](../../../../oracle/ops/mask_morphology/mask04/reference.py).
+## Acceptance
 
-## Registered strict evaluation
-
-The CPU implementation uses exact rational branch predicates and directed
-intervals from 128 through 4096 bits. Exact identity, equal-chroma lightness
-distance and selected algebraic angular cases avoid undecidable interval ties.
-Every successful response is certified to the stated RN_T result. A bounded
-refinement can still fail to resolve another exact threshold or rounding tie;
-it returns OperationFailed with an algorithmic domain code instead of an
-approximate result. The implementation page records those codes and work limits.
-input_description is required even for empty output demand; missing or empty
-descriptions fail static preparation. A-C retain their separate raw-mode rules.
+Decimal test data checks formula behavior only, not strict bits. Cases: zero chroma, +/-180 degree hue differences, mean-hue wrap, identical colors (d=0), finite non-unit kL,kC,kH, threshold equality and both dtypes.

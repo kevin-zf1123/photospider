@@ -9,10 +9,7 @@ implementation_status: implemented
 
 # PTH-10: Stroke coverage and outlines
 
-Direct coverage targets the exact stroke union; polygonized outlines target a separate
-approximated object. Width0 is empty, not device hairline. Resolve self-overlap
-geometrically before coverage, not repeated source-over. Curved centerlines require
-explicit approximation for these polyline members.
+Direct coverage targets the exact stroke union; polygonized outlines target a separate approximated object. Width0 is empty, not device hairline. Resolve self-overlap geometrically before coverage, not repeated source-over. Curved centerlines require explicit approximation for these polyline members.
 
 ## Members
 
@@ -22,18 +19,6 @@ explicit approximation for these polyline members.
 | [PTH-10B](PTH-10B_stroke_variable_round_area.md) | stroke variable round area |
 | [PTH-10C](PTH-10C_stroke_outline_flatten.md) | stroke outline flatten |
 
-## Shared execution and numerical rules
+## Shared rules
 
-Inherit [GEN common](GEN_common_contract.md), and applicable
-[random](NOI_random_contract.md) and [path geometry](PTH_geometry_contract.md) rules.
-Members declare Regional, Halo or complete-input from actual mathematical dependencies,
-independently of static structure checks. GPU capability is member/backend-specific.
-Same version/profile means bit-identical output; numerical error, geometry error and
-topology guarantees are separate. Source associations are unchecked caller premises; producers preserve declared ownership and lifetime by construction.
-
-## Acceptance and implementation boundary
-
-Use member-specific independent fixtures plus actual public workflow execution. The
-[oracle coverage](../oracle-coverage.md) identifies finite exact helpers, Measured
-diagnostics and remaining unsupported cases. It cannot establish public schema support,
-GPU admission or complete domain certification. The CPU members and public authoring helpers are implemented. Finite arithmetic, refinement and capacity limits remain operational bounds; member-specific conservative topology proofs may reject unproven results. No GPU execution is registered for these members.
+Members inherit [GEN common](GEN_common_contract.md) and [PTH geometry](PTH_geometry_contract.md).

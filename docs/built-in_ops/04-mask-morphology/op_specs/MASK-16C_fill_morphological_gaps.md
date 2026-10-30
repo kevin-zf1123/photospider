@@ -18,71 +18,38 @@ implemented_template_names:
 
 # MASK-16C: Flood using a temporary morphology-closed boundary
 
-Inherit the complete [family contract](MASK-16_close_gap_contract.md) and
-[MASK-common](MASK_common_contract.md). This Proposed member is implemented as the public authoring
-function `ps::mask::fill_morphological_gaps` in `photospider/ops/mask/gap_fill.hpp`.
-The template appends closure, `mask.prepare_gap_fill_strict` and
-`mask.flood_barrier_strict` nodes, returning four independently exportable edges.
-Its template name is not a primitive registry key. Implementation:
-`plugins/ops/04-mask-morphology/gap_authoring.cpp` on branch `ops-impl`.
-The optional `max_work` guard defaults to INT64_MAX and is forwarded separately
-to every primitive; it is not a shared workflow-wide quota.
+Inherits the [family contract](MASK-16_close_gap_contract.md) and [MASK-common](MASK_common_contract.md).
 
-## Ports, parameters and output inference
+## Interface
+
+Authoring function: `ps::mask::fill_morphological_gaps` in `photospider/ops/mask/gap_fill.hpp`; workflow template name `mask.fill_morphological_gaps` (not a primitive registry key).
 
 barrier: Binary[H,W], seeds: Binary[H,W] -> fill, barrier, ignored_seeds, reopened_barrier: Binary[H,W]
 
-Required static parameters: MASK-05 footprint schema; fill_connectivity 4|8. Values and controls use the stated
-port order. Infer ordinary output dimensions from descriptors/statics only;
-Static Tensor capacities, payload counts and source-association rules, where relevant, are those of the family.
-No hidden default, conversion, color/alpha inference or optional port is added.
+Static parameters: MASK-05 footprint schema; fill_connectivity 4|8.
 
-## Mathematics and exact request behavior
+## Mathematics
 
-Filter S=seeds AND NOT original under the unchecked Binary premise. Prepare base closure T,
-then E=original OR (T AND NOT S); only newly added seed-site barriers are cleared. Empty S produces empty fill. Export E as barrier, seeds AND original as
-ignored_seeds, and T AND S as reopened_barrier.
+Filter S=seeds AND NOT original under the unchecked Binary premise. Prepare base closure T, then E=original OR (T AND NOT S); only newly added seed-site barriers are cleared. Empty S produces empty fill. Export E as barrier, seeds AND original as ignored_seeds, and T AND S as reopened_barrier.
 
 OR original with the full-lattice closing, then MASK-11C; no max-gap guarantee.
 
-complete-input barrier/seeds; pad/stage/crop preparation preserves the family closing. Empty Q adds no runtime payload work; static schema checks still apply.
-The family defines mathematical Data/Control support, border extension and
-rounding stages. Lower the selected complete output tiles to fixed input-tile
-reads, using a finite conservative superset for runtime-dependent addressing.
-There is no payload Validation read set or runtime dependency discovery.
+complete-input barrier/seeds; pad/stage/crop preparation preserves the family closing.
 
-## Implementation, resource and failure obligations
-
-Use the family reference algorithm and its stated work/scratch bounds. Strict
-CPU is the initial target; no implicit accelerated/GPU/third-party fallback is
-registered. Exact choices/copies stay exact; arithmetic uses the inherited
-rounding boundary and unchecked numerical premises. Account for output, scratch,
-exact state, retained source owners and all simultaneous intermediates. Poll
-inside long loops/refinement. Selected outputs of one call share its publication
-outcome; failure exposes no partial call Result. Already retired call exports
-remain valid. Preserve host upstream/cancellation/resource status and immutable
-owner lifetime.
-
-## Independent acceptance and conceptual workflow
+## Acceptance
 
 radius0 equals barrier flood after filtering original-barrier seeds; original-barrier seeds are ignored, newly added seed-site barriers reopen.
 
-Independent reference entry: `fill_morphological_gaps` in
-[`mask16/reference.py`](../../../../oracle/ops/mask_morphology/mask16/reference.py).
-Its small-image oracle and fixtures are not a production implementation and
-do not exercise kernel registration, resource accounting or compiled tile reads.
-Run the [suite commands](../../../../oracle/ops/mask_morphology/README.md),
-then add the relevant common fixed-tile support, valid special-value, static
-structural-parameter, dtype, correctly paired association, cancellation and
-owner-lifetime checks before implementation acceptance. Invalid payload or
-numerical-premise fixtures diagnose oracle requests only; they do not require
-production rejection.
+All four Binary outputs use the seeds floating dtype. The family fixes workflow export names and diagnostic-only request semantics.
 
-Conceptual DAG: explicit input preparation -> this member -> an explicit
-mask/measurement/image consumer appropriate to the listed output. A real
-Compiler/ExecutionContext workflow is still required after registration; this
-document does not invent a callable public API. Sources and compatibility
-limits are recorded in the family and [research notes](../research-sources.md).
+## Conceptual DAG
 
-All four Binary outputs use the seeds floating dtype. The family fixes
-workflow export names and diagnostic-only request semantics.
+```text
+barrier -> MASK-06 closing(footprint), OR original barrier -> T
+(barrier, T, seeds) -> mask.prepare_gap_fill_strict -> E (barrier), ignored_seeds, reopened_barrier, S
+(S, E, fill_connectivity) -> mask.flood_barrier_strict -> fill
+```
+
+## References
+
+Sources and compatibility limits are in the family contract and the [research notes](../research-sources.md).

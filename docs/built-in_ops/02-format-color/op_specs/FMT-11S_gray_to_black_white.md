@@ -15,44 +15,24 @@ proposed_template_names:
 
 # FMT-11S: Gray to binary Black/White
 
-Inherit the complete [family contract](FMT-11_model_conversion_contract.md),
-[normative mathematics](FMT-11_model_math.md) and
-[relative-coordinate scale](FMT_relative_coordinate_scale.md). The specification remains Proposed. This public helper appends the registered `mask.threshold_channel_<profile>` operation; there is no native color-model key for S.
+Inherits the [family contract](FMT-11_model_conversion_contract.md), [normative mathematics](FMT-11_model_math.md) and [relative-coordinate scale](FMT_relative_coordinate_scale.md). S is a public helper that appends the registered `mask.threshold_channel_<profile>` operation; there is no native color-model key for S.
 
-## Interface and output inference
+## Interface
 
-One Result containing a single Float32 or Float64 tensor produces one `values` Result containing a single tensor.
-Source: one explicitly described native Gray component. Target: binary Black/White; the caller retains Gray origin in configuration.
-Preserve shape, channel axis/count and slots; target roles follow the selected source role order.
-Unrelated groups, internal alpha and AOV samples pass through bit-for-bit.
-An explicit input_description selects the described path; otherwise use the
-family raw selector. The output carries no description.
-Member-specific statics: required finite Float64 threshold; no implicit .5.
-All explicit-description, source-consistency, algorithm and layout fields inherit the
-family; no missing semantic interpretation is inferred from sample magnitudes.
+One Result containing a single Float32 or Float64 tensor produces one `values` Result containing a single tensor. Source: one explicitly described native Gray component. Target: binary Black/White; the caller retains the Gray origin in its configuration. Shape, channel axis/count and slots are preserved. Unrelated groups, internal alpha and AOV samples pass through bit-for-bit. An explicit input_description selects the described path; otherwise the family raw selector applies. The output carries no description. `threshold` is a required finite Float64 in the native Gray unit, with no implicit 0.5.
 
-## Mathematics, sample support and errors
+## Mathematics
 
-Compile the hard `x >= threshold` comparison, the semantic finite-input precondition and exact typed 0/1 selection without attached metadata. Retain shape and slots. The helper appends the registered MASK channel-threshold operation.
+The hard comparison `x >= threshold` selects exact typed 1, otherwise +0. The finite-input precondition applies to semantic use; raw NaN compares false.
 
-Exact same-position support: selected Gray only; all other channels bypass.
-Take the union over every sample of each complete retained output tile, then close on the source grid. Static structure and explicit-configuration checks apply even to Empty/bypass-only requests.
-No halo, hidden-color skip, alpha validation or full-image scan is introduced.
-Strict evaluates the complete specified formula with its stated copy/selection
-exceptions; accelerated numerical rules, raw specials and errors inherit the
-family/math contract. The normalized Lab lightness is l=L*/100 wherever relevant.
-Semantic sample validity, finite rounded results and nonsingular semantic formulas are caller preconditions over complete retained output tiles. Fixed execution does not validate these numerical premises; operational errors retain the kernel category.
+## Behavior
 
-## Storage, resources and implementation identity
+Only the selected Gray is consumed; all other channels bypass. The operation materializes output and rejects forced view. Empty demand emits no payload. Integer packing stays in codecs.
 
-The helper appends the registered MASK threshold Result operation. The lowering target uses fixed invocation ABI 8. This operation materializes output and rejects forced view. Empty demand is stateless and publication is transactional.
+## Acceptance
 
-## Independent acceptance and conceptual workflow
+Gray l=[0.25,0.5,0.75], threshold=0.5 yields [0,1,1]. Semantic NaN is outside the caller precondition. Also cover both dtypes, signed zeros and threshold neighbors.
 
-Gray l=[0.25,0.5,0.75], threshold=0.5 yields [0,1,1]. Semantic NaN is outside the caller precondition; raw NaN compares false. Integer packing stays in codecs.
+## Conceptual DAG
 
-Also apply common mixed-region/component, dtype/profile, signed-zero, explicit-configuration,
-resource/cancellation and owner-lifetime acceptance where relevant. An independent
-formula oracle must use actual stored floating inputs, not ideal decimal inputs.
-The conceptual workflow is `Q -> S -> explicit FMT-06/codec if needed`. The installed public helper appends `mask.threshold_channel_<profile>` to a `WorkflowDocument`; Compiler and execution then evaluate that Result operation. Request selected color and bypass components separately to observe the declared support.
-Primary sources and their compatibility limits are linked in the math supplement.
+`Q -> S -> explicit FMT-06/codec if needed`

@@ -14,59 +14,30 @@ operation_keys:
 
 # PTH-01C: split subpaths
 
-Inherit [PTH-01](PTH-01_construction_contract.md), [GEN common](GEN_common_contract.md),
-and the applicable [random](NOI_random_contract.md) and
-[geometry](PTH_geometry_contract.md) contracts. A key includes algorithm version and profile; within one version/profile,
-output bits and discrete decisions are fixed.
+Inherits [PTH-01](PTH-01_construction_contract.md) and [GEN common](GEN_common_contract.md).
 
-## Interface and representation
+## Interface
 
-PathSet and group_of_subpath[K] Int64 Result Tensor member; flat PathSet plus associated
-PathPartition Result.
+Operation keys: `path.split_subpaths_v1_strict`.
+
+PathSet and group_of_subpath[K] Int64 Result Tensor member; flat PathSet plus associated PathPartition Result.
 
 The associated Result uses `photospider.ops.path_partition` v1 from the [shared geometry schema](PTH_geometry_contract.md). Payload validity is unchecked.
 
-## Parameters and domain
+### Parameters and domain
 
 Static group_count G>=1; group IDs in [0,G); preserve within-group order.
 
-## Mathematical specialization
+## Mathematics
 
-Stable-group subpaths into one flat Result; partition offsets have G+1 entries and
-represent empty groups. No dynamic output-port count or nested Result. Remap
-global-width/source associations rather than copying stale normalized coordinates.
+Stable-group subpaths into one flat Result; partition offsets have G+1 entries and represent empty groups. No dynamic output-port count or nested Result. Remap global-width/source associations rather than copying stale normalized coordinates.
 
-The v1 geometry schema contains no attached attribute members. These geometry-only
-ports do not consume separate width or source-map Results. Workflows carrying such
-Results must apply the association rules explicitly; selecting an attribute policy
-does not copy a separate Result implicitly.
+The v1 geometry schema contains no attached attribute members. These geometry-only ports do not consume separate width or source-map Results. Workflows carrying such Results must apply the association rules explicitly; selecting an attribute policy does not copy a separate Result implicitly.
 
-## Dependencies, resources and failures
+## Behavior
 
-Execution support: **complete input**. Lower the complete mathematical input
-support and required output member tiles into explicit tasks. Share global work
-through private intermediate Results and fixed dependencies. Required members
-publish on successful call retirement. Empty output selection performs static
-preparation without payload tasks; there is no runtime dependency discovery or
-dirty propagation.
+Support class: complete input.
 
-complete-input O(K+rows+G); charged permutation and same-snapshot associations.
-
-All output, scratch, indices, algorithmic work and retained owners are accounted. Poll
-cancellation in bounded loops. Preserve static structural failures and actual
-resource, cancellation, backend and upstream statuses. Member-specific no-solution,
-refinement or quality failures apply to valid inputs and the explicitly declared
-algorithm; numerical-premise violations have no prescribed runtime diagnostic.
-Never replace budget/cancellation failure with a lower-quality successful prefix. Views,
-lifetime and actual returned coverage inherit GEN-common.
-
-## Independent fixtures and acceptance
+## Acceptance
 
 groups1,0,1 yields source order1,0,2 and offsets0,1,3; empty group and valid group IDs.
-
-Check selected-tile/full-output equivalence, source-grid read closure, legal
-strides/offsets, separate/joint outputs, version/profile identity, low budgets, cancellation,
-associations and retained owners as applicable. The [oracle
-coverage](../oracle-coverage.md) describes the available finite reference subset; it is
-not runtime completion. No unverified GPU or third-party bit
-identity is implied by these requirements.

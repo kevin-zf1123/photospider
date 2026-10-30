@@ -15,71 +15,30 @@ proposed_operation_keys:
 
 # FMT-12A: ordinary ICC profile conversion
 
-Inherit the complete [FMT-12 family](FMT-12_icc_transform_contract.md), including
-the frozen Little CMS 2.19.1 CPU contract. The fixed ABI 8 CPU adapter is implemented; see [implementation, validation and performance](../FMT-12-13-18_implementation.md). Its decision status remains Proposed.
-It is not a native NUM strict/accelerated primitive.
+Inherits the [FMT-12 family](FMT-12_icc_transform_contract.md), including the frozen Little CMS 2.19.1 CPU contract. It is not a native NUM strict/accelerated primitive.
 
-## Interface and construction
+## Interface
 
-One `input` tensor produces same-dtype `values`. Select one complete color group
-using explicit input configuration, or explicit ordered slots in raw. Bind
-source_profile and destination_profile as immutable resources; both identities
-are explicit static parameters. An analytic
-source requires an explicit endpoint binding or interpretation change; a name
-such as sRGB does not identify arbitrary profile bytes.
+One `input` tensor produces same-dtype `values`. One complete color group is selected using the explicit input configuration, or explicit ordered slots in raw. source_profile and destination_profile are immutable resources; both identities are explicit static parameters. An analytic source requires an explicit endpoint binding or interpretation change; a name such as sRGB does not identify arbitrary profile bytes.
 
-Admit ICC v2/v4 input/display/output/color-space profiles with usable directions
-and Gray/RGB/CMYK/XYZ/Lab endpoint models. DeviceLink belongs to B, abstract
-intermediates to C. Set intent to one of the four standard intents, default
-relative_colorimetric, and requested bpc=off/on, default off. Absolute with on
-is invalid. Retain the pinned v4 perceptual/saturation BPC behavior and fixed
-adaptation=1.0. Record actual tag/matrix paths and admitted intent fallback.
+ICC v2/v4 input/display/output/color-space profiles with usable directions and Gray/RGB/CMYK/XYZ/Lab endpoint models are admitted. DeviceLink belongs to B, abstract intermediates to C. intent is one of the four standard intents, default relative_colorimetric; requested bpc is off/on, default off. Absolute with on is invalid. The pinned v4 perceptual/saturation BPC behavior and fixed adaptation=1.0 apply. Actual tag/matrix paths and admitted intent fallback are recorded.
 
-Construct an ordinary two-profile transform with source input and destination
-output directions. Profile tables, TRCs and engine PCS/media-white operations
-are part of this operation; do not predecode a profile's transfer through
-FMT-09 merely because it is encoded RGB. This would change the source device
-coordinates. Source/destination interpretations and resources must be explicit.
+An ordinary two-profile transform is constructed with source input and destination output directions. Profile tables, TRCs and engine PCS/media-white operations are part of this operation; a profile's transfer is not predecoded through FMT-09 merely because it is encoded RGB, as that would change the source device coordinates.
 
-execution defaults to optimized; reference is the separately fixed verification
-configuration. No automatic switch on resource failure or profile content is
-allowed. Identical source/destination profile bytes still execute this path.
+execution defaults to optimized; reference is the separately fixed verification configuration. There is no automatic switch on resource failure or profile content. Identical source/destination profile bytes still execute this path.
 
-## Samples, output and failures
+## Behavior
 
-Use the family's double planar formatters and explicit unit conversion/rounding.
-Preserve public Float32/Float64 dtype; it does not specify internal precision.
-Keep native normalized Lab lightness and CMYK ink units at public ports. Apply
-the family finite/range rules, including raw's finite-only engine boundary.
+The family's double planar formatters and explicit unit conversion/rounding apply. Public Float32/Float64 dtype is preserved; it does not specify internal precision. Native normalized Lab lightness and CMYK ink units are kept at public ports. The family finite/range rules apply, including raw's finite-only engine boundary.
 
-Same-count conversion retains ordered source slots. Different counts replace
-the source group at its smallest index with consecutive target components and
-remap alpha/AOVs. Callers pass destination profile-defined configuration or its compatible
-analytic binding explicitly to later consumers. No output carries a description. Images remain planar and straight.
+Same-count conversion retains ordered source slots. Different counts replace the source group at its smallest index with consecutive target components and remap alpha/AOVs. Callers pass destination profile-defined configuration or its compatible analytic binding explicitly to later consumers. No output carries a description. Images remain planar and straight.
 
-Any requested target color component depends on all source colors at that point;
-bypass depends only on its own source. Hidden color does not depend on alpha.
-Empty/bypass-only observations still require valid static parameters/resources.
-auto/materialize use requested output regions; forced view is invalid.
-Resource/cancellation and failure scope inherit the family without complete-input pixel
-scans or fallback copies.
+Any requested target color component depends on all source colors at that point; bypass depends only on its own source. Hidden color does not depend on alpha. Empty/bypass-only observations still require valid static parameters/resources. auto/materialize produce the requested output; forced view is invalid.
 
-## Acceptance and conceptual public workflow
+## Acceptance
 
-- Bind a fixed RGB source and CMYK destination with RGBA data. Output has CMYK
-  plus unchanged alpha. Verify group position, exact alpha bits and a direct-CMM
-  oracle under both execution settings. Reversing profiles need not recover RGB.
-- Use fixed profiles missing a dedicated relative intent table but supporting
-  the admitted fallback. Construction succeeds and records the actual path;
-  an unusable reverse direction fails instead of inventing an inverse.
-- Test requested bpc=off with v4 perceptual and verify the engine's effective
-  rule; absolute/on fails statically. Profile header intent does not replace A's
-  explicit/default intent.
-- Same-profile Float64 input is still evaluated, including formatter narrowing;
-  it must not bypass to an identity view. Unrequested alpha NaN does not fail
-  a color request; unrequested color NaN does not fail alpha-only observation.
-- Lab l=0.5 enters the formatter as L*=50; CMYK 0.5 enters as 50 percent.
-  Test independent unit fixtures and the family overflow/underflow boundary.
-
-Public resource helpers, executable operation usage, independent oracle commands
-and measured validation coverage are recorded in [implementation, validation and performance](../FMT-12-13-18_implementation.md).
+- A fixed RGB source and CMYK destination with RGBA data: output has CMYK plus unchanged alpha. Verify group position, exact alpha bits and a direct-CMM oracle under both execution settings. Reversing profiles need not recover RGB.
+- Fixed profiles missing a dedicated relative intent table but supporting the admitted fallback: construction succeeds and records the actual path; an unusable reverse direction fails instead of inventing an inverse.
+- Requested bpc=off with v4 perceptual follows the engine's effective rule; absolute/on fails statically. Profile header intent does not replace A's explicit/default intent.
+- Same-profile Float64 input is still evaluated, including formatter narrowing; it does not bypass to an identity view. Unrequested alpha NaN does not fail a color request; unrequested color NaN does not fail alpha-only observation.
+- Lab l=0.5 enters the formatter as L*=50; CMYK 0.5 enters as 50 percent. Independent unit fixtures cover the overflow/underflow boundary.

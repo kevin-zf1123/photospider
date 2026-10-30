@@ -2,8 +2,6 @@
 
 `LayerPixel`、`LayerResponsePixel`、`RawRgbaSumPixel`、contribution 和 weighted-sum 值类型及纯计算 helper 属于 `Photospider::ops_sdk`，公共头为 `photospider/ops/composite/layer.hpp`，实现位于 `plugins/ops/09-composite/layer.cpp`，详见[Layer runtime](../../kernel-architecture/Layer-Runtime.md)。当前没有 Layer operation factory 或 Layer Result schema helper；内核不识别或拒绝 Layer 专用 schema ID。工作空间与颜色解释由使用这些值的算子显式配置，不附着到 Result。本文 blend/group 设计保持 Proposed，不代表已注册。Raw mass、coverage alpha 与 averaging weight 含义不同，W=0 表示 OptionalLayer 无有效样本，关联下溢明确失败。
 
-已实现的基础子集、精确参数和 Region 见[基础算子实现](../../kernel-architecture/Basic-Operations.md)；未标注实现的扩展条目保持 Proposed。分类表中的建议参数不覆盖现有接口。
-
 状态 Proposed；标准数学模式为D1，商业兼容和图层组行为为D2。输入为前景S、背景B、可选mask/opacity，尺寸/工作空间先显式对齐。计算分为颜色混合函数与coverage合成，普通图像输出默认 linear straight alpha，内部 coverage 合成使用 premultiplied 工作值；选择编码域的艺术混合时必须另标空间。所有公式中S/B是unassociated颜色，a/b是有效前景/背景alpha。
 
 ## coverage 合成
@@ -81,9 +79,9 @@ Nuke 12.2的Merge公开文档给出negative/HDR特别分支、alpha masking开�
 
 图层组还需要isolation/pass-through、group opacity、clipping mask、knockout、holdout、blend-if等组合语义，列为D2。它们由宿主图层模型编译成明确DAG；不能把UI图层树隐式塞进单个blend函数。形状coverage、颜色alpha、图层opacity和填充不透明度是否独立必须由产品功能说明。
 
-## 实现、使用与验收
+## 使用与验收
 
-所有基础blend数学为O(HWC)、E，CPU SIMD/Metal适用；新通道和颜色转换需要G2，辅助mask需求按现有或新端口规则处理。常量与极值测试覆盖0/.5/1，dodge/burn特别覆盖(0,1)/(1,0)，multiply和screen中性元素，overlay与hardlight交换关系。
+基础 blend 数学为逐像素 E；新通道和颜色转换需要G2，辅助mask需求按现有或新端口规则处理。常量与极值测试覆盖0/.5/1，dodge/burn特别覆盖(0,1)/(1,0)，multiply和screen中性元素，overlay与hardlight交换关系。
 
 alpha测试对a/b各0,.5,1做解析矩阵；normal over不透明蓝的半透明红结果为(.5,0,.5,1)，透明源不影响背景。Lab模式测试目标L*或C*保持，超色域另报mapping引入偏差。dissolve要求ROI/whole/分块逐像素随机结果一致，并用大样本检查期望coverage，而非每小块恰好等于a。
 

@@ -16,28 +16,13 @@ implementation_status: implemented
 
 # NUM-04E: ln
 
-Numeric profile: strict retains the exact reference defined below. Floating
-arithmetic in accelerated profiles follows the shared
-[final FP32 four-ULP contract](NUM_accelerated_contract.md), including its
-range/fallback rules. Discrete results, copies, selected endpoints and special
-values remain exact.
+Numeric profile: strict is the exact reference defined below. Floating arithmetic in accelerated profiles follows the shared [final FP32 four-ULP contract](NUM_accelerated_contract.md). Discrete results, copies, selected endpoints and special values are exact. Inherits the [NUM baseline](NUM_common_contract.md) and the [NUM-04 unary contract](NUM-04_unary_contract.md); explicit rules below take precedence.
 
-Inherit the [NUM baseline](NUM_common_contract.md) for specification status,
-registration, shared execution and acceptance requirements; explicit rules below
-and in the named family contract take precedence.
+Computes the natural logarithm of each Float32/Float64 value, preserving shape and dtype. Accuracy requirements follow [exp](NUM-04D_exp.md); the formula and special-value table below replace exp's. There is no parameter, arbitrary-base mode or `log` alias. Integer conversion is explicit. Keys: `numeric.ln_strict`, `numeric.ln_accelerated_apple_silicon`, `numeric.ln_accelerated_x86_64`.
 
-Compute natural logarithm for Float32/Float64, preserving input shape/dtype.
-Inherit the [NUM-04 common interface and execution contract](NUM-04_unary_contract.md)
-and [exp's numerical-quality/fallback requirements](NUM-04D_exp.md), with exp's
-mathematical formula and special-value table replaced by those below. There
-is no parameter, arbitrary-base mode or `log` alias. Integer conversion is explicit.
+## Mathematics
 
-## Numeric semantics
-
-Strict positive finite results are RN_dtype(ln(exact(x))), directly rounded
-to the output dtype. Accelerated nonzero finite results may differ by at most
-four representable steps, but NaN/infinity/zero classification and sign match
-strict. Use a verified argument-domain fast path or strict fallback, with the same fixed-kernel diagnostic boundary as exp.
+Strict positive finite results are RN_dtype(ln(exact(x))), rounded directly to the output dtype. Accelerated nonzero finite results differ by at most four representable steps; NaN/infinity/zero classification and sign match strict.
 
 | Input | Output |
 | --- | --- |
@@ -48,33 +33,10 @@ strict. Use a verified argument-domain fast path or strict fallback, with the sa
 | +infinity | +infinity |
 | NaN | Quiet input NaN preserving payload and sign |
 
-Special-value classification precedes any comparison/conversion that could
-discard NaN bits. Do not use a domain epsilon around zero or one. Tiny positive
-subnormals are valid inputs and are not flushed to zero. Host floating flags
-and rounding environment are restored as specified by the common contract.
+There is no domain epsilon around zero or one. Tiny positive subnormals are valid inputs and are not flushed to zero.
 
-## Algorithm and acceptance differences
+## Acceptance
 
-Strict implementation must establish destination correct rounding for the
-mathematical natural log, with high-precision/directed-bound refinement or a
-proved correctly rounded implementation. Near one, cancellation-sensitive
-algorithms cannot replace a missing rounding proof with a small absolute error.
-Accelerated argument ranges, constants/library versions and fallback predicates
-must be explicit. Use preallocated scratch with cancellation points inside long refinement. Checkpoints do not debit a dynamic sample-work budget.
+ln(1)=+0, both signed zeros -> -Inf, negative finite and -Inf -> canonical NaN, +Inf unchanged, signed NaN payloads, smallest positive subnormal, powers of two, neighbors immediately above and below one, and large positive finite inputs. Strict compares bits; accelerated compares ULP distance plus exact classification. A negative sample outside the requested region does not affect other outputs.
 
-Test ln(1)=+0, both signed zeros -> -Inf, negative finite/-Inf -> canonical NaN,
-+Inf unchanged, signed NaN payloads, smallest positive subnormal, powers of two,
-neighbors immediately above/below one, and large positive finite inputs. Resolve
-oracle rounding independently; strict compares bits and accelerated compares
-ULP distance plus exact classification. Apply common ROI/fixed-read/
-resource/ownership tests, including an unrequested negative sample.
-
-Conceptual public fixture: bind `[1,+0,-0,-1,+Inf]`, compile one selected ln
-key and request values -> `[+0,-Inf,-Inf,canonical_NaN,+Inf]`. This target is
-the maintained public run command is documented below; local timing is recorded in the implementation notes.
-
-## Maintained implementation and validation
-
-This operation is registered in `plugins/ops/01-numeric/numeric_unary.cpp` and
-exposed through `photospider/ops/numeric/unary.hpp`. It uses one fixed CPU invocation per selected output tile, validated input views and preallocated output/scratch. Its numerical path follows
-[the shared implementation notes](../math-implementation.md).
+Fixture: `[1,+0,-0,-1,+Inf]` gives `[+0,-Inf,-Inf,canonical_NaN,+Inf]`.

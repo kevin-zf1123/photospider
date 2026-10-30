@@ -15,50 +15,23 @@ proposed_operation_keys:
 
 # FMT-13B: configured display and view
 
-Inherit the complete [FMT-13 family](FMT-13_ocio_transform_contract.md).
-One native engine invocation applies a declared display/view route, with no
-implicit second FMT-15 tone/view pass. The CPU implementation is available; the decision status remains Proposed. See [implementation, validation and performance](../FMT-12-13-18_implementation.md).
+Inherits the [FMT-13 family](FMT-13_ocio_transform_contract.md). One engine invocation applies a declared display/view route, with no second FMT-15 tone/view pass.
 
-## Interface and selected route
+## Interface
 
-One `input` tensor produces same-dtype/shape `values`. Require frozen config,
-context, exact source_space selector and exact display/view names. Construct
-DisplayViewTransform in direction=forward by default; inverse consumes the
-declared view output interpretation and returns the source interpretation.
-The existence of an inverse processor does not recover clipped or rendered data.
+One `input` tensor produces same-dtype/shape `values`. Frozen config, context, exact source_space selector and exact display/view names are required. DisplayViewTransform is constructed in direction=forward by default; inverse consumes the declared view output interpretation and returns the source interpretation. An inverse processor does not recover clipped or rendered data.
 
-looks_bypass=false by default executes the view's configured Looks and admitted
-compile-time candidates; true skips those Looks and participates in identity.
-Additional user Looks compose explicitly using C. data_bypass=true by default
-is independently selectable; semantic isData endpoints remain forbidden.
-Do not choose a default display/view, invoke monitor detection, instantiate a
-virtual display from the current screen, or use viewing-rule menus to guess
-the requested route. An unresolved display/view fails.
+looks_bypass=false by default executes the view's configured Looks and admitted compile-time candidates; true skips those Looks. Additional user Looks compose explicitly using C. data_bypass=true by default is independently selectable; semantic isData endpoints remain forbidden. No default display/view is chosen, no monitor is detected, no virtual display is instantiated from the current screen, and viewing-rule menus are not consulted. An unresolved display/view fails.
 
-The selected DisplayViewTransform explicitly authorizes its configured view
-conversion. Additional implicit bridges inside color-space/Look dependencies
-still obey reference_bridge. Config view transforms, display color-space paths
-and Looks may all contribute; this is not a display matrix-only operation.
-Record the effective route and actual output color space. Keep view provenance
-separate from endpoint units and color-space identity.
+The selected DisplayViewTransform authorizes its configured view conversion. Additional implicit bridges inside color-space/Look dependencies still obey reference_bridge. Config view transforms, display color-space paths and Looks may all contribute; this is not a display matrix-only operation. The effective route and actual output color space are recorded. View provenance is separate from endpoint units and color-space identity.
 
-## Samples, demand and acceptance
+## Behavior
 
-Inherit one triple, unchanged slots, F32 engine boundary, finite-only raw,
-alpha-effect admission, exact point/group demand, materialization and all host
-integration prerequisites. Public alpha is never passed to the engine.
+One triple, unchanged slots, the F32 engine boundary, finite-only raw, alpha-effect admission and exact point/group demand apply as in the family. Public alpha is never passed to the engine.
 
-- Fix a scene-space/view/display config with a nontrivial view plus optional
-  Look. Verify enabled/bypassed Looks separately against direct engine results.
-- Reject omitted/missing display/view and semantic data endpoints. Changing the
-  host monitor or active-display environment does not alter a frozen invocation.
-- Reverse an explicitly invertible simple view with known expected coordinates;
-  separately test an inverse unavailable to the engine and a lossy view without
-  promising perfect round-trip recovery.
-- Ensure no additional project tone map or FMT-09 transfer is added after the
-  config already produces the desired display encoding. Verify alpha-only and
-  hidden-color requests, both public dtypes, cross-tile regions and point-oracle
-  agreement under reference/optimized.
+## Acceptance
 
-Public resource helpers, executable operation usage, independent oracle commands
-and measured validation coverage are recorded in [implementation, validation and performance](../FMT-12-13-18_implementation.md).
+- A scene-space/view/display config with a nontrivial view plus optional Look: enabled/bypassed Looks are verified separately against direct engine results.
+- Omitted/missing display/view and semantic data endpoints are rejected. Changing the host monitor or active-display environment does not alter a frozen invocation.
+- An explicitly invertible simple view reverses with known expected coordinates; an inverse unavailable to the engine and a lossy view are tested separately, without promising perfect round-trip recovery.
+- No additional tone map or FMT-09 transfer is added after the config already produces the desired display encoding. Alpha-only and hidden-color requests, both public dtypes, cross-tile regions and point-oracle agreement under reference/optimized.

@@ -12,57 +12,36 @@ clarification_status: resolved
 
 # PTH-05B: width profile pchip
 
-Inherit [PTH-05](PTH-05_width_profiles_contract.md), [GEN
-common](GEN_common_contract.md), and the applicable [random](NOI_random_contract.md) and
-[geometry](PTH_geometry_contract.md) contracts. A key includes algorithm version and profile; within one version/profile,
-output bits and discrete decisions are fixed.
+Inherits [PTH-05](PTH-05_width_profiles_contract.md) and [GEN common](GEN_common_contract.md).
 
-## Interface and representation
+## Interface
 
 Ports and width domains as PTH-05A; values[N].
 
-## Parameters and domain
+### Parameters and domain
 
 Same unchecked domain premises; PCHIP slopes and short-table behavior inherit CRV-01B.
 
-## Mathematical specialization
+Public SDK helper, declared in `photospider/ops/generation.hpp`:
 
-Explicitly publish NUM-computed u=s/L or s (zero length0), then evaluate CRV-01B.
-Preserve this intermediate RN difference from A's direct expression. Shape preservation
-needs no post-hoc max(0,w).
+```cpp
+Result<WorkflowNodeOutput> ps::generation::width_profile_pchip(
+    WorkflowDocument* document, WorkflowInput s, WorkflowInput source_length,
+    WorkflowInput stops, WorkflowInput widths,
+    std::string domain = "subpath_normalized_arclength",
+    ElementType output_type = ElementType::Float64);
+```
 
-## Runtime implementation
+`s` is Float64 `[N]`; `source_length` is Float64 `[1]` or `[N]`. Both already refer to the selected source domain (after any caller-owned source mapping). The helper publishes query operands through `path.width_query_operands_v1_strict` (a zero length yields operands 0/1), performs an explicit NUM division that publishes RN64 u, then invokes the CRV-01B PCHIP workflow. `stops` and `widths` may use either floating dtype. There is no PTH-05B operation key.
 
-The public C++ authoring helper is `generation::width_profile_pchip` in `photospider/ops/generation.hpp`. It publishes query operands through `path.width_query_operands_v1_strict`, performs the explicit NUM division stage, and invokes the CRV PCHIP workflow. The zero-length query is constructed as 0/1. There is no monolithic PTH-05B runtime key; the public workflow retains the specified intermediate rounding.
+## Mathematics
 
-## Dependencies, resources and failures
+Explicitly publish NUM-computed u=s/L or s (zero length0), then evaluate CRV-01B. Preserve this intermediate RN difference from A's direct expression. Shape preservation needs no post-hoc max(0,w).
 
-Execution support: **Regional**. Lower each selected complete output tile to
-fixed tasks with explicit query/sample and control-member tile reads. Close each
-read on its source grid; payload validity over the consumed support is a caller
-premise. Empty output selection performs static preparation without payload tasks.
-Shared computation uses explicit task dependencies and private intermediate
-Results under GEN-common.
+## Behavior
 
-Regional query target with actual composed producer demands; full controls and slope
-scratch charged.
+Support class: Regional. Each query depends on the complete profile controls.
 
-All output, scratch, indices, algorithmic work and retained owners are accounted. Poll
-cancellation in bounded loops. Preserve static structural failures and actual
-resource, cancellation, backend and upstream statuses. Member-specific no-solution,
-refinement or quality failures apply to valid inputs and the explicitly declared
-algorithm; numerical-premise violations have no prescribed runtime diagnostic.
-Never replace budget/cancellation failure with a lower-quality successful prefix. Views,
-lifetime and actual returned coverage inherit GEN-common.
+## Acceptance
 
-## Independent fixtures and acceptance
-
-Nonmonotone nonnegative widths, endpoint hits, short-table linear reduction and per-node
-rounding agreement.
-
-Check selected-tile/full-output equivalence, source-grid read closure, legal
-strides/offsets, separate/joint outputs, version/profile identity, low budgets, cancellation,
-associations and retained owners as applicable. The [oracle
-coverage](../oracle-coverage.md) describes the available finite reference subset; it is
-not runtime completion. The registered CPU implementation uses the bounded algorithms and failure rules specified here. No unverified GPU or third-party bit
-identity is implied by these requirements.
+Nonmonotone nonnegative widths, endpoint hits, short-table linear reduction and per-node rounding agreement.

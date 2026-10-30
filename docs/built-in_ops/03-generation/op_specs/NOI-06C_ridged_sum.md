@@ -16,53 +16,26 @@ operation_keys:
 
 # NOI-06C: ridged sum
 
-Inherit [NOI-06](NOI-06_fractal_contract.md), [GEN common](GEN_common_contract.md), and
-the applicable [random](NOI_random_contract.md) and [geometry](PTH_geometry_contract.md)
-contracts. A key includes algorithm version
-and profile; within one version/profile, output bits and discrete decisions are fixed.
+Inherits [NOI-06](NOI-06_fractal_contract.md) and [GEN common](GEN_common_contract.md).
 
-## Interface and representation
+## Interface
+
+Operation keys: `noise.ridged_sum_v1_strict`, `noise.ridged_sum_v1_accelerated_apple_silicon`, `noise.ridged_sum_v1_accelerated_x86_64`.
 
 Same ports as NOI-06A.
 
-## Parameters and domain
+### Parameters and domain
 
 Same parameters and unchecked premises as NOI-06A.
 
-## Mathematical specialization
+## Mathematics
 
-Inherit the complete exact octave coordinates, amplitudes, denominator and
-zero-amplitude elimination of NOI-06A, replacing only term_i with (1-abs(n_i)/2)^2 under
-the base bound abs(n_i)<=2. No recursive feedback weighting. Complete octave sum has one
-final RN.
+Inherit the complete exact octave coordinates, amplitudes, denominator and zero-amplitude elimination of NOI-06A, replacing only term_i with (1-abs(n_i)/2)^2 under the base bound abs(n_i)<=2. No recursive feedback weighting. Complete octave sum has one final RN.
 
-## Dependencies, resources and failures
+## Behavior
 
-Execution support: **Regional**. Lower each selected complete output tile to
-fixed tasks with explicit query/sample and control-member tile reads. Close each
-read on its source grid; payload validity over the consumed support is a caller
-premise. Empty output selection performs static preparation without payload tasks.
-Shared computation uses explicit task dependencies and private intermediate
-Results under GEN-common.
+Support class: Regional.
 
-Same dependency and resource rules as NOI-06A.
+## Acceptance
 
-All output, scratch, indices, algorithmic work and retained owners are accounted. Poll
-cancellation in bounded loops. Preserve static structural failures and actual
-resource, cancellation, backend and upstream statuses. Member-specific no-solution,
-refinement or quality failures apply to valid inputs and the explicitly declared
-algorithm; numerical-premise violations have no prescribed runtime diagnostic.
-Never replace budget/cancellation failure with a lower-quality successful prefix. Views,
-lifetime and actual returned coverage inherit GEN-common.
-
-## Independent fixtures and acceptance
-
-Amplitude-normalized output in [0,1]; zero base terms give 1; no identity with other
-ridged-multifractal software.
-
-Check selected-tile/full-output equivalence, source-grid read closure, legal
-strides/offsets, separate/joint outputs, version/profile identity, low budgets, cancellation,
-associations and retained owners as applicable. The [oracle
-coverage](../oracle-coverage.md) describes the available finite reference subset; it is
-not runtime completion. No unverified GPU or third-party bit
-identity is implied by these requirements.
+Amplitude-normalized output in [0,1]; zero base terms give 1; no identity with other ridged-multifractal software.

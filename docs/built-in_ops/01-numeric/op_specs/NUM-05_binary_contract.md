@@ -10,27 +10,11 @@ implementation_status: implemented
 
 # NUM-05: shared binary contract
 
-Numeric profile: strict retains the exact reference defined below. Floating
-arithmetic in accelerated profiles follows the shared
-[final FP32 four-ULP contract](NUM_accelerated_contract.md), including its
-range/fallback rules. Discrete results, copies, selected endpoints and special
-values remain exact.
+Numeric profile: strict is the exact reference defined by each operation. Floating arithmetic in accelerated profiles follows the shared [final FP32 four-ULP contract](NUM_accelerated_contract.md). Discrete results, copies, selected endpoints and special values are exact.
 
-Inherit the [NUM baseline](NUM_common_contract.md) for specification status,
-registration, shared execution and acceptance requirements; explicit rules below
-and in the named family contract take precedence.
+Inherit the [NUM baseline](NUM_common_contract.md) for registration and shared requirements; explicit rules below and in the named family contract take precedence.
 
-The selected independent operations are add, subtract, multiply, divide,
-minimum, maximum, pow, atan2 and atan2pi. Each receives strict, Apple Silicon CPU
-accelerated and x86-64 CPU accelerated keys under the common NUM version rule.
-There is no generic function-mode dispatcher.
-
-Both inputs must have exactly the same full sample shape and dtype; output
-shape is preserved as ordinary sample axes. Use explicit broadcast and cast
-operations for shape/type adaptation. The operator-specific files decide
-supported dtypes and output dtype, mathematical rules, integer overflow and
-any permitted accelerated approximation. These specifications remain Proposed;
-that status is independent of implementation status.
+The independent operations are add, subtract, multiply, divide, minimum, maximum, pow, atan2 and atan2pi. Each has strict, Apple Silicon CPU accelerated and x86-64 CPU accelerated keys. There is no generic function-mode dispatcher.
 
 | Spec | Supported dtypes | Accelerated quality |
 | --- | --- | --- |
@@ -44,60 +28,24 @@ that status is independent of implementation status.
 | [NUM-05H atan2](NUM-05H_atan2.md) | Float32/64 | <=4 ULP; exact special directions |
 | [NUM-05I atan2pi](NUM-05I_atan2pi.md) | Float32/64 | <=4 ULP; exact special directions |
 
-## Selected floating and operand policy
+## Interface
 
-Floating operations follow NUM-04's IEEE-like result policy: domain errors,
-division by zero and floating overflow produce specified NaN/infinity outputs
-as successful observations. Both operands at the requested coordinate are read
-through fixed views, including cases where a special numeric identity determines the
-result. No implicit short-circuit changes upstream failure/data obligations.
+Each operation has named inputs `a`, `b` and output `values`; atan2/atan2pi use `y` and `x` in that order. Each bound input Result contains exactly one tensor member in slot 0; the Result schema IDs may differ. Input rank is 1..8, extents are positive, and the full sample shapes and dtypes of both inputs match. Use explicit broadcast and cast operations for shape/type adaptation. The `values` output is a Result using schema `photospider.tensor`, tensor key `samples`, the complete input sample shape as ordinary axes, and no attached domain description; output batch topology is dropped. No implicit broadcast, cast or unit inference occurs.
 
-Normally propagate the sole input NaN, or the first input when both are NaN,
-preserving its payload/sign and setting the quiet bit. This priority applies
-regardless of which NaN was signaling. A newly generated NaN uses the fixed
-positive quiet pattern specified by NUM-04. Pow special rules are stated in its
-individual file and override only their
-explicitly stated cases. Minimum/maximum retain this NaN priority.
+Unsupported dtype, mismatched shape and invalid static parameters are rejected before numeric reads. The operator-specific files define supported dtypes, output dtype, mathematical rules, integer overflow and any permitted accelerated approximation.
 
-Confirmed operator-specific decisions:
+## Floating and operand policy
 
-- Add/subtract/multiply support all four dtypes and preserve dtype. Floating
-  results are correctly rounded to that dtype; integer exact results outside
-  UInt8/Int64 violate an unchecked caller precondition; no wrap, saturation or implicit promotion is specified.
-- Divide supports Float32/Float64 only, preserving dtype. Integer conversion is
-  explicit; there is no implicit integer quotient mode.
-- Minimum/maximum support all four dtypes and preserve dtype, with bitwise
-  equivalent profiles. Mixed signed zeros choose -0 for minimum and +0 for
-  maximum; same-sign zeros retain that sign. They propagate an input NaN. If both
-  inputs are NaN, quiet and
-  preserve the first input's payload/sign, following the common priority.
+Floating operations follow NUM-04's IEEE-like result policy: domain errors, division by zero and floating overflow produce specified NaN/infinity outputs as successful observations. Both operands at the requested coordinate are read, including when a special numeric identity determines the result; no short-circuit changes upstream failure or data obligations.
 
-## Interface, demand and execution
+The sole input NaN, or the first input when both are NaN, propagates with its payload and sign, with the quiet bit set. This priority applies regardless of which NaN was signaling. A newly generated NaN uses the fixed positive quiet pattern specified by NUM-04. Pow special rules are stated in its file and override only their stated cases. Minimum/maximum keep this NaN priority.
 
-Each operation has named inputs `a`, `b` and output `values`, except atan2/atan2pi
-use `y` and `x` in that order. Each bound input Result contains exactly one
-tensor member in slot 0. The Result schema IDs may
-differ. Input rank is 1..8, extents are positive, and the full sample shapes
-and dtypes match. Structural input validation occurs before issue. The `values` output is a Result using schema `photospider.tensor`,
-tensor key `samples`, the complete input sample shape as ordinary axes, and
-no attached domain description. Output batch topology is dropped. No implicit broadcast, cast or
-unit inference occurs.
+- Add/subtract/multiply support all four dtypes and preserve dtype. Floating results are correctly rounded to that dtype. Integer exact results outside the dtype range violate an unchecked caller precondition; no wrap, saturation or implicit promotion is specified.
+- Divide supports Float32/Float64 only, preserving dtype. Integer conversion is explicit; there is no integer quotient mode.
+- Minimum/maximum support all four dtypes and preserve dtype, with bitwise equivalent profiles. Mixed signed zeros give -0 for minimum and +0 for maximum; same-sign zeros keep that sign.
 
-Compilation rejects unsupported dtype, mismatched shape and invalid static parameters before numeric reads. Each selected output tile lowers to one CPU task with the intersecting tiles of both inputs. Prepare validates the fixed signature and scratch. The invocation borrows admitted affine views, computes only the selected output tile and writes into its separate preallocated dense allocation. Empty selection emits no tasks or payload reads. Special numeric identities preserve both declared input dependencies.
+Integer results must fit the destination dtype as an unchecked caller precondition.
 
-Integer results must fit the destination dtype as an unchecked caller precondition. Floating NaN/infinity/domain-result rules remain specified successful outcomes. Operational failure releases unpublished output after accepted callbacks return. Successful Result owners survive context lifetime. Scratch contains fixed arithmetic state and bounded batch buffers; no dynamic per-sample work charge is applied. Cancellation is queried before each 64-sample batch and inside long refinement. See [fixed mathematical execution](../point-math-execution.md).
+## Acceptance
 
-Acceptance uses independent exact integer/rational or high-precision references. Exercise supported dtypes, special bits, signed strides, sparse/empty selections, exact fixed dependencies, concurrent Runs, malformed task signatures and resource/cancellation cleanup.
-
-## Maintained implementation
-
-All 27 keys are registered by `plugins/ops/01-numeric/numeric_binary.cpp`,
-with independently named constructors in `photospider/ops/numeric/binary.hpp`.
-The shared fixed invocation implementation declares both input tile sets, including when a numeric identity determines a result. Floating elementary operations
-use controlled correctly rounded hardware arithmetic after exact special-value
-classification, with exact fallback; integer operations retain checked exact
-arithmetic. Accelerated ordinary positive-base power and angle results use
-SLEEF binary64 enclosures within the shared admitted ranges. `atan2pi` divides
-an angle enclosure by an enclosed pi. Rejected candidates use the certified
-strict backend. See [math implementation](../math-implementation.md) for
-rounding, fixed scratch admission, cancellation and unresolved-refinement limits.
+Compare against exact integer/rational or high-precision references. Cases: supported dtypes, special bits, signed zeros and NaN payloads.

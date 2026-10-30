@@ -15,70 +15,30 @@ proposed_operation_keys:
 
 # FMT-12C: execute an ordered ICC profile chain
 
-Inherit the complete [FMT-12 family](FMT-12_icc_transform_contract.md). C is one
-native external-engine transform, not a composition of rounded A outputs.
-The CPU adapter is implemented; the specification remains Proposed. See [implementation, validation and performance](../FMT-12-13-18_implementation.md).
+Inherits the [FMT-12 family](FMT-12_icc_transform_contract.md). C is one external-engine transform, not a composition of rounded A outputs.
 
-## Static chain and ports
+## Interface
 
-One `input` tensor produces same-dtype `values`. Supply 2..255 immutable stages
-with profile identity, declared direction and applicable intent/BPC. Resolve
-whole-chain defaults into per-stage records before constructing the transform.
-Ordinary stages use device_to_pcs or pcs_to_device; abstract/DeviceLink stages
-use forward. Abstract stages are internal PCS positions only. Check each actual
-engine direction and adjacent signature; declared directions are not commands
-to invert an unavailable table.
+One `input` tensor produces same-dtype `values`. 2..255 immutable stages are supplied, each with profile identity, declared direction and applicable intent/BPC. Whole-chain defaults resolve into per-stage records before the transform is constructed. Ordinary stages use device_to_pcs or pcs_to_device; abstract/DeviceLink stages use forward. Abstract stages are internal PCS positions only. Each actual engine direction and adjacent signature is checked; declared directions do not command inversion of an unavailable table.
 
-Ordinary/abstract intent defaults to relative_colorimetric, applicable bpc to off, under
-the pinned effective rules. DeviceLink instead takes header intent and rejects
-user intent/BPC/adaptation overrides. Ordinary device_to_pcs has no BPC field;
-its internal API slot is not_applicable. complete-input-chain BPC defaults apply only
-to actual PCS-connection controls, as specified in the family. Use fixed
-adaptation=1.0 where applicable.
-No optional acceleration or custom intent plugins are loaded. A chain is not
-valid merely because every element can be parsed individually.
+Ordinary/abstract intent defaults to relative_colorimetric, applicable bpc to off, under the pinned effective rules. DeviceLink takes its header intent and rejects user intent/BPC/adaptation overrides. Ordinary device_to_pcs has no BPC field; its effective BPC is not_applicable. Whole-chain BPC defaults apply only to actual PCS-connection controls, as in the family. Adaptation is fixed at 1.0 where applicable. No acceleration or custom intent plugins are loaded. A chain is not valid merely because every element parses individually.
 
-The first and last ordinary profiles can establish entry/exit interpretation
-when used in corresponding input/output directions. Otherwise require complete
-explicit endpoint declarations, as for B. Preserve owned endpoint bindings.
-Raw provides all numerical endpoint/slot parameters explicitly without claiming
-that the result has a newly validated semantic target.
+The first and last ordinary profiles establish entry/exit interpretation when used in corresponding input/output directions. Otherwise complete explicit endpoint declarations are required, as for B. Raw provides all numerical endpoint/slot parameters explicitly without claiming a newly validated semantic target.
 
-## Execution and publication
+The public icc_chain authoring helper seals the ordered stage list and bytes. It performs no CMM construction; the operation performs full validation and construction.
 
-Construct through the pinned extended-transform path using explicit stage
-arrays. Record stages, directions, effective settings, actual tags/fallbacks
-and inserted PCS bridges. Engine linking/pre-optimization remain observable
-parts of this contract; there is no tensor rounding between stages.
-execution=optimized is default; reference preserves its own fixed flags.
+## Behavior
 
-Public unit conversion occurs only at the chain's endpoints. Apply no extra
-project l/L* or CMYK scaling to an internal PCS/DeviceLink connection, which is
-already in the engine pipeline convention. Float32 intermediate stages and
-engine CLUT paths retain their actual arithmetic even with Float64 ports.
+The transform is constructed through the pinned extended-transform path using explicit stage arrays. Stages, directions, effective settings, actual tags/fallbacks and inserted PCS bridges are recorded. Engine linking/pre-optimization are part of this contract; there is no tensor rounding between stages. execution=optimized is default; reference uses its own fixed flags.
 
-Use family group replacement, planar materialization, point/group support,
-finite raw boundary and semantic sample constraints. Alpha/AOVs remain external
-to the CMM and bit-preserving. Required construction failures are static even
-for bypass-only requests; actual runtime engine failures follow the required execution support; sample domains are unchecked.
+Public unit conversion occurs only at the chain's endpoints. No project l/L* or CMYK scaling applies to an internal PCS/DeviceLink connection, which uses the engine pipeline convention. Float32 intermediate stages and engine CLUT paths retain their actual arithmetic even with Float64 ports.
 
-## Acceptance and conceptual workflow
+Group replacement, planar materialization, point/group support, finite raw boundary and semantic sample constraints follow the family. Alpha/AOVs remain external to the CMM and bit-preserving. Construction failures are static even for bypass-only requests.
 
-- A two-ordinary-profile chain with identical settings matches the corresponding
-  direct-CMM extended path. Check equivalence with A only where the exact engine
-  construction/settings establish it, not by assumption.
-- Build source RGB device_to_pcs -> abstract PCS -> destination CMYK pcs_to_device.
-  Verify explicit directions and recorded PCS bridges; swapping incompatible
-  elements or requesting an unsupported direction fails construction.
-- Include an intermediate or endpoint DeviceLink, verifying header intent and
-  required explicit endpoint descriptions. Reject abstract endpoints and
-  inapplicable per-link controls.
-- Fix a chain where one-engine execution differs from separate tensor stages.
-  Compare each to its own reference; the compiler must not split C or merge
-  separate A nodes into C without proving all observable behavior equivalent.
-- Exercise two and 255 stages, checked rejection of 0/1/256, low construction
-  work/capacity budgets, latched internal failure and bounded pixel-execution cancellation.
+## Acceptance
 
-The public icc_chain authoring helper seals the ordered stage list and bytes.
-It does no CMM construction; the registered operation performs full validation
-and construction. See [implementation, validation and performance](../FMT-12-13-18_implementation.md) for runnable usage and measured corpus coverage.
+- A two-ordinary-profile chain with identical settings matches the corresponding direct-CMM extended path. Equivalence with A holds only where the exact engine construction/settings establish it.
+- Source RGB device_to_pcs -> abstract PCS -> destination CMYK pcs_to_device: explicit directions and recorded PCS bridges; swapping incompatible elements or requesting an unsupported direction fails construction.
+- An intermediate or endpoint DeviceLink: header intent and required explicit endpoint descriptions. Abstract endpoints and inapplicable per-link controls are rejected.
+- A chain where one-engine execution differs from separate tensor stages; each is compared to its own reference. C is never split, nor separate A nodes merged into C, without proving equivalent observable behavior.
+- Two and 255 stages; 0/1/256 are rejected.

@@ -22,7 +22,7 @@ All profiles in this document use [RES native floating-point arithmetic](RES_nat
 
 There is no public checkpoint format. Ordinary outputs supplied as a new initial
 state do not imply continuation of an uninterrupted solver, especially for TV dual
-states or the full alternating solver state. Implementations track returned iteration and reason in invocation-owned state. Fixed invocation ABI 8 has no report-submission callback; it does not automatically export these logical outcome labels as execution diagnostics. An explicit SDK reporting interface would require its own specification before claiming that capability; no additional result port or kernel ABI change is implied.
+states or the full alternating solver state.
 
 ## Stopping predicates
 
@@ -41,7 +41,7 @@ D(q)=<f,K^T q>-0.5*||K^T q||². The mathematical gap is nonnegative; native eval
 atol has average-objective units and rtol is dimensionless. Construct q from the
 checked round's stored p without changing p: for isotropic TV use
 q_i=p_i/max(1,||p_i||_2/lambda); for anisotropic TV clip each component to
-[-lambda,lambda]. Invalid forward-boundary dual components remain zero. This check projection uses native precision and leaves solver state unchanged. lambda=0 is the identity branch and does not divide by lambda. Validate gap evaluation and feasibility error against a higher-precision reference. Passing the native inequality indicates numerical objective progress, not an exact feasibility certificate or perceptual quality.
+[-lambda,lambda]. Invalid forward-boundary dual components remain zero. This check projection uses native precision and leaves solver state unchanged. lambda=0 is the identity branch and does not divide by lambda. Passing the native inequality indicates numerical objective progress, not an exact feasibility certificate or perceptual quality.
 
 ### Diffusion
 
@@ -86,69 +86,16 @@ projection is the family's support-constrained projection. The check leaves stat
 unchanged and tests numerical constrained first-order stationarity, not uniqueness,
 global optimality or perceptual quality.
 
-## Fixed execution boundary
+## Early-stop semantics
 
-Fixed-step recurrences can use existing CFG loops, explicit edge arguments and declared intermediate tasks. The asynchronous profiles below retain their distinct timing semantics and remain unimplemented. Their concurrent solver/checker must be owned by one bounded operation invocation (or a separately specified host workflow); it cannot append tasks, rediscover dependencies or expose mutable state through a published Result. All worker state and scratch must fit declared bounds, and accepted work must be joined or drained before reporting completion. A serial CFG loop does not establish the asynchronous profile's acceptance.
+The asynchronous profiles trigger a stopping check every fixed positive number of completed rounds K (K is not specified here), after rounds K, 2K, ...; round 0 is not checked. At most one check is active per solve. A trigger that occurs while a check is active is discarded, without queuing or a pending check; it is not replayed after that check completes. max_iterations=0 returns the member's zero-step result without a check. Identity branches report identity, not converged. There is no forced final check. A check evaluates the latest coherent state set available when it starts: TV uses corresponding primal/dual state, RL uses its adjacent state pair, and blind PSF uses its same-round image/PSF pair. Mixed rounds are never combined.
 
-Solver/checker borrows of invocation views, scratch, cancellation state and Run
-services must be released on every exit, including partial startup failure,
-before reporting invocation completion. Closing a Context does not extend those
-borrows. An independently retained immutable Result may survive the Context
-under the shared owner contract; mutable checker state must still settle within
-its owning invocation.
+A passing check proposes its checked state for normal termination. If it wins, that state is returned after the member's final output conversion and newer speculative states are discarded. The criterion is evidence about internal state, not necessarily the rounded public PSF/output. Reaching max_iterations proposes the final-round state for normal termination without a final check or waiting for an active predicate to finish. Reason, round and returned state form one coherent record, and the first normal termination record wins; a later check cannot replace a committed max_iterations result. Failures are never converted to normal success.
 
-## Trigger and ownership protocol
+Which round is returned can differ between independent calls; the earliest passing round and its repeatability are not promised. The recurrence and predicate math are fixed. Fixed-step profiles are deterministic.
 
-Each algorithm uses a fixed positive interval K chosen through implementation
-measurement. This specification does not prescribe K values. Trigger after completed
-rounds K,2K,...; do not check round 0. max_iterations=0 returns the member's zero-step
-result without a checker. Identity branches report identity, not converged. There
-is no forced final check.
-
-At most one checker is active per solve. Busy triggers are dropped, with no queue
-or pending flag. When an accepted checker starts, acquire a coherent immutable
-reference set for the latest complete round then available. That may be newer than
-the trigger's round. TV pins corresponding primal/dual state, RL pins its adjacent
-state pair, and blind PSF pins its same-round native image/PSF pair. A single
-atomic admission/publication protocol prevents overlapping checks or mixed rounds.
-
-The checker reads those existing memory blocks without copying payload or holding
-a data mutex during traversal. Computation continues using other admitted buffers.
-Brief publication/ownership synchronization is allowed. An atomic pointer alone
-does not permit overwriting ordinary floats while a checker reads them. Owners
-remain pinned until checking completes or safely cancels.
-
-Reserve bounded capacity for a check-held coherent state set, computation buffers
-and checker workspace before execution. Do not assume a universal triple-buffer
-count; each solver's required live states determine it. Native state and projection workspace are budgeted. On shortage, report resource failure, not synchronous checking,
-payload copying, overwrite, reduced precision or unaccounted allocation.
-
-## Termination and invocation identity
-
-A passing checker atomically proposes (converged, checked_round, result_owners).
-Return that checked state after the member's final output conversion; discard newer
-speculative states. Signal cooperative stop and poll safe computation checkpoints.
-The criterion is evidence about internal state, not necessarily the rounded public
-PSF/output. No asynchronous thread may retain unsafe access after call completion.
-
-When max_iterations is reached, atomically propose (max_iterations, final_round,
-final_owners), cancel the in-flight checker and perform safe cleanup without waiting
-for the entire predicate or adding a final check. The first successfully committed
-normal termination record wins and cannot be overwritten. Reason, round and owners
-are one coherent record. Failures are never converted to normal success. Finish
-necessary joins, ownership releases and error handling before returning.
-
-Scheduling can change checked rounds and returned bits across independent calls.
-Do not promise the earliest passing round or repeatability of the chosen round.
-The recurrence and predicate math remain fixed. Sharing within one invocation is
-legal; cross-independent-invocation result caching is forbidden for early-stop
-profiles. Fixed-step profiles retain their deterministic recurrence; the frozen executor has no cross-Run result cache for either profile.
-
-Acceptance must cover dropped triggers, delayed starts, retained state immutability,
-coherent pairs, both termination race winners, max=0, no final check, nonfinite
-non-passing checks, cancellation, failures and budget cleanup. Mathematical predicate
-fixtures alone do not verify the concurrent runtime protocol.
+There is no public checkpoint format. Ordinary outputs supplied as a new initial state do not imply continuation of an uninterrupted solver, especially for TV dual states or the full alternating solver state. The returned iteration count and reason are logical outcome labels, not additional result ports.
 
 ## Exceptional PSF projection state
 
-Finite simplex projection follows RES-10's native sorted-threshold algorithm. A non-finite projection argument produces NaN at selected support taps and +0 outside support, with no payload/sign guarantee. This is not a feasible simplex certificate and cannot pass an early-stop check. Fixed-step execution retains its declared count. Caller model premises, resource failure, cancellation and ownership are unchanged. Existing rational exceptional-value helpers are mathematical diagnostics, not native bitwise goldens.
+Finite simplex projection follows RES-10's native sorted-threshold algorithm. A non-finite projection argument produces NaN at selected support taps and +0 outside support, with no payload/sign guarantee. This is not a feasible simplex certificate and cannot pass an early-stop check. Fixed-step execution retains its declared count.

@@ -18,39 +18,22 @@ clarification_status: complete
 
 # CRV-10B: invert_pchip
 
-Numeric profile: strict retains the exact reference defined below. Floating
-arithmetic in accelerated profiles follows the shared
-[final FP32 four-ULP contract](NUM_accelerated_contract.md), including its
-range/fallback rules. Discrete results, copies, selected endpoints and special
-values remain exact.
+Numeric profile: strict retains the exact reference defined below. Floating arithmetic in accelerated profiles follows the shared [final FP32 four-ULP contract](NUM_accelerated_contract.md). Discrete results, copies, selected endpoints and special values remain exact.
 
-Invert the mathematical PCHIP curve defined by x/y, before
-its forward output rounding. Do not invert a rounded lookup or construct a new
-swapped-control interpolator. The [CRV-10 shared contract](CRV-10_invert.md) is
-normative for every interface, error, numerical and execution requirement.
+Invert the mathematical PCHIP curve defined by x/y, before its forward output rounding. A rounded lookup is not inverted and no swapped-control interpolator is constructed. The [CRV-10 shared contract](CRV-10_invert.md) is normative for every interface, error, numerical and execution requirement.
 
-Ordered Result ports x[K],y[K],query[N] each contain one tensor member under any schema id/key and independently accept Float32/Float64; extents come from `sample_shape()`.
-x is finite strictly increasing; y is finite strictly increasing or decreasing,
-without plateaus. K=2..65536,N=1..2^40. Output port `values` is a Result with schema `photospider.tensor`, member `samples`, shape [N], no attached domain description and Float32/Float64 dtype selected by static `dtype`, default Float64. The other required static String
-parameter out_of_domain is reject/clamp, default reject. No extrapolated tail
-is inverted. Endpoints correctly convert corresponding x, preserving zero sign.
+## Interface
 
-Use exactly the CRV-01B rational PCHIP slopes/polynomial, bracket the unique root and correctly round final x in strict. Accelerated permits <=4 ULP x error, exact classification/zero/endpoint rules, segment bounds and monotonicity; strict fallback is used when needed. Residual alone is not the quality bound.
-Other mathematical exact zeros are +0 and nonzero underflow retains sign.
-Consumed queries and selected final outputs must be finite and representable as caller preconditions.
+Ordered Result ports x[K],y[K],query[N] each contain one tensor member under any schema id/key and independently accept Float32/Float64; extents come from `sample_shape()`. K=2..65536,N=1..2^40. Output port `values` is a Result with schema `photospider.tensor`, member `samples`, shape [N], no attached domain description and Float32/Float64 dtype selected by static `dtype`, default Float64. The other required static String parameter out_of_domain is reject/clamp, default reject. The public constructor is `invert_pchip_node`.
 
-All three profile keys use the [family fixed execution contract](CRV-10_invert.md#fixed-execution-resources-and-caller-preconditions). One task per selected output tile reads complete x/y and the corresponding query interval through the source grids, then computes only its global output coordinates. Each invocation has private preallocated ExactCurve scratch. Finite globally monotone controls, valid consumed queries and representable outputs are unchecked caller preconditions. Static schemas and fixed invocation signatures remain checked.
+## Mathematics
 
-Empty selection emits no task. Rebinding reuses immutable preparation, with independent output owners and no content-cache identity guarantee. Signed/zero input strides, resource admission, cancellation, exact arithmetic guards and ordered call publication follow the family. Unreturned endpoint conversion does not invalidate a finite root. Fixed invocations expose no per-value numerical/fallback counters.
+x is finite strictly increasing; y is finite strictly increasing or decreasing, without plateaus. No extrapolated tail is inverted. Endpoints correctly convert corresponding x, preserving zero sign. Use exactly the CRV-01B rational PCHIP slopes/polynomial, bracket the unique root and correctly round final x in strict. Accelerated permits <=4 ULP x error, exact classification/zero/endpoint rules, segment bounds and monotonicity. Residual alone is not the quality bound. Other mathematical exact zeros are +0 and nonzero underflow retains sign. An unreturned endpoint conversion does not invalidate a finite root.
 
-Conceptual fixture: x=[0,1,2],y=[0,1,4],query=[0.3125,2.1875] -> values=[0.5,1.5].
-Negating y and query retains the result. Apply CRV-10's independent exact oracle,
-boundary/rounding/monotonicity, fixed-read/sparse-output, stride, budget, cancellation
-and owner-lifetime acceptance. A temporary public Compiler/ExecutionContext
-workflow should supply x/y/query and static dtype/policy. Create this check for the current change and remove it after validation.
+## Behavior
 
-## Maintained implementation and validation
+Each output element depends on the complete x/y arrays and its own query value. Finite globally monotone controls, valid consumed queries and representable outputs are unchecked caller preconditions. Region and tile results equal the corresponding slice of the whole result.
 
-`curve_inverse.cpp` registers the inverse keys through the shared fixed adapter in `plugins/ops/01-numeric/fixed_curve.hpp`. Public constructors are `invert_linear_node` and `invert_pchip_node` in [`inverse_curves.hpp`](../../../../plugins/ops/include/photospider/ops/numeric/inverse_curves.hpp). The exact inverse arithmetic remains in `ExactCurve::inverse`.
+## Acceptance
 
-Temporary public validation follows the family: independent exact references, supported profiles, mixed dtypes, sparse/empty selections, immutable affine bindings, fixed read/write/scratch signatures, concurrent Runs, cancellation, capacity admission and owner lifetime. Large logical outputs require only selected output tiles and fixed scratch; no full-output capacity rejection is mandated. Remove temporary runtime checkers after validation and preserve the oracle.
+Fixture: x=[0,1,2],y=[0,1,4],query=[0.3125,2.1875] -> values=[0.5,1.5]. Negating y and query retains the result. CRV-10's exact reference, boundary/rounding/monotonicity checks apply.

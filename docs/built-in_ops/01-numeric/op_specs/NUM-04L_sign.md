@@ -16,48 +16,16 @@ implementation_status: implemented
 
 # NUM-04L: sign
 
-Numeric profile: strict retains the exact reference defined below. Floating
-arithmetic in accelerated profiles follows the shared
-[final FP32 four-ULP contract](NUM_accelerated_contract.md), including its
-range/fallback rules. Discrete results, copies, selected endpoints and special
-values remain exact.
+Numeric profile: strict is the exact reference defined below. Discrete results are exact and bitwise identical across the three keys. Inherits the [NUM baseline](NUM_common_contract.md) and the [NUM-04 unary contract](NUM-04_unary_contract.md); explicit rules below take precedence.
 
-Inherit the [NUM baseline](NUM_common_contract.md) for specification status,
-registration, shared execution and acceptance requirements; explicit rules below
-and in the named family contract take precedence.
+Returns -1 for a negative nonzero number, +1 for a positive number, and zero for zero, preserving input shape and dtype. UInt8, Int64, Float32 and Float64 are supported. There are no static parameters or implicit output conversions. Keys: `numeric.sign_strict`, `numeric.sign_accelerated_apple_silicon`, `numeric.sign_accelerated_x86_64`.
 
-Return -1 for a negative nonzero number, +1 for a positive number, and zero for
-zero, preserving input shape and dtype. UInt8/Int64/Float32/Float64 are supported.
-Inherit [NUM-04 common execution and validation](NUM-04_unary_contract.md);
-there are no static operation parameters or implicit output conversions.
+## Mathematics
 
-Floating ±0 retain their input sign, ±Inf return ±1, and NaNs are quieted while
-preserving payload/sign. UInt8 outputs are only 0 or 1. Int64 extrema, including
-INT64_MIN, return their sign without negation or absolute value, so they do not
-overflow. All three versions must return the same logical bits.
+Floating +-0 retain their input sign, +-Inf return +-1, and NaNs are quieted while preserving payload and sign. UInt8 outputs are only 0 or 1. Int64 extrema, including INT64_MIN, return their sign without negation or absolute value, so they do not overflow. Signed subnormals map to signed one.
 
-Classify integers by comparison without a floating intermediate; classify float
-NaNs/zeros by bits before selecting signed unit output. Avoid formulas x/abs(x)
-that fail on zero, infinity or INT64_MIN. Work is O(M), element scratch O(1), and
-payload M*b plus common mapping and structural-validation support. Every generic
-numeric input has a defined successful numeric result.
+## Acceptance
 
-## Independent acceptance
-
-- Int64 `[INT64_MIN,-1,0,1,INT64_MAX]` -> `[-1,-1,0,1,1]`; all UInt8 inputs
-  map zero to zero and every nonzero value to one.
-- Float `[-Inf,-3,-0,+0,3,+Inf]` -> `[-1,-1,-0,+0,1,1]` with preserved dtype.
-- Positive/negative NaN payloads survive with quieting; signed subnormals map
-  to signed one without flushing to zero. Reapplying sign is bitwise idempotent.
-- Compare platform keys to an independent bit/comparison oracle and run the
-  inherited public ROI/fixed-read/lifetime/resource cases.
-
-The conceptual public fixture binds the float vector above, compiles a selected
-sign key and checks output bytes and dtype. The maintained target implementation is documented below;
-the maintained public executable command and current validation boundary are documented below.
-
-## Maintained implementation and validation
-
-This operation is registered in `plugins/ops/01-numeric/numeric_unary.cpp` and
-exposed through `photospider/ops/numeric/unary.hpp`. It uses one fixed CPU invocation per selected output tile, validated input views and preallocated output/scratch. Its numerical path follows
-[the shared implementation notes](../math-implementation.md).
+- Int64 `[INT64_MIN,-1,0,1,INT64_MAX]` gives `[-1,-1,0,1,1]`; all UInt8 inputs map zero to zero and every nonzero value to one.
+- Float `[-Inf,-3,-0,+0,3,+Inf]` gives `[-1,-1,-0,+0,1,1]` with preserved dtype.
+- Positive and negative NaN payloads survive with quieting. Reapplying sign is bitwise idempotent.

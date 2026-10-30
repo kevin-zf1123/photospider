@@ -15,48 +15,20 @@ clarification_status: complete
 
 # CRV-04E: bake_lut1d_linear_multi
 
-Numeric profile: strict retains the exact reference defined below. Floating
-arithmetic in accelerated profiles follows the shared
-[final FP32 four-ULP contract](NUM_accelerated_contract.md), including its
-range/fallback rules. Discrete results, copies, selected endpoints and special
-values remain exact.
+Numeric profile: strict retains the exact reference defined below. Floating arithmetic in accelerated profiles follows the shared [final FP32 four-ULP contract](NUM_accelerated_contract.md). Discrete results, copies, selected endpoints and special values remain exact.
 
-Inherit the [baking template contract](CRV-04_bake_lut1d.md) in full for authoring
-profile/defaults, count/dtype, named outputs, fixed task execution, resources, errors,
-owner lifetime and public graph-equivalence acceptance. This is a workflow
-construction template; its name is not an OperationRegistry key.
+Inherit the [baking template contract](CRV-04_bake_lut1d.md) in full for authoring profile/defaults, count/dtype, named outputs and graph-equivalence acceptance. This is a workflow construction template; its name is not an OperationRegistry key.
 
-## Inputs, parameters and expansion
+## Interface and expansion
 
-Expose dynamic x, y, start and end. Input shapes/dtypes and source-specific constraints
-follow the [source specification](CRV-01C_interpolate_linear_multi.md), with start/end supplied as independent
-Float32/Float64 [1] scalars. Required source/sampling parameters are count, dtype and out_of_domain.
-The template adds authoring profile=strict/apple_silicon/x86_64, default strict.
-Count is explicitly required in [1,1048576], dtype defaults to float64, and
-out_of_domain where present defaults to reject. Source parameters with no stated
-default remain required. Constructors write expanded-node parameters explicitly.
+Dynamic inputs are x, y, start and end. Input shapes/dtypes and source-specific constraints follow the [source specification](CRV-01C_interpolate_linear_multi.md), with start/end supplied as independent Float32/Float64 [1] scalars. Required source/sampling parameters are count, dtype and out_of_domain. The template adds authoring profile=strict/apple_silicon/x86_64, default strict. Count is required in [1,1048576], dtype defaults to float64, and out_of_domain defaults to reject. Source parameters with no stated default remain required. Constructors write expanded-node parameters explicitly.
 
-Create numeric.linspace with the selected profile suffix, start/end inputs,
-count and fixed dtype="float64". Create curve.interpolate_linear_multi with the same profile
-suffix; connect x/y and linspace.values to query, and pass the final dtype and
-out_of_domain. Export interpolator.values and linspace.axis. Values execution requests only the query tiles required by selected interpolation output tiles. Linspace generates those Float64 coordinates; curve tasks allocate only selected output tiles. Axis-only requests use the independent linspace axis task.
+The expansion is numeric.linspace with the selected profile suffix, the start/end inputs, count and fixed dtype="float64", followed by curve.interpolate_linear_multi with the same profile suffix; x/y and linspace.values (as query) are connected, and the final dtype and out_of_domain are passed. The exports are interpolator.values and linspace.axis. Values depend on the Float64 linspace coordinates of the selected output rows; axis-only requests need only the linspace axis.
 
-Each exported shape/dtype is inferred by its expanded source. Scalar values
-retain [count]; multi-function values retain [count,C], including C=1. This
-template uses the applicable source shape without inserting or removing a
-component axis. Axis is always Float64 [3]. For count=1 it is [start,start,0]
-and no end payload is evaluated. The source's remaining domain, finite-value,
-precision and query-support restrictions are not normalized or weakened.
+Each exported shape/dtype is inferred by its expanded source. Values have shape [count,C], including C=1; the template inserts or removes no component axis. Axis is always Float64 [3]. For count=1 it is [start,start,0] and no end payload is evaluated. The source's remaining domain, finite-value, precision and query-support restrictions are not normalized or weakened.
 
-## Acceptance and status
+## Acceptance
 
 Analytic fixture: x=[0,1], y=[[0,10],[2,8]], start=[0], end=[1], count=3 -> values=[[0,10],[1,9],[2,8]], axis=[0,1,0.5].
 
-Construct this template and its explicit expansion with the same bindings,
-parameters and output demands. Compare descriptors, numerical quality and exact
-static read sets according to the source spec. Repeat each valid profile,
-values-only/axis-only/joint requests, changed source bindings, singleton count,
-partial output, low shared budgets, cancellation, concurrent Runs and exported-owner
-lifetime. Templates do not compute on construction, freeze results or create files.
-Use source mathematical fixtures independently of graph equivalence, which alone
-could reproduce a shared numerical bug.
+Construct this template and its explicit expansion with the same bindings, parameters and output demands, and compare descriptors, numerical quality and active input dependencies according to the source spec. Repeat each valid profile, values-only/axis-only/joint requests, singleton count and partial output. Templates do not compute on construction, freeze results or create files. Source mathematical fixtures are checked independently of graph equivalence, which alone could reproduce a shared numerical bug.

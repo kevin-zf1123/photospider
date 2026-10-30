@@ -18,7 +18,7 @@ Preparation 解析一次并持有不可变 AST。每个选中输出 tile 读取�
 
 其独立语法额外支持 pi／e、tan 和具名标识符，使用 `ln`，未带后缀 key 使用 `log`。Strict 对每个原语做 RN64 后传给父节点。Accelerated 四 lane 批次包围完整 strict 参考值，对不确定样本严格重算，保证最终 FP32-scaled 误差界。数值域和所选坐标精度是 unchecked 调用方前提。选中输出共享一个 IR call 的发布结果。
 
-公开 helper 为 [`sample_expression_node`](../../../plugins/ops/include/photospider/ops/numeric/expression.hpp)，用于构造 WorkflowNode 并规范化准确的名称／连接映射。完整采样、数值和资源契约见 [NUM-01](../../built-in_ops/01-numeric/op_specs/NUM-01_sample_expression.md) 与[固定表达式执行](../../built-in_ops/01-numeric/expression-execution.md)。
+公开 helper 为 [`sample_expression_node`](../../../plugins/ops/include/photospider/ops/numeric/expression.hpp)，用于构造 WorkflowNode 并规范化准确的名称／连接映射。完整采样、数值和资源契约见 [NUM-01](../../built-in_ops/01-numeric/op_specs/NUM-01_sample_expression.md) 。
 
 ## 线性 LUT application
 

@@ -4,7 +4,7 @@ Independent small-image references for all 63 specified MASK members. The script
 never call a production mask kernel. They are not WorkflowDocument APIs, a native
 implementation, metadata interpreter or Region/resource/ownership simulator.
 See the [spec index](../../../docs/built-in_ops/04-mask-morphology/masks.md) and
-[shared acceptance obligations](../../../docs/built-in_ops/04-mask-morphology/op_specs/MASK_common_contract.md#independent-acceptance-and-public-implementation-gate).
+[shared acceptance obligations](../../../docs/built-in_ops/04-mask-morphology/op_specs/MASK_common_contract.md).
 
 ## Run from the repository root
 

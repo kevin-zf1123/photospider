@@ -9,11 +9,7 @@ implementation_status: implemented
 
 # PTH-08: Simplification, fitting and smoothing
 
-Point reduction, curve fitting and deliberate shape change have separate contracts.
-Fitting backends are distinct versioned operators with a shared continuous-error
-acceptance rule, not interchangeable solver modes. Approximation/fitting defaults to
-allow_change; reject_unproven needs the declared topology proof. Report unverified
-honestly. Chaikin is explicitly shape-changing.
+Point reduction, curve fitting and deliberate shape change have separate contracts. Fitting backends are distinct versioned operators with a shared continuous-error acceptance rule, not interchangeable solver modes. Approximation/fitting defaults to allow_change; reject_unproven needs the declared topology proof. Report unverified honestly. Chaikin is explicitly shape-changing.
 
 ## Members
 
@@ -23,18 +19,6 @@ honestly. Chaikin is explicitly shape-changing.
 | [PTH-08B](PTH-08B_fit_cubic_segments.md) | fit cubic segments |
 | [PTH-08C](PTH-08C_smooth_chaikin.md) | smooth chaikin |
 
-## Shared execution and numerical rules
+## Shared rules
 
-Inherit [GEN common](GEN_common_contract.md), and applicable
-[random](NOI_random_contract.md) and [path geometry](PTH_geometry_contract.md) rules.
-Members declare Regional, Halo or complete-input from actual mathematical dependencies,
-independently of static structure checks. GPU capability is member/backend-specific.
-Same version/profile means bit-identical output; numerical error, geometry error and
-topology guarantees are separate. Source associations are unchecked caller premises; producers preserve declared ownership and lifetime by construction.
-
-## Acceptance and implementation boundary
-
-Use member-specific independent fixtures plus actual public workflow execution. The
-[oracle coverage](../oracle-coverage.md) identifies finite exact helpers, Measured
-diagnostics and remaining unsupported cases. It cannot establish public schema support,
-GPU admission or complete domain certification. The CPU members and public authoring helpers are implemented. Finite arithmetic, refinement and capacity limits remain operational bounds; member-specific conservative topology proofs may reject unproven results. No GPU execution is registered for these members.
+Members inherit [GEN common](GEN_common_contract.md) and [PTH geometry](PTH_geometry_contract.md).

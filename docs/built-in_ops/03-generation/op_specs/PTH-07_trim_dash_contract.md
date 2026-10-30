@@ -9,11 +9,7 @@ implementation_status: implemented
 
 # PTH-07: Trim and dash
 
-Operate on Core/Bezier paths; other authorities require explicit conversion. True
-arc-length inversion is not uniform-t sampling. Preserve source-position width by
-default. An explicit rebind is required to spread the whole profile across each output
-fragment. Retain source parameter mappings even when control publication changes the new
-path length.
+Operate on Core/Bezier paths; other authorities require explicit conversion. True arc-length inversion is not uniform-t sampling. Preserve source-position width by default. An explicit rebind is required to spread the whole profile across each output fragment. Retain source parameter mappings even when control publication changes the new path length.
 
 ## Members
 
@@ -22,18 +18,6 @@ path length.
 | [PTH-07A](PTH-07A_trim_path.md) | trim path |
 | [PTH-07B](PTH-07B_dash_path.md) | dash path |
 
-## Shared execution and numerical rules
+## Shared rules
 
-Inherit [GEN common](GEN_common_contract.md), and applicable
-[random](NOI_random_contract.md) and [path geometry](PTH_geometry_contract.md) rules.
-Members declare Regional, Halo or complete-input from actual mathematical dependencies,
-independently of static structure checks. GPU capability is member/backend-specific.
-Same version/profile means bit-identical output; numerical error, geometry error and
-topology guarantees are separate. Source associations are unchecked caller premises; producers preserve declared ownership and lifetime by construction.
-
-## Acceptance and implementation boundary
-
-Use member-specific independent fixtures plus actual public workflow execution. The
-[oracle coverage](../oracle-coverage.md) identifies finite exact helpers, Measured
-diagnostics and remaining unsupported cases. It cannot establish public schema support,
-GPU admission or complete domain certification. The CPU members and public authoring helpers are implemented. Finite arithmetic, refinement and capacity limits remain operational bounds; member-specific conservative topology proofs may reject unproven results. No GPU execution is registered for these members.
+Members inherit [GEN common](GEN_common_contract.md) and [PTH geometry](PTH_geometry_contract.md).

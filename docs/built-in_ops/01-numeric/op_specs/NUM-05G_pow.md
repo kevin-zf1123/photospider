@@ -16,87 +16,28 @@ implementation_status: implemented
 
 # NUM-05G: pow
 
-Numeric profile: strict retains the exact reference defined below. Floating
-arithmetic in accelerated profiles follows the shared
-[final FP32 four-ULP contract](NUM_accelerated_contract.md), including its
-range/fallback rules. Discrete results, copies, selected endpoints and special
-values remain exact.
+Numeric profile: strict is the exact reference defined below. Floating arithmetic in accelerated profiles follows the shared [final FP32 four-ULP contract](NUM_accelerated_contract.md). Discrete results, copies, selected endpoints and special values are exact. Inherits the [NUM baseline](NUM_common_contract.md) and the [binary contract](NUM-05_binary_contract.md); explicit rules below take precedence.
 
-Inherit the [NUM baseline](NUM_common_contract.md) for specification status,
-registration, shared execution and acceptance requirements; explicit rules below
-and in the named family contract take precedence.
-
-Compute a^b for same-shape, same-dtype Float32/Float64 inputs `a` and `b`.
-Output `values` preserves shape/dtype and has no attached domain description. No static numeric
-parameters, integer output mode or implicit cast/broadcast is provided. Inherit
-[binary execution requirements](NUM-05_binary_contract.md).
+Computes a^b for same-shape, same-dtype Float32/Float64 inputs `a` and `b`. Output `values` preserves shape and dtype and has no attached domain description. There are no static parameters, integer output mode or implicit cast/broadcast. Keys: `numeric.pow_strict`, `numeric.pow_accelerated_apple_silicon`, `numeric.pow_accelerated_x86_64`.
 
 ## Special-case priority
 
-Read both operands through their prepared views, then apply this ordered decision table. Numeric
-NaN/infinity outputs are successful observations; resource/upstream/typed errors
-retain Status semantics. These rules do not change NUM-01's finite expression
-contract.
+Both operands are read; then this ordered decision table applies. NaN/infinity outputs are successful observations. These rules do not change NUM-01's finite expression contract.
 
 1. If b is either signed zero, return +1, including when a is NaN.
 2. If a is +1, return +1, including when b is NaN.
 3. Otherwise propagate any NaN by the shared payload/sign priority, quieting it.
-4. If b is infinite, return +1 when |a|=1. For |a|>1, +Inf exponent yields
-   +Inf and -Inf exponent yields +0; for |a|<1 these outputs are reversed.
-5. For zero a and finite nonzero b, positive b yields zero and negative b
-   yields infinity. The result is negative only when a is -0 and b is an odd
-   integer; otherwise its sign is positive.
-6. For infinite a and finite nonzero b, positive b yields infinity and negative
-   b yields zero. The result is negative only when a is -Inf and b is an odd
-   integer; otherwise its sign is positive, including noninteger exponents.
-7. Finite strictly negative a with a noninteger finite exponent yields the fixed
-   positive quiet NaN. Otherwise evaluate the real mathematical power.
+4. If b is infinite, return +1 when |a|=1. For |a|>1, +Inf exponent yields +Inf and -Inf exponent yields +0; for |a|<1 these outputs are reversed.
+5. For zero a and finite nonzero b, positive b yields zero and negative b yields infinity. The result is negative only when a is -0 and b is an odd integer; otherwise its sign is positive.
+6. For infinite a and finite nonzero b, positive b yields infinity and negative b yields zero. The result is negative only when a is -Inf and b is an odd integer; otherwise its sign is positive, including noninteger exponents.
+7. Finite strictly negative a with a noninteger finite exponent yields the fixed positive quiet NaN. Otherwise the real mathematical power is evaluated.
 
-In particular 0^0, NaN^0 and 1^NaN are +1; (-1)^±Inf is +1. Integer/oddness
-classification uses the exact floating value without narrowing the exponent to
-Int64. Float32 integers of magnitude at least 2^24 and Float64 integers of
-magnitude at least 2^53 are all even; adjacent representable values below these
-thresholds must retain their exact parity.
+In particular 0^0, NaN^0 and 1^NaN are +1; (-1)^(+-Inf) is +1. Integer and oddness classification uses the exact floating value without narrowing the exponent to Int64. Float32 integers of magnitude at least 2^24 and Float64 integers of magnitude at least 2^53 are all even; adjacent representable values below these thresholds keep their exact parity.
 
-## Rounding, backend and resources
+## Rounding
 
-Strict correctly rounds the exact real power directly to output dtype. It is
-not defined by rounded exp(b*ln(a)) or sequential rounded multiplication.
-Finite overflow/underflow produces correctly signed infinity/subnormal/zero.
-Accelerated nonzero finite results permit at most four FP32-scaled ULP from
-strict; special-case outputs and NaN/Inf/zero classification/sign match strict
-exactly. Unsupported accuracy ranges use strict fallback (per-value kernel diagnostics are N/A),
-following [exp's quality/resource rules](NUM-04D_exp.md). Profile results do not
-vary with request batching, vector width or scheduling.
+Strict correctly rounds the exact real power directly to the output dtype; it is not defined by a rounded exp(b*ln(a)) or sequential rounded multiplication. Finite overflow/underflow produces correctly signed infinity/subnormal/zero. Accelerated nonzero finite results are within four FP32-scaled ULP of strict; special-case outputs and NaN/Inf/zero classification and sign match strict exactly. The four-ULP bound applies to the final power, not to independent exp/log steps. Results do not vary with request batching or vector width.
 
-Classify clear overflow/underflow without constructing impractically enormous
-powers. Correct rounding may use validated libraries or directed enclosures with
-exact-boundary handling. Use preallocated fixed scratch and query cancellation during refinement. Return `ResourceExhausted` if bounded precision cannot resolve rounding. A fast exp/log
-composition requires a final pow error guarantee, not independent step tolerances.
+## Acceptance
 
-## Acceptance and current status
-
-Conceptual public fixture: a=[2,-2,-2,0], b=[3,3,0.5,0] gives
-[8,-8,canonical_NaN,1]. Exercise all table branches, both signed zeros and
-infinities, NaNs with distinct payloads, large exponent parity, neighbors of 1,
-small bases, overflow/underflow boundaries and difficult rounding cases in both
-dtypes. Independently certify finite results by exact integer/rational cases or
-directed high-precision power; model special values and payloads separately.
-
-Test both upstream dependencies even for NaN^0 and 1^NaN; apply shared fixed tile execution,
-resource, cancellation, structural validation and lifetime fixtures through the public
-entry point. The maintained versioned key and manual tests are recorded below.
-
-## Maintained implementation
-
-The three keys are registered by `plugins/ops/01-numeric/numeric_binary.cpp`,
-with independently named constructors in `photospider/ops/numeric/binary.hpp`.
-The fixed adapter declares both intersecting input tile sets, including when a numeric identity determines a result.
-Floating elementary operations use controlled correctly rounded hardware
-arithmetic after exact special-value classification, with exact fallback; integer
-operations use exact arithmetic under the caller premise of representable
-integer results; fixed arithmetic-capacity failures remain operational. Accelerated ordinary positive-base
-power and angle results use SLEEF binary64 enclosures within the shared admitted
-ranges. atan2pi divides an angle enclosure by an enclosed pi. Only rejected
-candidates dispatch the certified strict backend . See [math implementation](../math-implementation.md) for
-rounding, fixed scratch admission, cancellation and unresolved-refinement limits.
+Fixture: a=[2,-2,-2,0], b=[3,3,0.5,0] gives [8,-8,canonical_NaN,1]. Cases: all table branches, both signed zeros and infinities, NaNs with distinct payloads, large exponent parity, neighbors of 1, small bases, overflow/underflow boundaries and difficult rounding cases in both dtypes. Finite results are certified by exact integer/rational cases or directed high-precision power; special values and payloads are modeled separately. Both inputs are dependencies even for NaN^0 and 1^NaN.

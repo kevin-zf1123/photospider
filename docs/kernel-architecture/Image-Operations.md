@@ -28,7 +28,7 @@ Bundled image and format operations are compiled into `Photospider::ops`. That t
 
 See [Channel and color operations](Channel-and-Color-Operations.md) for each family's invocation protocol. Native numerical CPU profiles are `strict`, `accelerated_apple_silicon` and `accelerated_x86_64`; accelerated profiles require the matching host capability. Registration does not imply support for every spatial layout or a GPU backend.
 
-External-engine construction is synchronous and noncancellable, with memory/work admission and complete Empty/bypass validation. Pixel execution remains cancellable. No frozen kernel change is required. See [implementation, independent validation and performance](../built-in_ops/02-format-color/FMT-12-13-18_implementation.md).
+External-engine construction is synchronous and noncancellable, with memory/work admission and complete Empty/bypass validation. Pixel execution remains cancellable. No frozen kernel change is required.
 
 ## Alpha and model operations
 

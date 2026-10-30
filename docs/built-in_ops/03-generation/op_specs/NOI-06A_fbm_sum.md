@@ -16,54 +16,26 @@ operation_keys:
 
 # NOI-06A: fbm sum
 
-Inherit [NOI-06](NOI-06_fractal_contract.md), [GEN common](GEN_common_contract.md), and
-the applicable [random](NOI_random_contract.md) and [geometry](PTH_geometry_contract.md)
-contracts. A key includes algorithm version
-and profile; within one version/profile, output bits and discrete decisions are fixed.
+Inherits [NOI-06](NOI-06_fractal_contract.md) and [GEN common](GEN_common_contract.md).
 
-## Interface and representation
+## Interface
+
+Operation keys: `noise.fbm_sum_v1_strict`, `noise.fbm_sum_v1_accelerated_apple_silicon`, `noise.fbm_sum_v1_accelerated_x86_64`.
 
 coordinates[S...,D], D=2 or3 according to basis; values[S...].
 
-## Parameters and domain
+### Parameters and domain
 
-basis=gradient2d_philox/perlin2002_3d; octaves=1..32,frequency>0,lacunarity>1,gain in
-[0,1]; normalization=none/amplitude_sum default latter; basis RNG/period rules.
+basis=gradient2d_philox/perlin2002_3d; octaves=1..32,frequency>0,lacunarity>1,gain in [0,1]; normalization=none/amplitude_sum default latter; basis RNG/period rules.
 
-## Mathematical specialization
+## Mathematics
 
-a_i=gain^i, q_i=frequency*lacunarity^i*q exactly; n_i is the unrounded mathematical
-basis value. Return RN_T(sum a_i*n_i / den), den=1 or sum a_i. Skip proven
-zero-amplitude terms without inventing out-of-range coordinates. Octaves share the
-scaled base field, not an independence claim.
+a_i=gain^i, q_i=frequency*lacunarity^i*q exactly; n_i is the unrounded mathematical basis value. Return RN_T(sum a_i*n_i / den), den=1 or sum a_i. Skip proven zero-amplitude terms without inventing out-of-range coordinates. Octaves share the scaled base field, not an independence claim.
 
-## Dependencies, resources and failures
+## Behavior
 
-Execution support: **Regional**. Lower each selected complete output tile to
-fixed tasks with explicit query/sample and control-member tile reads. Close each
-read on its source grid; payload validity over the consumed support is a caller
-premise. Empty output selection performs static preparation without payload tasks.
-Shared computation uses explicit task dependencies and private intermediate
-Results under GEN-common.
+Support class: Regional.
 
-Regional, O(count(Q)*octaves*corners); one final error budget.
+## Acceptance
 
-All output, scratch, indices, algorithmic work and retained owners are accounted. Poll
-cancellation in bounded loops. Preserve static structural failures and actual
-resource, cancellation, backend and upstream statuses. Member-specific no-solution,
-refinement or quality failures apply to valid inputs and the explicitly declared
-algorithm; numerical-premise violations have no prescribed runtime diagnostic.
-Never replace budget/cancellation failure with a lower-quality successful prefix. Views,
-lifetime and actual returned coverage inherit GEN-common.
-
-## Independent fixtures and acceptance
-
-One octave equals basis; gain0 eliminates other octaves; no per-octave four-ULP
-allocation.
-
-Check selected-tile/full-output equivalence, source-grid read closure, legal
-strides/offsets, separate/joint outputs, version/profile identity, low budgets, cancellation,
-associations and retained owners as applicable. The [oracle
-coverage](../oracle-coverage.md) describes the available finite reference subset; it is
-not runtime completion. No unverified GPU or third-party bit
-identity is implied by these requirements.
+One octave equals basis; gain0 eliminates other octaves; no per-octave four-ULP allocation.

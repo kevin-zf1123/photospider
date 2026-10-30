@@ -16,38 +16,27 @@ members:
 
 Selective smoothing in quantized flat regions and pairwise correction at known block boundaries are separate operations.
 
-This specification defines the target mathematics and interface contract only; it makes no claim about current implementation or registration. It inherits the [FILTER common contract](FILTER_common_contract.md), [RES native floating-point contract](RES_native_contract.md), and [FMT](../../02-format-color/op_specs/FMT_common_contract.md). No member is marked Accepted or production-implemented.
+It inherits the [FILTER common contract](FILTER_common_contract.md), [RES native floating-point contract](RES_native_contract.md), and [FMT](../../02-format-color/op_specs/FMT_common_contract.md).
 
-## Member classification
+## Members
 
 | ID | Function spec | Composition type | Numeric reference |
 | --- | --- | --- | --- |
 | RES-11A | [Low-contrast region smoothing](RES-11A_low_contrast_smoothing.md) | primitive | F |
 | RES-11B | [Pairwise block-boundary smoothing](RES-11B_pairwise_block_boundary_smoothing.md) | primitive | F |
 
-Letter suffixes identify distinct mathematical or interface objects; they are not quality tiers that a backend may choose arbitrarily. Primitives use native fp32/fp64 arithmetic; helpers orchestrate explicit algorithmic stages.
+Letter suffixes identify distinct mathematical or interface objects, not quality tiers. Primitives use native fp32/fp64 arithmetic.
 
-## Shared mathematics, units, and profiles
-
-Each member file listed above defines its own formula. Members share no undeclared preprocessing; a parameter name may be reused only when its units, boundary, normalization, and RN stages agree.
-
-## Shared execution and numerical obligations
+## Numeric Requirements
 
 All members use native class F under [RES_native_contract](RES_native_contract.md). Shape, support, copies and declared algorithmic stages remain normative. Numerical/model premises are caller obligations, without a production validation scan or NUM four-ULP fallback.
 
-Positive-weight normalized filters, signed kernels, local regression, and global inverse problems have different semantics and do not share one alpha-blur rule. See [color composition](FILTER_color_composition.md). Spatial extension/anchor/origin follow the [boundary contract](FILTER_boundary_contract.md); structured outputs follow the [collection contract](FILTER_collections_contract.md). Shapes depend only on descriptors; each member defines mathematical support and fixed compiled reads.
+Alpha semantics, spatial extension and structured outputs follow [color composition](FILTER_color_composition.md), the [boundary contract](FILTER_boundary_contract.md) and the [collection contract](FILTER_collections_contract.md).
 
-## Dependencies and acceptance
+## Behavior and Acceptance
 
-Each member’s support set is normative. A halo does not mean the operation can run independently on an arbitrary cropped ROI, and paging does not cancel a complete-input-image dependency. Staged rounding, global connectivity, transforms, and iterative state must follow each member’s definition. Outputs are independently requestable. Only selected computation and required algorithmic control contribute payload reads; no payload-validation phase is introduced.
+Each member's support set is normative. A halo does not imply independent execution on an arbitrary cropped ROI. Staged rounding, global connectivity, transforms, and iterative state follow each member's definition. Outputs are independently requestable. Members are accepted against the [acceptance protocol](FILTER_oracle_protocol.md).
 
-All members must follow the [acceptance protocol](FILTER_oracle_protocol.md). This round’s mathematical references and associated self-checks are documented in the [oracle instructions](../../../../oracle/ops/filter/README.md); no new Photospider runtime implementation was executed. D1/D2 describe draft maturity, not pass rates.
-
-## References and conformance notes
+## References
 
 [S22 · scikit-image restoration](../research-sources.md#s22)
-
-Boundary, tie-breaking, numeric domains, public schemas, and proposed keys follow the applicable contracts. Algorithm sources do not establish parameter defaults or grant third-party software licenses.
-
-
-For RES-11A and RES-11B, verify mathematical conformance separately from intended-use quality. Quality acceptance uses multiple per-use scores with separately passing key metrics; do not use a weighted aggregate to hide a failing metric. Metric formulas, datasets, aggregation, regions, and thresholds are implementation-time details and must be fixed before claiming quality acceptance.

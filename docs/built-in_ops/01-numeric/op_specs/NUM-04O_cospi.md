@@ -16,68 +16,22 @@ implementation_status: implemented
 
 # NUM-04O: cospi
 
-Numeric profile: strict retains the exact reference defined below. Floating
-arithmetic in accelerated profiles follows the shared
-[final FP32 four-ULP contract](NUM_accelerated_contract.md), including its
-range/fallback rules. Discrete results, copies, selected endpoints and special
-values remain exact.
+Numeric profile: strict is the exact reference defined below. Floating arithmetic in accelerated profiles follows the shared [final FP32 four-ULP contract](NUM_accelerated_contract.md). Discrete results, copies, selected endpoints and special values are exact. Inherits the [NUM baseline](NUM_common_contract.md), the [trigonometric contract](NUM-04_trigonometric_contract.md) and the [unary contract](NUM-04_unary_contract.md); explicit rules below take precedence.
 
-Inherit the [NUM baseline](NUM_common_contract.md) for specification status,
-registration, shared execution and acceptance requirements; explicit rules below
-and in the named family contract take precedence.
+Computes the mathematical cos(pi*x) using exact pi and the exact real value of the input float. One input `input` and one output `values` have identical shape and dtype, Float32 or Float64. The output carries no domain description. There are no static parameters, implicit casts or rounded-pi multiplication in the definition. Keys: `numeric.cospi_strict`, `numeric.cospi_accelerated_apple_silicon`, `numeric.cospi_accelerated_x86_64`.
 
-Compute the mathematical cos(pi*x) using exact pi and the exact real value
-of the input float. Inherit the [trigonometric contract](NUM-04_trigonometric_contract.md)
-and [unary contract](NUM-04_unary_contract.md), including execution, resources,
-NaN handling, platform availability, strict fallback and acceptance obligations.
-
-One input `input` and one output `values` have identical shape and dtype,
-Float32 or Float64. Output carries no domain description. There are no static numeric
-parameters, implicit casts or rounded-pi multiplication in the definition.
-
-## Function-specific values and quality
+## Mathematics
 
 | Input | Output |
 | --- | --- |
 | Integer n, including signed zero | Exactly (-1)^n |
 | n+1/2 | +0 |
-| ±Inf | Fixed positive quiet NaN; success |
+| +-Inf | Fixed positive quiet NaN; success |
 | NaN | Quiet input NaN preserving payload/sign |
 
-Strict rounds the exact mathematical function directly to output dtype.
-Accelerated finite nonzero results allow at most four FP32-scaled ULP;
-classification, zero signs and named landmarks match strict exactly. All
-finite inputs are supported, including large integers and subnormal inputs.
-The shared contract defines exact quarter-angle rounding and zero conventions.
+Strict rounds the exact mathematical function directly to the output dtype. Accelerated finite nonzero results allow at most four FP32-scaled ULP; classification, zero signs and named landmarks match strict exactly. All finite inputs are supported, including large integers and subnormal inputs. Quarter-angle landmarks and zero conventions follow the trigonometric contract.
+Output remains in [-1,1] in every profile.
 
-Output remains in [-1,1] in every profile while meeting the error bound.
+## Acceptance
 
-## Acceptance and current status
-
-Conceptual public fixture: `[0,0.5,1,1.5,2]` -> `[1,+0,-1,+0,1]`. Bind the array to input in a
-WorkflowDocument, compile each selected key and inspect values through
-ExecutionContext in both dtypes. Validate the exact bit patterns at landmarks,
-huge positive/negative integers, adjacent representable values around half and
-quarter integers, subnormals, NaN payloads and signed zeros. Use an independent
-high-precision oracle for ordinary arguments and midpoint-sensitive cases.
-
-Apply shared disjoint demand, structural-validation checks, new bindings, ownership,
-cancellation and resource checks. Verify unsupported accelerated ranges
-actually use strict fallback. Float32 LLVM libc is a candidate
-as documented in the shared contract; it supplies no implicit Float64 coverage.
-The maintained public run command and current validation boundary are documented below;
-local timing is recorded in the implementation notes.
-
-## Maintained implementation and validation
-
-This operation is registered in `plugins/ops/01-numeric/numeric_unary.cpp` and
-exposed through `photospider/ops/numeric/unary.hpp`. It uses one fixed CPU invocation per selected output tile, validated input views and preallocated output/scratch. Its numerical path follows
-[the shared implementation notes](../math-implementation.md).
-
-Float32 accelerated cospi uses a polynomial in the original binary argument for `|x| < 1/4`. Coefficients include pi powers; exact quarter-turn roots retain the algebraic path.
-
-The maintained analytic certificate includes coefficient, arithmetic and final
-reference rounding errors under the existing four-step contract. Float64
-arguments retain their existing implementation. Nonfinite values and inputs
-outside the polynomial admission use the existing semantic/fallback layer. See
-[the proof, validation and performance report](../trig-performance.md).
+Fixture: `[0,0.5,1,1.5,2]` gives `[1,+0,-1,+0,1]`. Cases: exact bit patterns at landmarks, huge positive/negative integers, adjacent representable values around half and quarter integers, subnormals, NaN payloads and signed zeros, with ordinary and midpoint-sensitive arguments checked against an independent high-precision reference.

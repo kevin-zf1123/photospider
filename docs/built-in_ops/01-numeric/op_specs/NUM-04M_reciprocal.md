@@ -16,51 +16,18 @@ implementation_status: implemented
 
 # NUM-04M: reciprocal
 
-Numeric profile: strict retains the exact reference defined below. Floating
-arithmetic in accelerated profiles follows the shared
-[final FP32 four-ULP contract](NUM_accelerated_contract.md), including its
-range/fallback rules. Discrete results, copies, selected endpoints and special
-values remain exact.
+Numeric profile: strict is the exact reference defined below. Floating arithmetic in accelerated profiles follows the shared [final FP32 four-ULP contract](NUM_accelerated_contract.md). Discrete results, copies, selected endpoints and special values are exact. Inherits the [NUM baseline](NUM_common_contract.md), the [trigonometric contract](NUM-04_trigonometric_contract.md) and the [unary contract](NUM-04_unary_contract.md); explicit rules below take precedence.
 
-Inherit the [NUM baseline](NUM_common_contract.md) for specification status,
-registration, shared execution and acceptance requirements; explicit rules below
-and in the named family contract take precedence.
+Computes 1/x on Float32/Float64, preserving dtype and shape. Integer input is rejected with TypeMismatch and requires explicit conversion. There are no static parameters. Keys: `numeric.reciprocal_strict`, `numeric.reciprocal_accelerated_apple_silicon`, `numeric.reciprocal_accelerated_x86_64`.
 
-Compute 1/x on Float32/Float64, preserving dtype and shape. Inherit the
-[NUM-04 common contract](NUM-04_unary_contract.md) for the parameter-free
-input/values interface, generic output, fixed tile reads and structural preparation,
-NaN handling, ownership, budgets and public acceptance. Integer input rejects
-with TypeMismatch and requires explicit conversion.
+## Mathematics
 
-For finite nonzero x, return the mathematical reciprocal directly correctly
-rounded to output dtype, with ties-to-even and gradual underflow. Correct
-overflow yields signed infinity; correct underflow yields a signed subnormal
-or signed zero. +0/-0 yield +Inf/-Inf, and +Inf/-Inf yield +0/-0. NaNs preserve
-payload/sign with quieting. These are successful numeric results, not divide-
-by-zero/domain/overflow Status failures.
+For finite nonzero x, the result is the mathematical reciprocal directly correctly rounded to the output dtype, with ties-to-even and gradual underflow. Correct overflow yields signed infinity; correct underflow yields a signed subnormal or signed zero. +0/-0 yield +Inf/-Inf, and +Inf/-Inf yield +0/-0. NaNs preserve payload and sign with quieting. These are successful numeric results, not failures.
 
-Strict must match correctly rounded bits. Accelerated reciprocal instructions
-require a proved final FP32 bound; refinement/correction or strict fallback is
-required when a candidate cannot establish that bound. Classify special
-values before native arithmetic and restore the host floating environment.
-Scratch and actual refinement work are host-accounted under the common contract.
+Strict matches correctly rounded bits; accelerated follows the shared final FP32-scaled bound.
 
-## Independent acceptance
+## Acceptance
 
-Check ±1, ±2, ±0, ±Inf and multiple signed NaN payloads. For other finite x,
-use exact rational 1/x and independently determine destination rounding, including
-midpoint cases, smallest subnormal/normal input, largest finite input and the
-overflow boundary. Compare strict bits and accelerated final FP32-scaled accuracy. No float-to-float approximate
-reciprocal is a strict oracle.
++-1, +-2, +-0, +-Inf and several signed NaN payloads. For other finite x, exact rational 1/x with independently determined destination rounding, including midpoint cases, the smallest subnormal and normal input, the largest finite input and the overflow boundary.
 
-Conceptual public fixture: `[2,-4,+0,-0,+Inf,-Inf]` ->
-`[0.5,-0.25,+Inf,-Inf,+0,-0]`. Run through a compiled public workflow with actual
-bindings, then apply common nonzero/disjoint ROI, fixed-read, owner,
-cancellation and resource tests. There is no implementation of these new keys
-claimed here; executable targets, commands and platform evidence are delivery work.
-
-## Maintained implementation and validation
-
-This operation is registered in `plugins/ops/01-numeric/numeric_unary.cpp` and
-exposed through `photospider/ops/numeric/unary.hpp`. It uses one fixed CPU invocation per selected output tile, validated input views and preallocated output/scratch. Its numerical path follows
-[the shared implementation notes](../math-implementation.md).
+Fixture: `[2,-4,+0,-0,+Inf,-Inf]` gives `[0.5,-0.25,+Inf,-Inf,+0,-0]`.

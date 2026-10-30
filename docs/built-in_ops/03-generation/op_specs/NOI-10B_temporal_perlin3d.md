@@ -16,61 +16,28 @@ operation_keys:
 
 # NOI-10B: temporal perlin3d
 
-Inherit [NOI-10](NOI-10_temporal_contract.md), [GEN common](GEN_common_contract.md), and
-the applicable [random](NOI_random_contract.md) and [geometry](PTH_geometry_contract.md)
-contracts. A key includes algorithm version
-and profile; within one version/profile, output bits and discrete decisions are fixed.
+Inherits [NOI-10](NOI-10_temporal_contract.md) and [GEN common](GEN_common_contract.md).
 
-## Runtime implementation
+## Interface
 
-The registered CPU profiles above accept Float32/Float64 coordinates and scalar
-controls, with output `values` dtype defaulting to float64. There are no RNG
-parameters. Exact z construction precedes periodic lattice reduction and polynomial
-evaluation, including intermediate products outside the binary64 range. Interval
-evaluation uses a proved final-output bound and exact fallback. Coordinate tuples
-are regional reads; the scalar controls are complete dependencies. `max_work`
-bounds actual work. No GPU key is registered.
-
-## Interface and representation
+Operation keys: `noise.temporal_perlin3d_v1_strict`, `noise.temporal_perlin3d_v1_accelerated_apple_silicon`, `noise.temporal_perlin3d_v1_accelerated_x86_64`.
 
 coordinates[S...,2],time[1],time_scale[1],z_offset[1]; values[S...].
 
-## Parameters and domain
+### Parameters and domain
 
 dtype; fixed NOI-04A basis, no seed; finite time, positive time_scale in 1/second.
 
-## Mathematical specialization
+Inputs are Float32/Float64 coordinates and scalar controls; `values` dtype defaults to `float64`. There are no RNG parameters.
 
-z=time*time_scale+z_offset exactly; RN_T(Perlin2002(x,y,z)). Time period
-is256/time_scale; arbitrary time queries need no accumulated frame state. Spatial
-frequency is explicit upstream mapping.
+## Mathematics
 
-## Dependencies, resources and failures
+z=time*time_scale+z_offset exactly; RN_T(Perlin2002(x,y,z)). Time period is256/time_scale; arbitrary time queries need no accumulated frame state. Spatial frequency is explicit upstream mapping.
 
-Execution support: **Regional**. Lower each selected complete output tile to
-fixed tasks with explicit query/sample and control-member tile reads. Close each
-read on its source grid; payload validity over the consumed support is a caller
-premise. Empty output selection performs static preparation without payload tasks.
-Shared computation uses explicit task dependencies and private intermediate
-Results under GEN-common.
+## Behavior
 
-Regional O(8*count(Q)).
+Support class: Regional. The scalar controls apply to every coordinate.
 
-All output, scratch, indices, algorithmic work and retained owners are accounted. Poll
-cancellation in bounded loops. Preserve static structural failures and actual
-resource, cancellation, backend and upstream statuses. Member-specific no-solution,
-refinement or quality failures apply to valid inputs and the explicitly declared
-algorithm; numerical-premise violations have no prescribed runtime diagnostic.
-Never replace budget/cancellation failure with a lower-quality successful prefix. Views,
-lifetime and actual returned coverage inherit GEN-common.
-
-## Independent fixtures and acceptance
+## Acceptance
 
 Slice equivalence and exact periodic coordinates; no aperiodicity/STBN claim.
-
-Check selected-tile/full-output equivalence, source-grid read closure, legal
-strides/offsets, separate/joint outputs, version/profile identity, low budgets, cancellation,
-associations and retained owners as applicable. The [oracle
-coverage](../oracle-coverage.md) describes the available finite reference subset; it is
-not runtime completion. No unverified GPU or third-party bit
-identity is implied by these requirements.

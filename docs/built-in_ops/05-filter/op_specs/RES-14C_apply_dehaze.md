@@ -20,66 +20,38 @@ oracle_scope: mathematical_reference
 
 Application of the transmission model.
 
-Inherits the [RES-14 family contract](RES-14_contract.md), [FILTER common contract](FILTER_common_contract.md), [NUM numerical/precision contract](../../01-numeric/op_specs/NUM_common_contract.md), and [FMT metadata/straight-color semantics](../../02-format-color/op_specs/FMT_common_contract.md). The family and member formulas together form the complete draft; this member cannot override RN, underflow, or accelerated error baselines.
+Inherits the [RES-14 family contract](RES-14_contract.md), [FILTER common contract](FILTER_common_contract.md), [NUM numerical/precision contract](../../01-numeric/op_specs/NUM_common_contract.md), and [FMT metadata/straight-color semantics](../../02-format-color/op_specs/FMT_common_contract.md). RN, underflow, and accelerated error baselines are inherited and may not be weakened.
 
-## Ports, shapes, and semantics
+## Interface
+
+Operation keys: `restoration.apply_dehaze_strict`, `restoration.apply_dehaze_accelerated_apple_silicon`, `restoration.apply_dehaze_accelerated_x86_64`.
+
+### Ports
 
 The explicitly selected, linear, straight RGB group with no associated alpha plane, Float64 `[3]` airlight, and same-shape single-plane transmission → same-shape opaque RGB `output`. Reject alpha-associated structure at preflight without scanning alpha samples. Input RGB must be finite and nonnegative.
 
-Ports carry Results with fixed Tensor member schemas. Unless the member defines an explicit color interpretation, samples are raw numerical values; channel count does not imply RGB or alpha. Color interpretation is explicit configuration. Positive extents, axes and explicit broadcasting are checked during static construction. Materialized output tiles have independent allocations. FilterBands and FrequencyGrid are proposed SDK/workflow representations under the collection contract; lowering records each selected output's fixed reads and writes.
-
-## Static parameters and legal domains
+### Parameters
 
 t_floor ∈ (0,1] (0.1 is illustrative, not a default); explicit `input_description` and RGB `group`. No automatic contrast, gamma, or clipping.
 
 Inherit NaN, Inf, overflow, signed-zero, payload, rounding, and precision semantics from the corresponding NUM operation. Callers guarantee the member's finite-parameter, control-model and numerical-domain premises; production execution does not validate those premises. Copy/bypass and unconsumed data follow their dependency contracts. Every parameter must be supplied explicitly; constructors provide no defaults, except constants fixed by a named mathematical profile. Real parameters denote their stored Float64 values; decimal text is not treated as an exact real.
 
-## Mathematical reference and rounding boundaries
+## Mathematics
 
 Numeric classification: **E**. See [FILTER_numeric_reference](FILTER_numeric_reference.md) for the meanings of E/B/S.
 
 Callers guarantee t∈[0,1]. Let te=max(t,t_floor), then `J_c=RN_t(A_c+(I_c-A_c)/te)`. At t=1, explicitly copy I without reading A samples and preserve its bits, under the caller premise that consumed I is finite and nonnegative. The output may be signed and may be HDR; the input’s nonnegative-value guarantee does not carry over.
 
-When a formula calls another member, preserve the RN stages produced by that call as specified here or by the family contract. Internal temporary operations must not add undeclared rounding. Signed zero, numerical-domain premises and explicit valid-input no-solution outcomes, gradual underflow, and output range follow the common contract and NUM.
+## Behavior
 
-## Fixed reads, algorithmic control and schemas
+For each requested color component, read only its I and t; when te<1, read the corresponding A_c. No other RGB component payload is needed. The selected group schema is checked statically under explicit caller-supplied color interpretation.
 
-For each requested color component, read only its I and t; when te<1, read the corresponding A_c. No other RGB component payload is needed. Static preparation checks the selected group schema under explicit caller-supplied color interpretation.
+ROI and tile edges are not image boundaries; boundary coordinates use the complete logical image.
 
-Boundary coordinates use the complete logical image; ROI and tile edges are not new image boundaries. Lowering closes mathematical sample support on fixed input member-tile grids. Data-dependent selection uses a finite static superset of every address the task may consume; runtime selection does not expand the Plan. Data and control are algorithmic inputs, with no separate Validation read set. Empty retained selections introduce no payload tasks. Output schemas derive only from static parameters and input schemas. Numerical, encoding and association premises remain unchecked under the common contract.
-
-## Algorithm, resources, and execution
-
-O(PC), using exact rational arithmetic. Transmission remains algorithmic branch control within the fixed reads, including on the identity branch.
-
-Here P=HW, C is the number of independent planes, A is the tap count, and T is the iteration count. Arbitrary-precision limb complexity is additional and is not a measured benchmark. Shared contracts govern work/memory/stage admission, cancellation, failure status, and owner lifetime; a failed call publishes no successful Result export, while previously retired call exports remain valid and final RET results require successful Run completion. Do not spill automatically, silently reduce precision, or fall back to retired implementations.
-
-## Oracle, fixtures, and acceptance
+## Acceptance
 
 For I=0.6, A=1, and t=0.5, output is 0.2. t=0 uses the floor; t=1 copies. Do not clip negative J. An R-only request does not read poisoned G/B values.
 
-The reference function evaluates the numerical formula on small inputs; it is neither a production kernel nor a complete port-schema/preflight simulator. ExactRational rounds rational expressions directly to IEEE format. For transcendental functions, only a DirectedMPFR result whose interval endpoints round to the same value is a strict golden. If rounding cannot be determined, report Inconclusive rather than substituting an approximation.
-
-`res14.restoration.apply_dehaze(image, airlight, transmission, *, t_floor=0.1, dtype='float64')` → [source](../../../../oracle/ops/filter/res14/restoration.py).
-
-Fixture mapping and evidence scope: see [oracle coverage](../oracle-coverage.md).
-
-See the [oracle README](../../../../oracle/ops/filter/README.md) for reproduction and evidence classes. The listed self-checks validate only the reference program. Parameter boundaries, full rank/batch behavior, metadata, compiled ROI/tile selection, budgets, cancellation, and ownership still require the [runtime acceptance protocol](FILTER_oracle_protocol.md). Passing an identity or constant fixture does not accept the whole algorithm or every configuration.
-
-## Backend and registration gates
-
-The keys above are naming proposals only; neither strict nor either CPU accelerated profile is registered or implemented. Accelerated profiles must satisfy NUM final-output bounds of four ULP at FP32 scale and provide strict fallback. The error allowance does not accumulate per tap, axis, stage, or iteration. Thresholds, ordering, boundaries, copies, and output support requiring exact selection cannot change through approximation.
-
-Float64 acceleration retains Float64 inputs, outputs, and exponent range; it does not first convert to Float32. Values outside the Float32-scale range use strict NUM fallback. No kernel, CPU/ISA performance, or differential acceptance runs for this package have been performed.
-
-## Conceptual DAG (not an existing API)
-
-`static parameters + schemas → compile fixed reads/tasks → prepare → unchecked arithmetic with declared RN stages → complete tiles → ordered call retirement`
-
-This sketch introduces no implicit color conversion, hidden alpha premultiplication, automatic spectral correction, or zero-filling of missing data. complete-input behavior and multi-stage buffers are governed by this member and its family contract.
-
-## References and conformance notes
+## References
 
 [S23 · He, Sun, Tang: Single Image Haze Removal](../research-sources.md#s23)
-
-External sources motivate the algorithm or definitions. The finite window, rounding, tie-breaking, units, and execution profile are explicit contract choices; bitwise identity with any library or commercial product is not claimed.

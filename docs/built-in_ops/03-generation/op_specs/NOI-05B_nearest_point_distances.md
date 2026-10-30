@@ -16,65 +16,28 @@ operation_keys:
 
 # NOI-05B: nearest point distances
 
-Inherit [NOI-05](NOI-05_cellular_contract.md), [GEN common](GEN_common_contract.md), and
-the applicable [random](NOI_random_contract.md) and [geometry](PTH_geometry_contract.md)
-contracts. A key includes algorithm version
-and profile; within one version/profile, output bits and discrete decisions are fixed.
+Inherits [NOI-05](NOI-05_cellular_contract.md) and [GEN common](GEN_common_contract.md).
 
-## Runtime implementation
+## Interface
 
-The three registered CPU keys above accept Float32/Float64 coordinate tuples and
-the canonical `photospider.ops.dynamic_points` v1 schema. They expose independent
-`f1`, `f2`, and `nearest_id` outputs; `dtype` defaults to `float64`.
-Each query scans the published valid rows while retaining only its best two sites.
-Outward distance bounds accelerate comparisons; overlap, equality and signed-ID
-ordering use exact arithmetic. All profiles retain strict final square-root rounding.
-The complete positions/IDs/count control set is a declared dependency; point payloads
-and association are not scanned for validity. `max_work` is an operational budget.
-No GPU key is registered.
-
-## Interface and representation
+Operation keys: `noise.nearest_point_distances_v1_strict`, `noise.nearest_point_distances_v1_accelerated_apple_silicon`, `noise.nearest_point_distances_v1_accelerated_x86_64`.
 
 coordinates[S...,2], [DynamicPoints v1](GEN-08_point_distributions_contract.md); f1,f2 and nearest_id.
 
-## Parameters and domain
+### Parameters and domain
 
-dtype; at least two distinct IDs; coincident positions allowed; valid PointSet
-association.
+dtype; at least two distinct IDs; coincident positions allowed; valid PointSet association.
 
-## Mathematical specialization
+Inputs: Float32/Float64 coordinate tuples and the canonical `photospider.ops.dynamic_points` v1 schema. Outputs: independent `f1`, `f2` and `nearest_id`. Parameter: String `dtype` (default `float64`). Square roots keep the final RN32/RN64 rounding in every profile.
 
-Treat published positions as exact points. Sort by (squared distance,id), return RN_T
-square roots of first two distances and first ID. Coincident distinct IDs can give
-F1=F2=0; rows do not decide ties.
+## Mathematics
 
-## Dependencies, resources and failures
+Treat published positions as exact points. Sort by (squared distance,id), return RN_T square roots of first two distances and first ID. Coincident distinct IDs can give F1=F2=0; rows do not decide ties.
 
-Execution support: **Regional**. Lower each selected complete output tile to
-fixed tasks with explicit query/sample and control-member tile reads. Close each
-read on its source grid; payload validity over the consumed support is a caller
-premise. Empty output selection performs static preparation without payload tasks.
-Shared computation uses explicit task dependencies and private intermediate
-Results under GEN-common.
+## Behavior
 
-Regional coordinate queries with complete point control set; O(count(Q)*M), equivalent
-BVH allowed.
+Support class: Regional. Each query depends on the complete positions, IDs and count of the point set; point payloads and their association are not scanned for validity.
 
-All output, scratch, indices, algorithmic work and retained owners are accounted. Poll
-cancellation in bounded loops. Preserve static structural failures and actual
-resource, cancellation, backend and upstream statuses. Member-specific no-solution,
-refinement or quality failures apply to valid inputs and the explicitly declared
-algorithm; numerical-premise violations have no prescribed runtime diagnostic.
-Never replace budget/cancellation failure with a lower-quality successful prefix. Views,
-lifetime and actual returned coverage inherit GEN-common.
-
-## Independent fixtures and acceptance
+## Acceptance
 
 Bisector tie, coincident sites, row permutation invariance, at least two valid points with distinct IDs as an unchecked premise.
-
-Check selected-tile/full-output equivalence, source-grid read closure, legal
-strides/offsets, separate/joint outputs, version/profile identity, low budgets, cancellation,
-associations and retained owners as applicable. The [oracle
-coverage](../oracle-coverage.md) describes the available finite reference subset; it is
-not runtime completion. No unverified GPU or third-party bit
-identity is implied by these requirements.

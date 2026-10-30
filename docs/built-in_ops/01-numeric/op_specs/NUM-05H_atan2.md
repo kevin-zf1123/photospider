@@ -16,95 +16,31 @@ implementation_status: implemented
 
 # NUM-05H: atan2
 
-Numeric profile: strict retains the exact reference defined below. Floating
-arithmetic in accelerated profiles follows the shared
-[final FP32 four-ULP contract](NUM_accelerated_contract.md), including its
-range/fallback rules. Discrete results, copies, selected endpoints and special
-values remain exact.
+Numeric profile: strict is the exact reference defined below. Floating arithmetic in accelerated profiles follows the shared [final FP32 four-ULP contract](NUM_accelerated_contract.md). Discrete results, copies, selected endpoints and special values are exact. Inherits the [NUM baseline](NUM_common_contract.md) and the [binary contract](NUM-05_binary_contract.md); explicit rules below take precedence.
 
-Inherit the [NUM baseline](NUM_common_contract.md) for specification status,
-registration, shared execution and acceptance requirements; explicit rules below
-and in the named family contract take precedence.
+Inputs are named `y` (first operand) and `x` (second operand), with identical shape and dtype, Float32 or Float64. Output `values` preserves shape and dtype, has no attached domain description, and expresses the oriented angle in radians. There is no static angle-unit parameter or degree output. The binary contract applies with y/x in place of a/b for both-operand dependency and NaN priority. Integer inputs require explicit cast. Keys: `numeric.atan2_strict`, `numeric.atan2_accelerated_apple_silicon`, `numeric.atan2_accelerated_x86_64`.
 
-Inputs are named `y` (first operand) and `x` (second operand), with identical
-shape and dtype, Float32 or Float64. Output `values` preserves shape and dtype,
-has no attached domain description, and expresses the oriented angle in radians.
-No static angle-unit parameter or degree output exists. Inherit the
-[binary contract](NUM-05_binary_contract.md), substituting y/x for a/b in
-both-operand support and NaN priority. Integer inputs require explicit cast.
+## Mathematics
 
-## Mathematical and special-value semantics
+For finite inputs away from the origin, the principal angle theta is the polar argument of x+i*y with range [-pi,pi]. Strict rounds the mathematical `atan2(y,x)` directly to the output dtype; an already-rounded radian angle is never divided by a rounded pi. Both inputs are read even when a special case fixes the result.
 
-For finite inputs away from the origin, the principal angle theta is the polar
-argument of x+i*y with range [-pi,pi], selecting the signed branch as below.
-Strict rounds the mathematical `atan2(y,x)` directly to output dtype. The
-normalized operation never divides an already-rounded radian angle by a rounded
-pi. Both inputs remain declared dependencies and are read even when a special case fixes the result; their payload is not validated.
-
-If either input is NaN, quiet and preserve it; if both are NaN, y's payload/sign
-wins. Otherwise apply the following exact table. Here s is the sign of y,
-including signed zero; s*0 means zero with that sign. Every listed result is a
-successful numeric output. For atan2 return RN_dtype(theta); for atan2pi return
-the listed exact theta/pi, without an intermediate rounded theta.
+If either input is NaN, it is quieted and preserved; if both are NaN, y's payload and sign win. Otherwise the following exact table applies. Here s is the sign of y, including signed zero; s*0 means zero with that sign. Every listed result is a successful numeric output. For atan2 the result is RN_dtype(theta), where theta is the listed theta/pi times exact pi.
 
 | Condition | theta/pi |
 | --- | --- |
-| y=±0 and x positive or +0 | s*0 |
-| y=±0 and x negative or -0 | s*1 |
-| x=±0 and y finite nonzero | s*1/2 |
-| y=±Inf and x finite | s*1/2 |
-| y=±Inf and x=+Inf | s*1/4 |
-| y=±Inf and x=-Inf | s*3/4 |
+| y=+-0 and x positive or +0 | s*0 |
+| y=+-0 and x negative or -0 | s*1 |
+| x=+-0 and y finite nonzero | s*1/2 |
+| y=+-Inf and x finite | s*1/2 |
+| y=+-Inf and x=+Inf | s*1/4 |
+| y=+-Inf and x=-Inf | s*3/4 |
 | y finite and x=+Inf | s*0 |
 | y finite and x=-Inf | s*1 |
 
-The zero-y rows also cover infinite x according to its sign. In particular the
-four signed-zero origin combinations retain directional information. Ordinary
-finite nonzero inputs use their exact real ratio/direction; avoid an overflowing
-or underflowing y/x intermediate that destroys quadrant or accuracy information.
+The zero-y rows also cover infinite x according to its sign. The four signed-zero origin combinations keep their directional information. Ordinary finite nonzero inputs use their exact real ratio and direction; an overflowing or underflowing y/x intermediate must not destroy quadrant or accuracy information.
 
-## Numerical quality, implementation and resources
+Accelerated finite nonzero outputs are within four FP32-scaled ULP of strict. NaN/Inf/zero classification and signs match strict, and every table entry matches the strict rounded output exactly. Correctly rounded endpoints and neighbors near pi follow the rounding contract; rounded radians are not clamped to a floating approximation of pi.
 
-Accelerated finite nonzero outputs are within four FP32-scaled ULP of strict.
-NaN/Inf/zero classification and signs match strict, and all entries of the table
-match the strict rounded output exactly. Apply [exp's fallback, diagnostic and
-refinement rules](NUM-04D_exp.md), including per-profile independence from vector
-width/batching, budget accounting and ResourceExhausted on unresolved rounding.
-An approximate atan2 followed by division does not by itself prove the atan2pi
-bound. Validate the final operation, using exact special cases separately.
+## Acceptance
 
-The mathematical range does not justify clamping rounded radians to a floating
-approximation of pi: correctly rounded endpoints and neighboring values follow
-the rounding contract. For atan2pi, outputs remain within [-1,1] in every profile.
-
-These are candidate-selection
-facts, not a verified full-range bound for a pinned Photospider backend. Float64
-strict and normalized variants require separately established implementations.
-
-## Acceptance and current status
-
-Conceptual public fixture: y=[+0,-0,1,-1], x=[-0,-0,+0,+0]. The normalized
-outputs are [1,-1,0.5,-0.5]; radian outputs are independently correctly rounded
-[pi,-pi,pi/2,-pi/2]. Check all sign combinations at axes, origin and infinities,
-NaN payload priority, huge and subnormal ratios, quadrant boundaries, diagonal
-neighbors and hard rounding cases. Use an independent high-precision angle
-oracle with direct destination rounding and separately explicit special bits.
-
-Exercise shared disjoint demand, both upstream dependencies, structural-validation
-closure, lifetime, resource exhaustion, cancellation and actual fallback
-through public WorkflowDocument execution. The maintained implementation and
-actual validation are recorded below.
-
-## Maintained implementation
-
-The three keys are registered by `plugins/ops/01-numeric/numeric_binary.cpp`,
-with independently named constructors in `photospider/ops/numeric/binary.hpp`.
-The fixed adapter declares both intersecting input tile sets, including when a numeric identity determines a result.
-Floating elementary operations use controlled correctly rounded hardware
-arithmetic after exact special-value classification, with exact fallback; integer
-operations use exact arithmetic under the caller premise of representable
-integer results; fixed arithmetic-capacity failures remain operational. Accelerated ordinary positive-base
-power and angle results use SLEEF binary64 enclosures within the shared admitted
-ranges. atan2pi divides an angle enclosure by an enclosed pi. Only rejected
-candidates dispatch the certified strict backend . See [math implementation](../math-implementation.md) for
-rounding, fixed scratch admission, cancellation and unresolved-refinement limits.
+Fixture: y=[+0,-0,1,-1], x=[-0,-0,+0,+0] gives [pi,-pi,pi/2,-pi/2] (each independently correctly rounded). Cases: all sign combinations at axes, origin and infinities, NaN payload priority, huge and subnormal ratios, quadrant boundaries, diagonal neighbors and hard rounding cases, against an independent high-precision angle reference with direct destination rounding.

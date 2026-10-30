@@ -16,35 +16,16 @@ implementation_status: implemented_manual_acceptance
 
 # NUM-07C: less
 
-Numeric profile: strict retains the exact reference defined below. Floating
-arithmetic in accelerated profiles follows the shared
-[final FP32 four-ULP contract](NUM_accelerated_contract.md), including its
-range/fallback rules. Discrete results, copies, selected endpoints and special
-values remain exact.
+Numeric profile: strict is the exact reference. The result is discrete and bitwise identical across the three CPU profiles. Inherits the [NUM baseline](NUM_common_contract.md) and the [exact comparison contract](NUM-07_comparison_contract.md) in full; explicit rules below take precedence.
 
-Inherit the [NUM baseline](NUM_common_contract.md) for specification status,
-registration, shared execution and acceptance requirements; explicit rules below
-and in the named family contract take precedence.
+## Interface
 
-For each coordinate in a requested output tile, return UInt8 1 when `a < b` is true, otherwise
-UInt8 0. Inputs `a` and `b` have identical shape and dtype (UInt8, Int64, Float32
-or Float64). Output `values` has that shape and no attached domain description. No static numeric
-parameters or implicit cast/broadcast is provided.
+For each coordinate in a requested output tile, returns UInt8 1 when `a < b` is true, otherwise UInt8 0. Inputs `a` and `b` have identical shape and dtype (UInt8, Int64, Float32 or Float64). Output `values` has that shape and no attached domain description. There are no static parameters or implicit cast/broadcast. Keys: `numeric.less_strict`, `numeric.less_accelerated_apple_silicon`, `numeric.less_accelerated_x86_64`.
 
-Inherit the [exact comparison contract](NUM-07_comparison_contract.md) in full:
-floating numeric relations, NaN behavior, signed-zero equality, exact integer
-comparison, bitwise equivalence of the three CPU profiles, fixed two-port tile support, structural preparation, returned storage, resources, errors and lifetime requirements. This is numerical comparison, not bit-pattern comparison.
+## Mathematics
 
-## Acceptance and implementation status
+The result is 1 exactly when the numerical relation `a < b` holds. This is numerical comparison, not bit-pattern comparison: signed zeros compare equal, NaN handling and exact integer comparison follow the comparison contract.
 
-Conceptual public fixture: a=[1,2,3], b=[2,2,2] -> [1,0,0]. Bind both
-arrays in WorkflowDocument, compile the selected key and read UInt8 values
-through ExecutionContext. Repeat all supported dtypes and valid platform keys.
-Use independent exact relation/bit classification rather than the production
-comparison helper. Include Int64 extrema and values above 2^53, signed zeros,
-subnormal neighbors, infinities, signaling/quiet NaNs in either input position
-and the shared disjoint/strided/resource/structural-validation acceptance cases.
+## Acceptance
 
-All three profile definitions lower to fixed tile tasks. Temporary acceptance should check declared input support, special bits, signed strides, cancellation/resources and composition with select. The specification remains Proposed; these requirements do not report a test or performance result.
-
-See [NUM-07 fixed execution](../comparison-execution.md) for invocation, capacity and validation boundaries.
+Fixture: a=[1,2,3], b=[2,2,2] gives [1,0,0], for all supported dtypes. Cases: Int64 extrema and values above 2^53, signed zeros, subnormal neighbors, infinities, and signaling/quiet NaNs in either input position, against an independent exact relation and bit classification.

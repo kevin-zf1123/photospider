@@ -15,18 +15,20 @@ clarification_status: complete
 
 # CRV-08A: linear_shaper
 
-The public `linear_shaper` helper expands ordinary workflow nodes; it does not register a new primitive. Ordered inputs are single-tensor Results input, lower and upper, with arbitrary schema/member names. Complete sample shapes include batch axes. Input is Float32/Float64, rank 1..8, positive extents and at most 2^40 elements. Bounds are same-dtype scalars with shape `[1]`. Output `values` uses `photospider.tensor`/`samples` with ordinary input axes and unchanged dtype.
+The public `linear_shaper` helper expands ordinary workflow nodes; it does not register a new primitive.
 
-The mathematical formula is `(input-lower)/(upper-lower)`, with one final rounding of the complete remap expression and no clipping. Finite ordered bounds `lower<upper` are an unchecked caller precondition. Within that domain, endpoint bits, NaN quieting/payload, signed zero and infinity extensions follow [remap_range](NUM-06B_remap_range.md). Strict results are bitwise reproducible; accelerated profiles retain the [shared floating bound](NUM_accelerated_contract.md). Invalid bound payloads have no promised runtime diagnostic.
+## Interface
 
-## Fixed composition and execution
+Ordered inputs are single-tensor Results input, lower and upper, with arbitrary schema/member names. Complete sample shapes include batch axes. Input is Float32/Float64, rank 1..8, positive extents and at most 2^40 elements. Bounds are same-dtype scalars with shape `[1]`. Output `values` uses `photospider.tensor`/`samples` with ordinary input axes and unchanged dtype. Shape/dtype mismatches fail before execution.
 
-The helper constructs scalar zero/one literals, expands bounds and literals through fixed constant tasks, and applies fixed remap tasks. Each selected output tile and selected intermediate has an independent dense allocation. Empty selection emits no payload work. Source affine views may have negative/zero strides and unaligned offsets after bounds validation. All admitted intermediates count toward block capacity, and successful output owners outlive the execution context.
+## Mathematics
 
-The inverse retains a scalar `remap(lower,lower,upper,lower,lower)` dependency before target-lower expansion. This preserves lower bits for valid bounds; it is not a runtime order validator. Shape/dtype mismatches fail before execution. Resource, backend, cancellation and upstream failures retain their operational statuses. Fixed tasks use the declared sample dependencies and preallocated output tiles, with no complete-input validation, content cache or full-output publication callback.
+The formula is `(input-lower)/(upper-lower)`, with one final rounding of the complete remap expression and no clipping. Finite ordered bounds `lower<upper` are an unchecked caller precondition. Within that domain, endpoint bits, NaN quieting/payload, signed zero and infinity extensions follow [remap_range](NUM-06B_remap_range.md). Strict results are bitwise reproducible; accelerated profiles retain the [shared floating bound](NUM_accelerated_contract.md). Invalid bound payloads have no promised runtime diagnostic.
 
-Both Float32 and Float64 compositions use fixed operations. Float32 zero/one literals use count-one linspace with direct Float32 rounding; the unused endpoint and axis output add no payload tasks. Host profile availability remains required.
+## Conceptual DAG
+
+The helper constructs scalar zero/one literals (count-one linspace with direct rounding for Float32), expands bounds and literals through constant operations, and applies remap_range; see the [CRV-08 linear composition](CRV-08_shaper.md#conceptual-dag-linear-composition).
 
 ## Acceptance
 
-For a valid fixture, lower=-2, upper=2, input=[-2,0,2,4] gives [0,0.5,1,1.5]. Temporary public Compiler/ExecutionContext checks compare an independent exact rational formula, including endpoints, IEEE specials, partial/empty selection, source layouts, concurrent bindings and output ownership. Check only supported execution paths and state any remaining dependency limitation. Out-of-domain bounds are not rejection tests for the unchecked fixed kernel. See the [CRV-08 linear composition](CRV-08_shaper.md#linear-composition), [fixed arrays](../arrays-execution.md) and [fixed ranges](../range-execution.md). Specification status remains Proposed.
+For a valid fixture, lower=-2, upper=2, input=[-2,0,2,4] gives [0,0.5,1,1.5]. Expected values come from an exact rational formula, including endpoints and IEEE specials. Out-of-domain bounds are not rejection tests.

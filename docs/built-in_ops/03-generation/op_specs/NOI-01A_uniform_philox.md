@@ -14,53 +14,26 @@ operation_keys:
 
 # NOI-01A: uniform philox
 
-Inherit [NOI-01](NOI-01_uniform_contract.md), [GEN common](GEN_common_contract.md), and
-the applicable [random](NOI_random_contract.md) and [geometry](PTH_geometry_contract.md)
-contracts. A key includes algorithm version
-and profile; within one version/profile, output bits and discrete decisions are fixed.
+Inherits [NOI-01](NOI-01_uniform_contract.md) and [GEN common](GEN_common_contract.md).
 
-## Interface and representation
+## Interface
+
+Operation keys: `noise.uniform_philox_v1_strict`.
 
 No Tensor input; raw values[H,W,C] Float32/64.
 
-## Parameters and domain
+### Parameters and domain
 
-canvas,C=1..65536,dtype default Float64,seed/stream/frame; signed32 global coordinates;
-domain 1, draw fixed to 0 without a user-adjustable draw parameter.
+canvas,C=1..65536,dtype default Float64,seed/stream/frame; signed32 global coordinates; domain 1, draw fixed to 0 without a user-adjustable draw parameter.
 
-## Mathematical specialization
+## Mathematics
 
-Use Philox4x64-10 and the separately frozen address/bit mapping. Float32 returns
-halfopen24 j/2^24; Float64 halfopen53 j/2^53, both exactly representable. Native Float32
-is not a cast of the Float64 sequence.
+Use Philox4x64-10 and the separately frozen address/bit mapping. Float32 returns halfopen24 j/2^24; Float64 halfopen53 j/2^53, both exactly representable. Native Float32 is not a cast of the Float64 sequence.
 
-## Dependencies, resources and failures
+## Behavior
 
-Execution support: **Regional**. Lower each selected complete output tile to
-fixed tasks with explicit query/sample and control-member tile reads. Close each
-read on its source grid; payload validity over the consumed support is a caller
-premise. Empty output selection performs static preparation without payload tasks.
-Shared computation uses explicit task dependencies and private intermediate
-Results under GEN-common.
+Support class: Regional.
 
-Regional samples, O(C*area(Q)); fixed word scratch.
+## Acceptance
 
-All output, scratch, indices, algorithmic work and retained owners are accounted. Poll
-cancellation in bounded loops. Preserve static structural failures and actual
-resource, cancellation, backend and upstream statuses. Member-specific no-solution,
-refinement or quality failures apply to valid inputs and the explicitly declared
-algorithm; numerical-premise violations have no prescribed runtime diagnostic.
-Never replace budget/cancellation failure with a lower-quality successful prefix. Views,
-lifetime and actual returned coverage inherit GEN-common.
-
-## Independent fixtures and acceptance
-
-Official 4x64 core KATs, address bounds, negative origin, ROI/order invariance;
-finite-grid statistics do not certify a runtime sequence.
-
-Check selected-tile/full-output equivalence, source-grid read closure, legal
-strides/offsets, separate/joint outputs, version/profile identity, low budgets, cancellation,
-associations and retained owners as applicable. The [oracle
-coverage](../oracle-coverage.md) describes the available finite reference subset; it is
-not runtime completion. No unverified GPU or third-party bit
-identity is implied by these requirements.
+Official 4x64 core KATs, address bounds, negative origin, ROI/order invariance; finite-grid statistics do not certify a runtime sequence.

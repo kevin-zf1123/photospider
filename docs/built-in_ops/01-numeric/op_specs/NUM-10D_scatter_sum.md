@@ -16,10 +16,16 @@ implementation_status: implemented
 
 # NUM-10D: scatter_sum
 
-Inherit the [fixed scatter contract](NUM-10_scatter_contract.md) for ports, shape/dtype rules, unchecked index premises, task dependencies, numerical classification, scratch and lifetime. Each input Result contains one tensor; output `values` uses ordinary base axes in `photospider.tensor`/`samples`. Empty selection emits no tasks.
+Inherits the [scatter contract](NUM-10_scatter_contract.md) for ports, shape/dtype rules, unchecked index premises, numerical classification and the base-axis semantics. Each input Result contains one tensor; output `values` uses ordinary base axes in `photospider.tensor`/`samples`.
 
-Sum base and all matching updates exactly, then perform one destination conversion. Integer final representability is an unchecked caller precondition; intermediate totals may exceed range. For base INT64_MAX and matching updates [1,-1], return INT64_MAX. Floating overflow produces infinity; finite cancellation is evaluated before rounding. No unordered floating atomic accumulation is used.
+## Mathematics
 
-If no update hits a coordinate, copy base bits without arithmetic, including signaling NaNs. Every nonempty call constructs the stable index table once in a shared task without index validation. Output tasks compute only selected tiles and read the shared stable index table, their base region and all possible update positions for their non-axis region. Base remains immutable. Indices and normalized positions satisfy unchecked caller premises. Operational resource/cancellation failures prevent successful call publication.
+The base and all matching updates are summed exactly, then converted once to the destination dtype. Integer final representability is an unchecked caller precondition; intermediate totals may exceed range. For base INT64_MAX and matching updates [1,-1], the result is INT64_MAX. Floating overflow produces infinity; finite cancellation is evaluated before rounding. The sum does not depend on any unordered accumulation. If no update hits a coordinate, the base bits are copied without arithmetic, including signaling NaNs. Base is not modified.
 
-For base `[10,20,30]`, indices `[1,1,2]`, updates `[2,3,4]` and axis 0, expect `[10,25,34]`. Temporary acceptance uses independent grouping and raw-bit or exact arithmetic references. Cover duplicate order, no-hit signaling NaNs, first-NaN precedence, infinities, zero signs, integer boundaries, partial/empty output, changing indices, source strides, precise read sets, artifacts and concurrent Runs. See [fixed indexing execution](../indexing-execution.md). Specification status remains Proposed.
+## Behavior
+
+Each selected output sample depends on its base sample and on all update positions along the scatter axis for its non-axis region, plus the complete indices vector. Indices and normalized positions satisfy the unchecked caller premises. Empty selection reads nothing.
+
+## Acceptance
+
+Base `[10,20,30]`, indices `[1,1,2]`, updates `[2,3,4]`, axis 0 gives `[10,25,34]`. Cases: duplicate order, no-hit signaling NaNs, first-NaN precedence, infinities, zero signs, integer boundaries, partial/empty output.

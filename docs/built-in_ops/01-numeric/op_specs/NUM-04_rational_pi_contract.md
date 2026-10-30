@@ -12,125 +12,41 @@ clarification_status: complete
 
 # NUM-04: exact rational pi-multiple inputs
 
-Numeric profile: strict retains the exact reference defined below. Floating
-arithmetic in accelerated profiles follows the shared
-[final FP32 four-ULP contract](NUM_accelerated_contract.md), including its
-range/fallback rules. Discrete results, copies, selected endpoints and special
-values remain exact.
+Numeric profile: strict is the exact reference defined by each operation. Floating arithmetic in accelerated profiles follows the shared [final FP32 four-ULP contract](NUM_accelerated_contract.md). Discrete results, copies, selected endpoints and special values are exact.
 
-Inherit the [NUM baseline](NUM_common_contract.md) for metadata, platform keys,
-floating environment, error scope, resources and public execution acceptance.
-The two Int64 ports and selected mathematical contracts below replace the
-floating unary interface. This shared file registers no generic dispatcher.
+Inherit the [NUM baseline](NUM_common_contract.md) for metadata, platform keys, floating environment and error scope. The two Int64 ports below replace the floating unary interface. This shared file registers no generic dispatcher.
 
-## Confirmed independent operations
+The four independent operations sinpi_rational, cospi_rational, tanpi_rational and sincpi_rational take an exact multiplier p/q of pi. They do not replace the Float32/Float64 sinpi/cospi/tanpi/sincpi operations, and a rounded 1/3 is never interpreted as exact one third.
 
-The maintainer requested exact p/q*pi inputs in addition to the existing floating
-pi-multiple functions. Add four independent operations: sinpi_rational,
-cospi_rational, tanpi_rational and sincpi_rational. Keep the existing Float32/
-Float64 sinpi/cospi/tanpi/sincpi interfaces; these new representations do not
-replace them or silently interpret a rounded 1/3 as exact one third.
+## Interface
 
-The ordered Result inputs provide numerator and denominator, each in a Result
-with exactly one tensor member in slot 0. Both tensors have Int64 dtype and identical sample shape. Structural metadata and fixed views are checked before issue.
-The output is a Result on port
-`values`, with the same shape and a static Float32 or Float64 dtype; the
-constructors default to Float64. Its schema is `photospider.tensor`, with tensor
-key `samples` and no attached domain description. The denominator must be positive at every
-computed position as an unchecked caller precondition; unreduced fractions are valid. No diagnostic outcome is promised for nonpositive denominators.
-Each operation has strict and independently named Apple Silicon/x86-64 CPU
-accelerated versions. Strict correctly rounds the exact mathematical result;
-accelerated allows at most four final FP32-scaled representable steps, retaining
-the corresponding floating pi-function's exact classification/zero/pole rules.
-Use strict fallback when the guarantee cannot be met.
+The ordered Result inputs provide numerator and denominator, each a Result with exactly one tensor member in slot 0. Both tensors have Int64 dtype and identical sample shape with rank 1..8, positive extents and at most 2^40 logical elements. The output is a Result on port `values` with the same shape and a static Float32 or Float64 dtype, schema `photospider.tensor`, tensor key `samples`, and no attached domain description. Constructors default the `dtype` parameter to Float64; direct nodes supply it explicitly. There is no automatic broadcast, integer/float mixing or alternate denominator-sign mode. Both input Results are dependencies even when the numerator is zero.
 
-Tanpi_rational at exact half-integer ratios returns the fixed positive quiet
-NaN as success. Sincpi_rational at p=0 is +1, and at nonzero integer ratios is
-+0. For sinpi_rational/cospi_rational/tanpi_rational, reduced denominators
-1,2,3,4,6 define additional correctly rounded common-angle paths in every
-profile. Other ratios retain the accelerated bound. Sincpi_rational retains
-its whole-function bound and only its own zero/integer exact landmarks.
+The denominator is positive at every computed position as an unchecked caller precondition; unreduced fractions are valid. Malformed static parameters use `InvalidArgument`; wrong dtype or shape uses `TypeMismatch`. Each operation has strict and independently named Apple Silicon/x86-64 CPU accelerated versions.
 
-The exact ratio must survive argument reduction and the
-mathematical reference; rounding p/q to float before evaluation is not valid.
-The maintained keys and execution evidence are recorded below.
+## Mathematics
 
-## Complete type, angle and error contract
+For p = numerator and q = denominator > 0, the exact real multiplier is r = p/q. Equivalent fractions give the same result within a profile. Canonical evaluation reduces by the exact gcd, including for p = INT64_MIN. The original numerator sign determines the signs of integer zeros. Rounding p/q to float before evaluation is not valid.
 
-Both required Result ports must provide positive rank-1..8 tensor shapes with at
-most 2^40 logical elements; their slot-0 tensors must have exactly matching
-shape and Int64 dtype. The output preserves that shape and uses the selected
-static Float32/Float64 dtype. Constructors default to Float64, while direct
-nodes provide the `dtype` parameter. No automatic broadcast, integer/float
-mixing or alternate denominator-sign mode is provided. Both input Results
-remain actual dependencies, including when the numerator is zero.
+Strict evaluates the stated function of the exact angle pi*r and rounds once directly to the output dtype. Sincpi means the whole quotient sin(pi*r)/(pi*r), not a rounded sine followed by division, and keeps the full ratio in its denominator. Accelerated allows at most four final FP32-scaled representable steps, with the corresponding floating pi-function's exact classification, zero and pole rules. Sine and cosine outputs stay in [-1,1] in every profile.
 
-For p=numerator and q=denominator>0, the exact real multiplier is r=p/q. It has
-no negative-zero representation. Retain original numerator sign for specified
-integer zero signs. Reduce by exact gcd for canonical ratio evaluation, without
-signed overflow at INT64_MIN. Equivalent fractions must yield the same result
-within each fixed profile. Both source tile sets remain fixed dependencies.
+Exact landmarks, recognized with integer arithmetic:
 
-Recognize integers, halves, quarters and the selected reduced common-angle
-denominators using integer arithmetic before approximation. Integer p/q gives
-sin/tan zero with sign(p), with p=0 giving +0; cos gives parity-dependent +/-1.
-Half-integer sin is exactly +/-1, cos is +0, and tan is canonical positive quiet
-NaN. Quarter-angle sine/cosine use correctly rounded signed sqrt(1/2) and tan
-is +/-1. Reduced thirds/sixths use their exact algebraic trigonometric values,
-correctly rounded directly to output dtype. Sincpi at p=0 is +1 and all nonzero
-integers are +0. It retains the full ratio in its denominator, not only a
-periodically reduced remainder. No input NaN/Inf payload case exists for Int64.
+- Integer r: sin and tan give zero with sign(p), with p = 0 giving +0; cos gives the parity-dependent value +1 or -1.
+- Half-integer r: sin is exactly +1 or -1, cos is +0, and tan is the canonical positive quiet NaN `0x7fc00000` (Float32) or `0x7ff8000000000000` (Float64), returned as a successful result.
+- Quarter-integer r: sine and cosine are the correctly rounded signed sqrt(1/2); tan is +1 or -1.
+- Reduced denominators 1, 2, 3, 4 and 6 for sinpi_rational, cospi_rational and tanpi_rational use their exact algebraic values, correctly rounded directly to the output dtype, in every profile. Other ratios use the accelerated bound.
+- Sincpi at p = 0 is +1 and at every nonzero integer ratio is +0; these are its only exact landmarks.
 
-Strict evaluates the stated mathematical function of exact pi*r and rounds
-only once directly to output dtype. Sincpi means the whole quotient
-sin(pi*r)/(pi*r), not a rounded sine followed by division. No angle*pi product
-or rounded rational division may define this reference. Special NaN uses
-0x7fc00000 / 0x7ff8000000000000 for Float32/Float64, as a successful tan-pole
-result without leaking host floating flags. Other profile classification and
-signed-zero rules are exact. Sine/cosine outputs stay in [-1,1] in every profile.
+Examples: p = 2^53+1, q = 1 gives cos(pi*r) = -1 even though converting p to Float64 loses parity; p = 2^53+1, q = 2 is a tan pole even when floating p/q rounds to an integer; p = INT64_MIN, q = INT64_MAX keeps the tiny offset from -1 in the sine argument.
 
-Positive q is a caller precondition. Malformed static parameters use `InvalidArgument`; wrong dtype/shape uses `TypeMismatch` before issue. Upstream, resource and cancellation failures preserve their operational categories. Exact poles remain successful numeric results.
+## Behavior
 
-## Demand, algorithm and resource bounds
+Each output sample depends on the numerator and denominator samples at the same coordinate. Exact poles are successful numeric results. Upstream, resource and cancellation failures keep their operational categories.
 
-Each requested output tile lowers to one fixed task reading the intersecting tiles of both Int64 inputs and writing a preallocated dense Float32/Float64 tile. Inputs may have different batch/atomic grids and use the Plan's admitted affine layouts. Prepare validates each port's dtype and view independently of output width. Empty selection emits no tasks or payload reads. Metadata remains static, and successful Result owners survive the context.
+## Acceptance
 
-Use exact integer reduction modulo two for sine/cosine or one for tangent,
-retaining full magnitude for sincpi. Products such as 2*q, 4*p and absolute
-INT64_MIN require safe widened/limb arithmetic; never overflow signed Int64
-and test afterward. Reduced quadrant, sign and exact landmark dispatch precede
-function approximation. For strict evaluation of ordinary ratios, directed
-enclosures must include the exact rational input rather than a rounded MPFR/
-Float64 quotient treated as exact. Refine until final rounding is proved.
-
-Accelerated evaluation may use a native pi function only with a proved combined
-argument/evaluation error meeting the final contract. At non-dyadic r, ordinary
-sinpi(float(r)) alone is not that guarantee. Unsupported ranges use strict
-fallback. This fixed invocation does not emit per-value fallback counters. Runtime
-cancellation and resource errors are sticky failures, not fallback
-opportunities that erase them.
-
-Only selected output tiles allocate payload. The complete arithmetic and batch-buffer aggregate is reserved as Host scratch per active worker lane. Int64 operand sizes bound basic reduction width; directed refinement retains fixed capacity and precision limits. Query cancellation before each batch of at most 64 samples and within long arithmetic. Insufficient capacity or unresolved precision returns `ResourceExhausted`. Arithmetic checkpoints do not debit a dynamic sample-work budget.
-
-## Shared acceptance
-
-Test unreduced equivalent fractions, negative numerators, zero, INT64_MIN/MAX,
-q=1 and q=INT64_MAX, sparse output selections, all common-angle
-denominators and their near neighbors, and exact tan poles. For example,
-p=2^53+1,q=1 has cos(pi*r)=-1 even though converting p to Float64 loses parity;
-p=2^53+1,q=2 is a tan pole even when floating p/q rounds to an integer.
-For p=INT64_MIN,q=INT64_MAX, retain the tiny offset from -1 rather than rounding
-the ratio to -1 before sine evaluation.
-
-Use independent exact rational reduction and directed/high-precision function
-or algebraic root oracles. Common angles compare bits across every profile;
-other accelerated results compare final ULP and exact classification separately.
-Each child spec supplies an analytic fixture. Delivery must execute its actual
-public WorkflowDocument through Compiler/ExecutionContext with numerator and
-denominator bindings, explicit dtype and named values, supplying real commands.
-Exercise sparse/disjoint/strided demands, new bindings, low budgets,
-cancellation, fallback behavior and post-context result lifetime. The maintained
-implementation uses its own directed arithmetic backend; LLVM libc is not selected.
+Cases: unreduced equivalent fractions, negative numerators, zero, INT64_MIN/MAX, q = 1 and q = INT64_MAX, all common-angle denominators and their near neighbors, and exact tan poles. Common angles compare bits across every profile; other accelerated results compare final ULP and exact classification separately. The reference uses exact rational reduction and high-precision function or algebraic root evaluation.
 
 ## Individual specifications
 
@@ -138,11 +54,6 @@ implementation uses its own directed arithmetic backend; LLVM libc is not select
 - [NUM-04T cospi_rational](NUM-04T_cospi_rational.md).
 - [NUM-04U tanpi_rational](NUM-04U_tanpi_rational.md).
 - [NUM-04V sincpi_rational](NUM-04V_sincpi_rational.md).
-
 - [Floating unary contracts](NUM-04_unary_contract.md).
 - [Trigonometric contracts](NUM-04_trigonometric_contract.md).
 - [CIELCh exact-angle dependency](CRV-06D_color_ramp_cielch.md).
-
-## Maintained implementation and validation
-
-These four operations share the fixed invocation implementation in `numeric_math_operation.hpp` and are registered by `numeric_unary.cpp`. Prepared input widths remain Int64 for both Float32 and Float64 output. Each requested tile uses immutable prepared metadata and private invocation scratch. See [fixed mathematical execution](../point-math-execution.md).

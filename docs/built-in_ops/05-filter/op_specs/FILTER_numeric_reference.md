@@ -12,7 +12,7 @@ implementation_status: partially_implemented
 
 ## Exact expressions, baked constants and staged states
 
-The E/B/S definitions below apply to members declaring those classes. RES-01 through RES-12 instead use [RES native class F](RES_native_contract.md); their formulas no longer require NUM strict rounding or four-ULP accelerated fallback.
+The E/B/S definitions below apply to members declaring those classes. RES-01 through RES-12 instead use [RES native class F](RES_native_contract.md); their formulas do not require NUM strict rounding or the four-ULP accelerated bound.
 
 RN_t(x) rounds an exact finite real directly to Float32 or Float64, nearest,
 ties-to-even, with gradual underflow. Finite stored floating values are exact binary
@@ -25,8 +25,8 @@ rationals. Unmarked arithmetic denotes mathematical evaluation, not host instruc
   Gaussian g[j]=RN64(exp(-j²/(2*sigma²))) uses symmetric absolute indices. sigma=0
   requires radius=0 and coefficient 1; positive sigma permits radius=0. A separately
   stored 2D outer product adds rounding and is not the same filter.
-* **S:** public intermediates and declared stages round at specified boundaries and become inputs to the next stage. This exact-stage classification remains available to non-RES members. RES05/06/09/10 instead retain algorithmic iteration boundaries with native input-dtype state under class F.
-* **F:** ordinary native floating-point computation. FRQ-01A/B and FRQ-02A/B use native fp32/fp64 FFT arithmetic; twiddles, intermediates and normalization round at the working precision. RES-01 through RES-12 use the [RES native contract](RES_native_contract.md), including its explicit helper and Float64 scalar exceptions. No correctly rounded whole-expression output, NUM FP32-scaled four-ULP bound, cross-platform bit identity or exact production fallback is required. See the transform and RES acceptance sections of [FILTER_oracle_protocol](FILTER_oracle_protocol.md).
+* **S:** public intermediates and declared stages round at specified boundaries and become inputs to the next stage. RES05/06/09/10 instead use algorithmic iteration boundaries with native input-dtype state under class F.
+* **F:** ordinary native floating-point computation. FRQ-01A/B and FRQ-02A/B use native fp32/fp64 FFT arithmetic; twiddles, intermediates and normalization round at the working precision. RES-01 through RES-12 use the [RES native contract](RES_native_contract.md), including its explicit helper and Float64 scalar exceptions. No correctly rounded whole-expression output, NUM FP32-scaled four-ULP bound, cross-platform bit identity or exact production fallback is required. Acceptance criteria are in [FILTER_oracle_protocol](FILTER_oracle_protocol.md).
 
 Finite E intermediates cannot fail or become infinity merely because host arithmetic
 overflows. A finite exact value rounded beyond the destination range produces signed
@@ -80,7 +80,7 @@ is added to enforce those premises.
 
 ## Accelerated acceptance
 
-F members have native CPU execution and use their own numerical acceptance criteria. This section governs named accelerated E/B/S profiles.
+F members use their own numerical acceptance criteria. This section governs named accelerated E/B/S profiles.
 
 Apply [NUM acceleration](../../01-numeric/op_specs/NUM_accelerated_contract.md) to
 final outputs. Float32 uses at most four ordered finite IEEE steps. For Float64
@@ -90,21 +90,4 @@ reference r in the normal finite Float32 range:
 abs(candidate-r) <= 4 * 2^(floor(log2(abs(r)))-23)
 ```
 
-Zero, values below 2^-126, values above 0x1.fffffep127, special values and uncertain
-classification require strict handling. Four ULP per stage is not a final-output
-proof. Selection, ties, support, stopping predicates and metadata remain exact.
-Asynchronous scheduling changes only which valid round is returned, not predicate
-arithmetic. Approximate local Laplacian algorithms require separate profiles.
-
-## Oracle evidence
-
-ExactRational means Fraction/int evaluation with direct IEEE rounding; avoid a
-binary64 intermediate when rounding to binary32. DirectedMPFR means directed
-interval evaluation whose two endpoints round to the same output bits; unresolved
-branches, denominators or rounding cells are Inconclusive. Matching two precisions
-is not a certificate. HighPrecisionDiagnostic includes numerical matrix/reference
-comparisons and the uncertified Anscombe mean inverses. PinnedThirdPartyComparison
-requires actual version/configuration/resource/input records and explained numerical
-differences; it does not establish unconditional bit identity or NUM compliance.
-ContractFixture checks logical schema/control properties without runtime ownership
-claims. See [oracle](../../../../oracle/ops/filter/README.md) for implemented subsets.
+Zero, values below 2^-126, values above 0x1.fffffep127 and special values require the strict result. Four ULP per stage is not a final-output proof. Selection, ties, support, stopping predicates and metadata remain exact. Approximate local Laplacian algorithms require separate profiles.

@@ -13,66 +13,29 @@ clarification_status: complete
 
 # CRV-06G: HSL ramps
 
-Dynamic inputs inherit the [family Result tensor-port contract](CRV-06_color_ramp.md#result-tensor-ports): each is a Result with exactly one tensor member, under any structurally valid schema id/version/member key. Shape checks use complete `sample_shape()` values, including batch axes.
+Dynamic inputs inherit the [family Result tensor-port contract](CRV-06_color_ramp.md#interface): each is a Result with exactly one tensor member, under any structurally valid schema id/version/member key. Shape checks use complete `sample_shape()` values, including batch axes.
 
-Numeric profile: strict retains the exact reference defined below. Floating
-arithmetic in accelerated profiles follows the shared
-[final FP32 four-ULP contract](NUM_accelerated_contract.md), including its
-range/fallback rules. Discrete results, copies, selected endpoints and special
-values remain exact.
+Numeric profile: strict retains the exact reference defined below. Floating arithmetic in accelerated profiles follows the shared [final FP32 four-ULP contract](NUM_accelerated_contract.md). Discrete results, copies, selected endpoints and special values remain exact.
 
-The explicit color description identifies the underlying RGB primaries, white
-and transfer. Defaults are sRGB primaries, D65 and standard piecewise sRGB
-transfer. Interpolate supplied H/S/L coordinates directly, retaining the same
-underlying RGB description in HSL output. This ramp does not decode and perform
-the RGB ramp's linear-light interpolation.
+The explicit color description identifies the underlying RGB primaries, white and transfer. Defaults are sRGB primaries, D65 and standard piecewise sRGB transfer. Interpolate supplied H/S/L coordinates directly, retaining the same underlying RGB description in HSL output. This ramp does not decode and perform the RGB ramp's linear-light interpolation.
 
-The initial model has exactly three channels and no alpha. Both S and L accept
-all finite extended values; [0,1] is not a validity or clipping limit. No automatic
-RGB gamut mapping or HSL clipping is performed. The precise extended HSL
-conversion interpretation belongs to the associated color-management contract.
+The initial model has exactly three channels and no alpha. Both S and L accept all finite extended values; [0,1] is not a validity or clipping limit. No automatic RGB gamut mapping or HSL clipping is performed. The precise extended HSL conversion interpretation belongs to the associated color-management contract.
 
-## Entrypoints, interpolation and inherited execution
+## Interface and mathematics
 
-Three independent entrypoints use radian, floating pi_multiple or exact
-rational_pi hue. The floating forms take ordered input, stops, colors[K,3],
-with channel order H,S,L. The rational form takes input, stops,
-saturation_lightness[K,2], hue_numerator[K], hue_denominator[K]. Integers are
-Int64; selected denominators must be positive, and unreduced fractions are
-valid. Unselected generic q<=0 rows add no mathematical-domain check. Floating ports independently
-accept Float32/Float64. Output is values, shape sample_shape(input)+[3], ordered H,S,L.
+Three independent entrypoints use radian, floating pi_multiple or exact rational_pi hue. The floating forms take ordered input, stops, colors[K,3], with channel order H,S,L. The rational form takes input, stops, saturation_lightness[K,2], hue_numerator[K], hue_denominator[K]. Integers are Int64; selected denominators must be positive, and unreduced fractions are valid. Unselected generic q<=0 rows add no mathematical-domain check. Floating ports independently accept Float32/Float64. Output is values, shape sample_shape(input)+[3], ordered H,S,L.
 
-Inherit [CIELCh CRV-06D](CRV-06D_color_ramp_cielch.md) for K=1..65536,
-input rank 1..7 and all positive logical counts <=2^40, finite strictly increasing
-stops, clamp/reject default clamp, singleton behavior, output hue units and defaults,
-static description matching, complete-color tiles, fixed source dependencies and selected-row mathematics, layout/owner/resource accounting, cancellation and errors.
-Replace its lightness_chroma port with saturation_lightness. Output dtype defaults
-to colors dtype or saturation_lightness dtype. Required static String parameters
-are color_description, dtype, out_of_domain, output_hue_unit. No alpha or hue_path
-parameter is accepted. Input/output descriptions identify HSL, underlying RGB
-primaries/white/transfer, hue unit and S/L scales. Results carry no attached description.
+K=1..65536, input rank 1..7 and all positive logical counts <=2^40, finite strictly increasing stops, clamp/reject default clamp, singleton behavior, output hue units and defaults, static description matching and selected-row mathematics are those of [CIELCh CRV-06D](CRV-06D_color_ramp_cielch.md). Replace its lightness_chroma port with saturation_lightness. Output dtype defaults to colors dtype or saturation_lightness dtype. Required static String parameters are color_description, dtype, out_of_domain, output_hue_unit. No alpha or hue_path parameter is accepted. Input/output descriptions identify HSL, underlying RGB primaries/white/transfer, hue unit and S/L scales. Results carry no attached description.
 
-Hue is the original unnormalized angle. Interpolate H=(1-w)*H0+w*H1 with the
-same exact w as S=(1-w)*S0+w*S1 and L=(1-w)*L0+w*L1. Apply any selected hue unit
-conversion as part of the exact formula and correctly round only the final
-components. Strict is correctly rounded; accelerated finite arithmetic follows the shared
-FP32-scaled final-result bound. S=0 or any other achromatic
-configuration never discards hue. No modulo reduction or periodic endpoint
-substitution occurs. No HSL-to-RGB or transfer evaluation is needed for this ramp.
+Hue is the original unnormalized angle. Interpolate H=(1-w)*H0+w*H1 with the same exact w as S=(1-w)*S0+w*S1 and L=(1-w)*L0+w*L1. Apply any selected hue unit conversion as part of the exact formula and correctly round only the final components. Strict is correctly rounded; accelerated finite arithmetic follows the shared FP32-scaled final-result bound. S=0 or any other achromatic configuration never discards hue. No modulo reduction or periodic endpoint substitution occurs. No HSL-to-RGB or transfer evaluation is needed for this ramp.
 
-Each selected complete color is read and produced atomically within its output tile. All consumed floats and final components must be finite, and selected rational q must be positive even when S=0. These are unchecked caller preconditions. S may be negative. Static preparation, upstream errors, resource limits and cancellation follow the [family fixed contract](CRV-06_color_ramp.md#fixed-execution-and-caller-preconditions).
+Each output color depends on its query value and the selected stop rows; all stops, colors and p/q arrays are the dependency support. All consumed floats and final components must be finite, and selected rational q must be positive even when S=0. These are unchecked caller preconditions. S may be negative. Caller preconditions and errors follow the [family contract](CRV-06_color_ramp.md#behavior).
 
 ## Acceptance
 
-With stops=[0,1], pi colors=[[0,0.25,0.125],[4,0.75,0.875]], input=[0.5],
-expect [[2,0.5,0.5]]. Repeat with saturation zero, negative S or L outside [0,1];
-hue still follows the original angle. Rational numerators=[0,4], denominators=[1,1]
-with saturation_lightness=[[0.25,0.125],[0.75,0.875]] give the same result.
-Use independent exact-rational and certified-pi oracles, both output units/dtypes,
-mixed source precision, large multi-turn angles, unused nonpositive q rows, source-grid closure, complete-color output tiles, strides, budgets and owner lifetime.
-Check public Compiler/ExecutionContext bindings, values and descriptions in a
-temporary workflow. Source HSL-to-RGB extension semantics will be fixed by
-separate conversion specifications, not guessed by this interpolation operation.
+With stops=[0,1], pi colors=[[0,0.25,0.125],[4,0.75,0.875]], input=[0.5], expect [[2,0.5,0.5]]. Repeat with saturation zero, negative S or L outside [0,1]; hue still follows the original angle. Rational numerators=[0,4], denominators=[1,1] with saturation_lightness=[[0.25,0.125],[0.75,0.875]] give the same result. Expected values use exact-rational and exact-pi arithmetic. Cover both output units/dtypes, mixed source precision, large multi-turn angles and unused nonpositive q rows. HSL-to-RGB extension semantics belong to separate conversion specifications, not this interpolation operation.
+
+## References
 
 - [Ramp family](CRV-06_color_ramp.md).
 - [Radian entrypoint](CRV-06G1_color_ramp_hsl.md).

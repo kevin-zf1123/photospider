@@ -8,182 +8,64 @@ document_maturity: D1_draft
 implementation_status: implemented
 ---
 
-# NUM: specification and execution baseline
+# NUM: shared numeric contract
 
-The [FMT explicit-configuration contract](../../02-format-color/op_specs/FMT_common_contract.md)
-keeps domain interpretation outside Result/Tensor. Numeric operations receive
-structure and samples; any color, alpha, sampling or LUT interpretation required
-by an operation is a declared static parameter. Outputs do not propagate or
-clear a facet list, because no such list exists. Numerical formulas, rounding
-and strict/accelerated precision are unchanged by this ownership boundary.
+The [FMT explicit-configuration contract](../../02-format-color/op_specs/FMT_common_contract.md) keeps domain interpretation outside Result/Tensor. Numeric operations receive structure and samples; any color, alpha, sampling or LUT interpretation required by an operation is a declared static parameter. Outputs carry no domain description.
+
+The [relative-coordinate scale contract](../../02-format-color/op_specs/FMT_relative_coordinate_scale.md) sets native CIELAB/CIELCh lightness to l=L*/100. NUM/CRV consumers use TensorDescription v4/v5 logical tuple parameters with that convention; there is no implicit L* compatibility.
+
+Numeric profile: strict is the exact reference defined by each operation. Floating arithmetic in accelerated profiles follows the shared [final FP32 four-ULP contract](NUM_accelerated_contract.md). Discrete results, copies, selected endpoints and special values are exact in every profile.
+
+This contract is inherited by the NUM-01..NUM-15 and CRV-02 files in this directory, including their family contracts. An individual operation's explicit rule takes precedence over its family contract and this one. Related-file links alone do not import another operation's ports or numerical semantics. The [operator template](../../00-foundation/spec-template.md) and [foundation contracts](../../00-foundation/contracts.md) define the document requirements.
 
 ## Static structure and unchecked premises
 
-Compilation and static preparation infer and check schema identity/version,
-member directories, dtype, rank, extents, axes, shape relations, parameter types
-and syntax, and fixed read/write/scratch signatures. Static capacity arithmetic
-is checked. Runtime payload structure (counts, offsets, indices, identities,
-associations and canonical padding/encoding) and numerical/geometric conditions
-are unchecked caller premises. A numerical parameter's presence at preparation
-time does not turn its finite/range/order/positivity condition into a structural
-check. Producers construct results according to the contract without a final
-validation scan or publication gate; consumers trust those premises without
-rescanning or comparing payloads.
+Compilation and static preparation infer and check schema identity/version, member directories, dtype, rank, extents, axes, shape relations, parameter types and syntax, and fixed read/write signatures. Static capacity arithmetic is checked.
 
-Precision refinement, accelerated-path acceptance, candidate selection,
-explicit clipping, error measurement and an explicitly requested quality gate
-remain their named computations. A quality gate consumes the supplied outcome;
-it does not revalidate the report or its association with other inputs. Resource,
-backend, cancellation and actual execution failures retain their normal meaning.
-Raw IEEE rules for NaN, infinities and signed zeros remain as specified. Outside
-a mathematical/payload premise no diagnostic, successful result or recovery is
-promised. This boundary applies throughout NUM/CRV, including SDK reports.
+Runtime payload structure (counts, offsets, indices, identities, associations, canonical padding/encoding) and numerical/geometric conditions are unchecked caller premises. A numerical parameter's presence at preparation time does not turn its finite/range/order/positivity condition into a structural check. Producers construct results according to the contract without a final validation scan; consumers trust those premises without rescanning or comparing payloads. Outside a mathematical or payload premise no diagnostic, successful result or recovery is promised.
 
-The [relative-coordinate scale contract](../../02-format-color/op_specs/FMT_relative_coordinate_scale.md)
-sets native CIELAB/CIELCh lightness to l=L*/100. NUM/CRV consumers now use
-TensorDescription v4/v5 logical tuple parameters with that convention. The old
-ColorArray public API and decoder are removed; no implicit L* compatibility
-exists. This changes color interpretation and configuration identity, while
-ordinary numeric formulas, precision and the frozen kernel remain unchanged.
+Precision refinement, candidate selection, explicit clipping, error measurement and an explicitly requested quality gate remain their named computations. A quality gate consumes the supplied outcome; it does not revalidate the report or its association with other inputs. Raw IEEE rules for NaN, infinities and signed zeros remain as specified. This boundary applies throughout NUM/CRV, including SDK reports.
 
-Numeric profile: strict retains the exact reference defined below. Floating
-arithmetic in accelerated profiles follows the shared
-[final FP32 four-ULP contract](NUM_accelerated_contract.md), including its
-range/fallback rules. Discrete results, copies, selected endpoints and special
-values remain exact.
+## Registration and numeric profiles
 
-This contract is explicitly inherited by the NUM-01..NUM-15 and CRV-02 files
-in this directory, including their family contracts. An individual operation's
-explicit rule takes precedence over its family and this baseline. Related-file
-links alone do not import that other operation's ports or numerical semantics.
-The [operator template](../../00-foundation/spec-template.md) and
-[foundation contracts](../../00-foundation/contracts.md) define the document
-requirements and current execution boundary. This file fills shared requirements;
-it does not change the maintainer's selected formulas or dependency exceptions.
+Front matter separates specification status, document maturity and implementation status. D1_draft identifies a draft of the D1 mathematical scope. Shared contracts register no operation.
 
-## Status, provenance and registration
+Each primitive has three independently registered CPU entries: strict, Apple Silicon CPU accelerated, and x86-64 CPU accelerated. No implicit mode dispatcher, unsuffixed alias, GPU path or new runtime dtype is defined. Strict is portable across the CPU targets supported by a conforming build. An accelerated key on an incompatible target fails BackendUnavailable.
 
-Front matter separates specification status, document maturity and implementation
-status. D1_draft identifies a draft of the D1 mathematical scope; it is neither
-Accepted nor an implementation gate. Shared contracts register no operation; the primitive specifications and
-[implementation table](../implementation.md) record the maintained runtime and
-its validation. Existing unsuffixed implementations are only the explicitly
-linked legacy subsets.
-
-The proposed_operation_keys lists identify the maintained default-registry
-names; specification acceptance remains Proposed. Each primitive has three
-independently registered CPU entries: strict, Apple Silicon CPU
-accelerated, and x86-64 CPU accelerated. No implicit mode dispatcher, unsuffixed
-alias, GPU path or new runtime dtype is defined. Strict is portable across the
-CPU targets actually supported by a conforming build. Accelerated keys require
-their named CPU target and a verified ISA path; an incompatible target fails
-BackendUnavailable. Build and validation records identify the concrete library,
-revision, build options, OS/architecture and ISA path. Ordinary invocation does
-not promise this information in each failure message. Using Clang alone selects
-none of these mathematical guarantees or library dependencies.
-
-The [accelerated contract](NUM_accelerated_contract.md) defines final FP32-scaled
-accuracy for floating arithmetic throughout NUM and CRV. Copies, predicates,
-indices and selected endpoints remain exact. Strict formulas retain their
-specified rounding boundaries. Finite
-rounding defaults to nearest/ties-to-even with gradual underflow. Preserve the
-caller's floating environment, including prior flags, without global changes.
-An approximate path may use strict fallback to meet its numerical bound. Fixed
-invocation ABI 8 exposes no per-value or per-node numeric-report callback;
-explicit benchmark or SDK instrumentation is separate from ordinary execution.
-Resource, cancellation and upstream failure must not be hidden by fallback.
+The [accelerated contract](NUM_accelerated_contract.md) defines final FP32-scaled accuracy for floating arithmetic throughout NUM and CRV. Copies, predicates, indices and selected endpoints are exact. Strict formulas keep their specified rounding boundaries. Finite rounding defaults to nearest/ties-to-even with gradual underflow. The caller's floating environment, including prior flags, is preserved.
 
 ## Interface and descriptor conventions
 
-Runtime operation ports are Results, required unless explicitly stated otherwise.
-A numeric input normally contains one tensor; individual contracts
-define the allowed schema and any field-only reports. Tensor is backing storage.
-Input and output order is their listed order; single-output specifications use
-values unless explicitly named otherwise. Each file supplies the shape, dtype
-and static parameters or names the family from which it inherits them. Rank is
-1..8, extents are positive and generic arrays have at most 2^40 logical elements;
-the smaller count/K limits in generator specs take precedence. Shape products
-use checked integer arithmetic during static inference. Dynamic indices and
-address-control values satisfy unchecked caller premises. Outputs have no
-attached domain description or implicit physical units, colors or alpha roles.
+Runtime operation ports are Results, required unless explicitly stated otherwise. A numeric input normally contains one tensor; individual contracts define the allowed schema and any field-only reports. Input and output order is the listed order; single-output specifications use values unless explicitly named otherwise. Each file supplies the shape, dtype and static parameters or names the family from which it inherits them.
 
-Static parameters are supplied explicitly in direct WorkflowDocument nodes;
-authoring defaults are written by constructors. An empty parameter set means no
-static operation parameters. Reject unknown, missing or wrongly typed parameters
-before sample reads. Canonical decimal list Strings use ASCII base-10 entries
-separated by single commas, without whitespace, plus signs, leading zeros,
-empty entries or a trailing comma. An entry is 0 or starts with 1..9; shape/count
-entries must be positive, axis entries may be zero. Constructors serialize this
-form; direct noncanonical input is rejected. Axis sets are sorted increasingly
-by constructors; permutations and shapes retain their meaningful list order.
-This grammar does not apply to expression source text or coefficient identifiers.
+Rank is 1..8, extents are positive and generic arrays have at most 2^40 logical elements; the smaller count/K limits in generator specs take precedence. Shape products use checked integer arithmetic during static inference. Dynamic indices and address-control values satisfy unchecked caller premises. Outputs have no attached domain description or implicit physical units, colors or alpha roles.
 
-Compile/preflight validates all declared input descriptors, including unused
-edges. Output descriptors depend only on input descriptors and declared static
-parameters; no numeric producer is executed to infer a descriptor. A scalar
-or an axis array carrying runtime values is still Data/Control, not descriptor
-metadata. A changed shape/dtype/parameter requires inference and plan validation.
-Per-node metadata specialization implements these relations before planning.
-The primitive registrations and public workflow examples exercise the resolved
-descriptors, including explicit Result schema specialization where specified.
+Static parameters are supplied explicitly in direct WorkflowDocument nodes; authoring defaults are written by constructors. An empty parameter set means no static operation parameters. Unknown, missing or wrongly typed parameters are rejected before sample reads.
+
+Canonical decimal list Strings use ASCII base-10 entries separated by single commas, without whitespace, plus signs, leading zeros, empty entries or a trailing comma. An entry is 0 or starts with 1..9; shape/count entries must be positive, axis entries may be zero. Constructors serialize this form; direct noncanonical input is rejected. Axis sets are sorted increasingly by constructors; permutations and shapes keep their meaningful list order. This grammar does not apply to expression source text or coefficient identifiers.
+
+Compile/preflight validates all declared input descriptors, including unused edges. Output descriptors depend only on input descriptors and declared static parameters; no numeric producer is executed to infer a descriptor. A scalar or an axis array carrying runtime values is Data/Control, not descriptor metadata. A changed shape/dtype/parameter requires new inference.
 
 ## Demand, errors and returned observations
 
-Q denotes requested logical output coordinates, independent of physical stride.
-Individual files define exact per-port Data and Control sets. There is no
-implicit sample-validation support; structural tuple closure uses
-atomic_trailing_axes. Descriptor demand covers the static input
-metadata needed by compilation. Empty Q introduces no runtime payload reads.
-Dynamic controls retain witnesses even when they do not change returned values.
-The operator must not enlarge its support to a bounding gap. Required upstream
-execution may have its own indivisible or complete-input support; these specifications
-do not promise suppression of failures inside genuinely required upstream work.
+Q denotes requested logical output coordinates, independent of physical stride. Individual files define exact per-port Data and Control sets. Descriptor demand covers the static input metadata needed by compilation. Empty Q introduces no runtime payload reads. Dynamic controls retain witnesses even when they do not change returned values. An operator does not enlarge its support to a bounding gap. Missing coverage is not an implicit zero.
 
-The following default mapping applies where an individual file has not supplied
-a more specific existing Status. Names follow the current
-[public status types](../../../../include/photospider/core/status.hpp).
+The following default mapping applies where an individual file has not supplied a more specific Status. Names follow the [public status types](../../../../include/photospider/core/status.hpp).
 
 | Failure | Phase | Code / reason | Attribution |
 | --- | --- | --- | --- |
-| Missing, unknown or malformed static parameter; invalid structural axis/shape parameter | Compile or direct preflight | InvalidArgument / InvalidDomain | Schema origin; no invented runtime atom |
+| Missing, unknown or malformed static parameter; invalid structural axis/shape parameter | Compile or direct preflight | InvalidArgument / InvalidDomain | Schema origin |
 | Unsupported port dtype, rank, shape relation or output descriptor | Compile or direct preflight | TypeMismatch / None | Schema origin |
 | Violated runtime structure or numerical/geometric premise | Outside the operator contract | No validation or diagnostic guarantee | Caller responsibility |
 | Unsupported accelerated target | Capability check | BackendUnavailable / None | Backend origin |
-| Admitted capacity, work or stage exhausted | Admission or execution | ResourceExhausted / CapacityLimit, WorkLimit or StageLimit | Preserve host resource scope |
-| Cancellation, stale input or upstream failure | Respective host phase | Preserve original Status | Preserve original origin, scope and source identity |
+| Admitted capacity, work or stage exhausted | Admission or execution | ResourceExhausted / CapacityLimit, WorkLimit or StageLimit | Host resource scope |
+| Cancellation, stale input or upstream failure | Respective host phase | Preserve original Status | Original origin, scope and source |
 
-Fixed invocation reports bounded Status messages for actual operational failures.
-ABI 8 does not guarantee per-sample coordinates, operand bits or a numerical
-report stream. Member-specific diagnostics state what they actually provide.
-Invalid dynamic steps, indices, bounds and numerical results governed by caller
-premises have no required error delivery. A task failure establishes a call
-failure cut: earlier calls continue and retire in order, while unsubmitted work
-at or after the cut is skipped and accepted work drains. Run-abort failures
-follow the physical execution contract; neither path returns a successful final
-RET map.
-
-Every produced tile owns its independent admitted allocation. Successful task
-completion enables internal dependencies; public Results appear after every
-required task of the call succeeds and the call retires in IR order. A failed
-call publishes no partial successful Result. Results already delivered from
-earlier retired calls remain valid; a failed Run returns no final RET map.
-Member-specific view restrictions follow fixed materialization. Missing coverage
-is not an implicit zero. Immutable output owners survive context destruction;
-unpublished storage is released after accepted work drains.
+A failed call publishes no partial successful Result. Results already delivered from earlier retired calls remain valid; a failed Run returns no final RET map.
 
 ## SDK numeric reports
 
-`NumericDiagnostics` and its classification codec are declared in
-`photospider/ops/numeric/diagnostics.hpp` and belong to `Photospider::ops_sdk`.
-`register_numeric_diagnostics` registers its fixed 588-byte codec for explicit
-`DiagnosticAccumulator` use. Fixed invocation ABI 8 has no report-submission
-callback and does not automatically emit per-operation numeric reports. The
-frozen accumulator retains its envelope, allocation and transactional merge
-rules. The ops validation callback is a no-op: payload identity/counter
-consistency and canonical encoding are caller premises. `read_numeric_report`
-decodes an already supplied complete 588-byte payload without checking it;
-`merge_numeric_diagnostics` computes totals and attribution, returning actual
-counter-capacity exhaustion without mutating the destination.
+`NumericDiagnostics` and its classification codec are declared in `photospider/ops/numeric/diagnostics.hpp` and belong to `Photospider::ops_sdk`. `register_numeric_diagnostics` registers the fixed 588-byte codec for explicit `DiagnosticAccumulator` use. Operations do not automatically emit per-operation numeric reports. Payload identity/counter consistency and canonical encoding are caller premises. `read_numeric_report` decodes a supplied complete 588-byte payload without checking it; `merge_numeric_diagnostics` computes totals and attribution, returning counter-capacity exhaustion without mutating the destination.
 
 ```cpp
 // payload is a complete SDK numeric report supplied under the caller premises.
@@ -193,36 +75,8 @@ auto status = ps::merge_numeric_diagnostics(&total, decoded.value());
 if (!status.ok()) return status;
 ```
 
-Reports describe actual arithmetic work when explicitly collected. Their values
-do not certify sample domains, report association or a numerical accuracy bound.
-Report bytes and callback addresses do not enter computation identity.
+Reports describe actual arithmetic work when explicitly collected. Their values do not certify sample domains, report association or a numerical accuracy bound.
 
-## Resource and acceptance evidence
+## Acceptance
 
-Per-operation complexity and scratch formulas supplement host accounting.
-Reserve actual output, scratch, index/limb, metadata and retained-owner capacities
-before allocation, including old/new growth overlap and simultaneously retained
-source ancestry. Charge structural preparation and each committed computational work/stage unit;
-failure does not refund committed work. A view's small output payload does not
-bound its retained source allocation. Fixed execution retains active ownership without a payload-cache lifecycle.
-No implicit disk spill, private unbudgeted workers or RSS upper bound is promised.
-Each algorithm's stated cancellation interval also applies inside long exact
-arithmetic, sorting or refinement; a native call must have bounded work or a
-cooperative replacement. Exhaustion fails rather than weakening accuracy.
-
-Each primitive's fixture supplies purpose and a minimal public workflow.
-Implementation acceptance supplies its actual target/run command,
-bindings, named outputs and inspected results through Compiler/ExecutionContext.
-Keep a separate independent integer/rational, bit-pattern or directed-precision
-oracle, and compare exact bits or the explicitly allowed ULP rule. Verify required
-fixed tile-read closure separately from numeric equality. Exercise only the
-relevant shape, special-value, layout, lifetime, low-budget and cancellation cases
-listed in the primitive/family contracts.
-
-No unresolved user-facing semantic choice is recorded by this baseline. Concrete
-backend selection, metadata specialization, diagnostics and runnable fixtures are
-implemented and covered by the category delivery record. The 330 specified
-primitive keys were queried successfully through the default public registry.
-Implementation completion does not promote Proposed specifications to Accepted.
-External compatibility claims remain limited to the cited source/version evidence
-in individual files.
+Each primitive's fixture supplies a minimal public workflow. Strict results are compared by exact bits, accelerated results by the explicitly allowed ULP rule, against an independent integer/rational, bit-pattern or directed-precision reference. Required tile-read closure is verified separately from numeric equality. Relevant shape, special-value and layout cases are listed in the primitive and family contracts.

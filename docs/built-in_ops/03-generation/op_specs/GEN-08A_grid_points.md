@@ -14,67 +14,28 @@ operation_keys:
 
 # GEN-08A: grid points
 
-Inherit [GEN-08](GEN-08_point_distributions_contract.md), [GEN
-common](GEN_common_contract.md), and the applicable [random](NOI_random_contract.md) and
-[geometry](PTH_geometry_contract.md) contracts. A key includes algorithm version and profile; within one version/profile,
-output bits and discrete decisions are fixed.
+Inherits [GEN-08](GEN-08_point_distributions_contract.md) and [GEN common](GEN_common_contract.md).
 
-## Interface and representation
+## Interface
+
+Operation keys: `generation.grid_points_v1_strict`.
 
 bounds[4]; DynamicPoints Result, Float64 positions and ordinal IDs.
 
-## Parameters and domain
+### Parameters and domain
 
 nx,ny>=1; positive area bounds; checked nx*ny against hard capacity; no seed.
 
-## Mathematical specialization
+Ports: input `bounds` Float32/64 `[4]`; output `points` (DynamicPoints v1). Parameters: Int64 `nx`, `ny` (required); Int64 `max_points`, default 1048576, a hard capacity limit (distinct from the normal `max_count` targets of GEN-08C/D) checked together with the capacity product `nx*ny` before execution. The SDK schema factory is `ps::generation::dynamic_points_schema`.
 
-Point (j,i) is RN64(xmin+(i+1/2)*(xmax-xmin)/nx), similarly y. ID=j*nx+i. Enforce
-the explicit half-open-cell endpoint rule. Representable cell interiors and distinct published points are caller domain premises.
+## Mathematics
 
-## Dependencies, resources and failures
+Point (j,i) is RN64(xmin+(i+1/2)*(xmax-xmin)/nx), similarly y. ID=j*nx+i. Enforce the explicit half-open-cell endpoint rule. Representable cell interiors and distinct published points are caller domain premises.
 
-Execution support: **complete input**. Lower the complete mathematical input
-support and required output member tiles into explicit tasks. Share global work
-through private intermediate Results and fixed dependencies. Required members
-publish on successful call retirement. Empty output selection performs static
-preparation without payload tasks; there is no runtime dependency discovery or
-dirty propagation.
+## Behavior
 
-complete-input complete Result, O(nx*ny).
+Support class: complete input.
 
-All output, scratch, indices, algorithmic work and retained owners are accounted. Poll
-cancellation in bounded loops. Preserve static structural failures and actual
-resource, cancellation, backend and upstream statuses. Member-specific no-solution,
-refinement or quality failures apply to valid inputs and the explicitly declared
-algorithm; numerical-premise violations have no prescribed runtime diagnostic.
-Never replace budget/cancellation failure with a lower-quality successful prefix. Views,
-lifetime and actual returned coverage inherit GEN-common.
-
-## CPU implementation
-
-The registered strict CPU operation takes Float32/64 `bounds[4]` and returns the
-named output `points`. `nx` and `ny` are required Int64 parameters.
-Optional Int64 `max_points=1048576` is a hard capacity limit, distinct from the
-normal targets of GEN-08C/D. Capacity multiplication and static member extents are
-checked before execution. `max_work=INT64_MAX` is an independent hard budget.
-
-Exact cell steps and centers are reused. Each x coordinate is rounded once for the
-first row and copied into later rows; each row reuses its exact y center. A bounded
-4096-bit rational tier handles ordinary exponents, with the full 24576-bit tier
-selected before arithmetic for wider inputs. This dispatch preserves strict bits.
-The complete prefix, ordinal IDs and count are constructed in admitted Host scratch,
-then every output member tile is explicitly written before successful retirement.
-The `ps::generation::dynamic_points_schema` SDK factory exposes the representation.
-No GPU implementation is registered.
-
-## Independent fixtures and acceptance
+## Acceptance
 
 2x2 grid in [0,2]^2 gives centers 0.5/1.5; one-axis singleton; representable cell boundary cases.
-
-Check selected-tile/full-output equivalence, source-grid read closure, legal
-strides/offsets, separate/joint outputs, version/profile identity, low budgets, cancellation,
-associations and retained owners as applicable. The [oracle
-coverage](../oracle-coverage.md) describes the available finite reference subset; it is
-not runtime completion. No unverified GPU or third-party bit
-identity is implied by these requirements.

@@ -12,58 +12,35 @@ clarification_status: resolved
 
 # NOI-03B: correlated gaussian
 
-Inherit [NOI-03](NOI-03_correlated_contract.md), [GEN common](GEN_common_contract.md),
-and the applicable [random](NOI_random_contract.md) and
-[geometry](PTH_geometry_contract.md) contracts. A key includes algorithm version and profile; within one version/profile,
-output bits and discrete decisions are fixed.
+Inherits [NOI-03](NOI-03_correlated_contract.md) and [GEN common](GEN_common_contract.md).
 
-## Runtime implementation
-
-The public `ps::generation::correlated_gaussian` helper in
-`photospider/ops/generation.hpp` implements this composition.
-
-## Interface and representation
+## Interface
 
 mean[C],sigma[C],kernel[Kh,Kw]; values[H,W,C].
 
-## Parameters and domain
+### Parameters and domain
 
-Explicit NOI-02 RNG and NOI-03A boundary/normalization parameters per node; constructor
-suggestion mean=0,sigma=1,l2.
+Explicit NOI-02 RNG and NOI-03A boundary/normalization parameters per node; constructor suggestion mean=0,sigma=1,l2.
 
-## Mathematical specialization
+Public SDK helper, declared in `photospider/ops/generation.hpp`:
 
-Compose published NOI-02 output into NOI-03A, retaining the white-source rounding stage.
-L2 gives ideal unit variance only for distinct independent taps; it does not
-automatically preserve nonzero mean. Apply a separate affine node for a final mean.
+```cpp
+Result<WorkflowNodeOutput> ps::generation::correlated_gaussian(
+    WorkflowDocument* document, WorkflowInput mean, WorkflowInput sigma,
+    WorkflowInput kernel, Parameters gaussian_parameters,
+    Parameters correlation_parameters, Profile profile = Profile::Strict);
+```
 
-## Dependencies, resources and failures
+The helper appends a NOI-02A node followed by a NOI-03A node and returns the correlation `values` output. The white-source dtype and the final dtype are selected independently in `gaussian_parameters` and `correlation_parameters`; boundary and normalization are set on the correlation node.
 
-Execution support: **Halo**. Derive mathematical halo support from each selected
-complete output tile, apply the declared boundary mapping, and close reads on
-the source grid. Declare kernel/shared controls as fixed dependencies. Payload
-validity is a caller premise. Empty output selection performs static preparation
-without payload tasks; shared work uses explicit intermediate Results and edges.
+## Mathematics
 
-Halo-driven intermediate white samples and accounted backing; no rounding-changing
-fusion.
+Compose published NOI-02 output into NOI-03A, retaining the white-source rounding stage. L2 gives ideal unit variance only for distinct independent taps; it does not automatically preserve nonzero mean. Apply a separate affine node for a final mean.
 
-All output, scratch, indices, algorithmic work and retained owners are accounted. Poll
-cancellation in bounded loops. Preserve static structural failures and actual
-resource, cancellation, backend and upstream statuses. Member-specific no-solution,
-refinement or quality failures apply to valid inputs and the explicitly declared
-algorithm; numerical-premise violations have no prescribed runtime diagnostic.
-Never replace budget/cancellation failure with a lower-quality successful prefix. Views,
-lifetime and actual returned coverage inherit GEN-common.
+## Behavior
 
-## Independent fixtures and acceptance
+Support class: Halo. The intermediate white samples are the published NOI-02A output; no fusion changes the two rounding stages.
 
-Impulse kernel bit-equivalence, small repeated-boundary cases, mean/variance
-distinction.
+## Acceptance
 
-Check selected-tile/full-output equivalence, source-grid read closure, legal
-strides/offsets, separate/joint outputs, version/profile identity, low budgets, cancellation,
-associations and retained owners as applicable. The [oracle
-coverage](../oracle-coverage.md) describes the available finite reference subset; it is
-not runtime completion. No unverified GPU or third-party bit
-identity is implied by these requirements.
+Impulse kernel bit-equivalence, small repeated-boundary cases, mean/variance distinction.

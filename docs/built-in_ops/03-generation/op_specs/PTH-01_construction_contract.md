@@ -9,8 +9,7 @@ implementation_status: implemented
 
 # PTH-01: Path construction and structure
 
-Consume explicit typed geometry and associations, not SVG text. CoreVerbs and Primitives use separate schemas in the logical PathSet family; conversion is explicit. Complete delivery requires the lowering to write all required members before successful call retirement; CompleteBundle schema metadata does not create that coverage automatically. Dynamic row counts do not create dynamic port counts. Correct attribute mappings are required;
-default reject_unmappable, explicit drop reports removed keys.
+Consume explicit typed geometry and associations, not SVG text. CoreVerbs and Primitives use separate schemas in the logical PathSet family; conversion is explicit. Dynamic row counts do not create dynamic port counts. Correct attribute mappings are required; default reject_unmappable, explicit drop reports removed keys.
 
 ## Members
 
@@ -22,18 +21,6 @@ default reject_unmappable, explicit drop reports removed keys.
 | [PTH-01D](PTH-01D_reverse_paths.md) | reverse paths |
 | [PTH-01E](PTH-01E_make_primitive_path.md) | make primitive path |
 
-## Shared execution and numerical rules
+## Shared rules
 
-Inherit [GEN common](GEN_common_contract.md), and applicable
-[random](NOI_random_contract.md) and [path geometry](PTH_geometry_contract.md) rules.
-Members declare Regional, Halo or complete-input from actual mathematical dependencies,
-independently of static structure checks. GPU capability is member/backend-specific.
-Same version/profile means bit-identical output; numerical error, geometry error and
-topology guarantees are separate. Source associations are unchecked caller premises; producers preserve declared ownership and lifetime by construction.
-
-## Acceptance and implementation boundary
-
-Use member-specific independent fixtures plus actual public workflow execution. The
-[oracle coverage](../oracle-coverage.md) identifies finite exact helpers, Measured
-diagnostics and remaining unsupported cases. It cannot establish public schema support,
-GPU admission or complete domain certification. The listed members are implemented through fixed invocation ABI 8 and the public generation SDK. Unresolved numerical solver or backend choices remain explicit member limitations.
+Members inherit [GEN common](GEN_common_contract.md) and [PTH geometry](PTH_geometry_contract.md).

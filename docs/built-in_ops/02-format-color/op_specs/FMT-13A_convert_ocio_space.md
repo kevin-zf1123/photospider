@@ -15,48 +15,22 @@ proposed_operation_keys:
 
 # FMT-13A: configured color-space conversion
 
-Inherit the complete [FMT-13 family](FMT-13_ocio_transform_contract.md).
-This OCIO v2.5.2 CPU adapter is implemented with fixed invocation ABI 8. The decision status remains Proposed; see [implementation, validation and performance](../FMT-12-13-18_implementation.md).
+Inherits the [FMT-13 family](FMT-13_ocio_transform_contract.md). OpenColorIO v2.5.2 CPU adapter.
 
-## Interface and behavior
+## Interface
 
-One `input` tensor yields same-dtype/shape `values`. Explicit config/context
-resources and source_space/destination_space describe the forward route. Public
-selectors are exact name/alias/role selectors resolved to canonical ColorSpace
-objects; NamedTransform is invalid here. Select one ordered three-component group
-or explicit raw slots. All common direction, execution, metadata, domain, resource,
-layout and request rules apply. No transfer or unit conversion is inserted.
+One `input` tensor yields same-dtype/shape `values`. Explicit config/context resources and source_space/destination_space describe the forward route. Public selectors are exact name/alias/role selectors resolved to canonical ColorSpace objects; a NamedTransform is invalid here. One ordered three-component group or explicit raw slots is selected. The common direction, execution, domain, resource, layout and request rules apply. No transfer or unit conversion is inserted.
 
-Construct a ColorSpaceTransform with direction=forward by default; inverse swaps
-the effective endpoint interpretation. data_bypass defaults true. Description-based calls
-reject isData entry/exit spaces; raw may use them. Keep recorded same-name and
-equalitygroup skips, including their Float64 narrowing boundary. reference_bridge
-defaults reject; config_default explicitly admits and records the configured
-scene/display bridge. Neither OPTIMIZATION_NONE nor no-op removes those checks.
+A ColorSpaceTransform is constructed with direction=forward by default; inverse swaps the effective endpoint interpretation. data_bypass defaults true. Description-based calls reject isData entry/exit spaces; raw may use them. Recorded same-name and equalitygroup skips are kept, including their Float64 narrowing boundary. reference_bridge defaults reject; config_default explicitly admits and records the configured scene/display bridge. Neither OPTIMIZATION_NONE nor no-op removes those checks.
 
-The effective destination is specified by explicit config/context identity
-and canonical space or a compatible binding supplied to later consumers. Source and target names
-alone do not establish native RGB primaries, normalized units or an ACES version.
-Copy alpha/AOVs outside the processor. Any requested transformed component
-consumes all three source components at the same point, including no-op cases.
+## Behavior
 
-## Acceptance and conceptual workflow
+The effective destination is given by explicit config/context identity and canonical space, or a compatible binding supplied to later consumers. Source and target names alone do not establish native RGB primaries, normalized units or an ACES version. Alpha/AOVs are copied outside the processor. Any requested transformed component consumes all three source components at the same point, including no-op cases.
 
-- A self-contained two-space config with an independently specified matrix
-  checks source/destination resolution, noncanonical slots and exact simple
-  coordinates. Compare both execution configurations to their point oracles.
-- Same-space Float64 `1+2^-30` produces `1` after RN32, not the original bit
-  pattern. Float32 no-op retains its required engine boundary without component-domain
-  validation and does not allow view.
-- Exact alias and role references resolve identically to their canonical name;
-  case mismatch or selecting a NamedTransform through A fails statically.
-- Scene/display crossing fails by default and records a specific bridge when
-  config_default is explicit, even if the config has no named default and the
-  engine selects its first eligible view transform.
-- isData is rejected in semantic mode and exercised with both data_bypass values
-  in raw. Participating source colors satisfy the finite caller premise; a NaN
-  peer has no required diagnostic. Bypass alpha preserves its NaN bits.
-  Sparse/batched output tiles preserve the normative point result.
+## Acceptance
 
-Public resource helpers, executable operation usage, independent oracle commands
-and measured validation coverage are recorded in [implementation, validation and performance](../FMT-12-13-18_implementation.md).
+- A self-contained two-space config with an independently specified matrix checks source/destination resolution, noncanonical slots and exact simple coordinates, against both execution configurations' point oracles.
+- Same-space Float64 `1+2^-30` produces `1` after RN32, not the original bit pattern. Float32 no-op retains its engine boundary without component-domain validation and does not allow view.
+- Exact alias and role references resolve identically to their canonical name; case mismatch or selecting a NamedTransform through A fails statically.
+- Scene/display crossing fails by default and records a specific bridge when config_default is explicit, even if the config has no named default and the engine selects its first eligible view transform.
+- isData is rejected in semantic mode and exercised with both data_bypass values in raw. Participating source colors satisfy the finite caller premise. Bypass alpha preserves its NaN bits. Sparse output preserves the point result.

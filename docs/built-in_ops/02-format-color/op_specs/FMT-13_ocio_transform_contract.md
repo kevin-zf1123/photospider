@@ -11,214 +11,85 @@ clarification_status: complete
 
 # FMT-13: configured OpenColorIO transforms
 
-All six CPU adapters are registered with fixed invocation ABI 8. See
-[implementation, validation and performance](../FMT-12-13-18_implementation.md) for the private engine, resource hooks, closed resolver and public workflow evidence.
-Inherit the structural tensors and explicit configuration, planar
-storage, straight internal color and explicit interpretation rules from
-[FMT-common](FMT_common_contract.md). OCIO requires its own external-engine
-contract; it does not inherit native NUM strict/four-ULP guarantees or the
-specific numerical recipe chosen for [ICC](FMT-12_icc_transform_contract.md).
+Six CPU adapters (A color space, B display/view, C Looks, D NamedTransform, E file, F transform tree) run OpenColorIO v2.5.2. Structural tensors and explicit configuration, planar storage, straight internal color and explicit interpretation follow [FMT-common](FMT_common_contract.md). OCIO has its own external-engine contract; it does not inherit native NUM strict/four-ULP guarantees or the numerical recipe of [ICC](FMT-12_icc_transform_contract.md).
 
-## Construction and execution cancellation
+## Initial members
 
-Engine construction is synchronous and non-cancellable. Profile/config parsing,
-processor linking, BPC preparation, LUT inversion and gamut-table generation do
-not receive or probe a Run cancellation token. Construction work and memory
-limits, first-failure latching, complete static structural preparation for Empty/bypass requests,
-and cleanup on failure remain required. This is the maintainer's explicit
-2026-10-21 revision; no preparation-cancellation kernel extension is required.
-
-Cancellation remains an execution concern: check it before and after bounded
-pixel batches and discard unpublished results when cancelled. An existing
-immutable-resource import API may independently observe its caller's token;
-that import behavior does not imply cancellable engine construction.
-
-## Confirmed initial members
-
-- A converts between explicitly selected source and destination color spaces
-  in a configuration.
+- A converts between explicitly selected source and destination color spaces in a configuration.
 - B applies an explicitly selected source space, display and view.
-- C applies an explicit ordered Look sequence between specified source and
-  destination spaces.
-- Processing prescribed by the selected config/transform is part of that
-  operation. FMT-15 may explicitly compose these adapters, but must not silently
-  perform a second native rendering/view transform.
+- C applies an explicit ordered Look sequence between specified source and destination spaces.
+- Processing prescribed by the selected config/transform is part of that operation. FMT-15 may explicitly compose these adapters, but must not silently perform a second native rendering/view transform.
 - D applies a config's explicitly selected NamedTransform.
-- E applies a standalone FileTransform, including admitted CLF/CTF/LUT resources.
-  It does not replace CRV's native LUT mathematical contract.
-- F applies an explicit declarative Transform/GroupTransform tree supported by
-  the fixed engine version, not arbitrary executable code. D/E/F require
-  explicit entry/exit interpretations.
+- E applies a standalone FileTransform, including admitted CLF/CTF/LUT resources. It does not replace CRV's native LUT mathematical contract.
+- F applies an explicit declarative Transform/GroupTransform tree supported by the fixed engine version, not arbitrary executable code. D/E/F require explicit entry/exit interpretations.
 
-## Current implementation boundary
+## Engine boundary
 
-The inspected CMake, public headers, kernel sources and built-in operator sources
-contain no OCIO adapter implementation. Existing NUM LUT operations do not
-implement config resolution, Looks or display/view processors. This family
-requires engine/resource and explicit configuration integration before runtime acceptance.
+Fix the first contract to OpenColorIO v2.5.2 CPU, with identified build, optimization settings and frozen configuration resources. Do not silently substitute a system library or a newer config. GPU requires a separate future contract. Rolling documentation for a later release does not expand this scope.
 
-## Confirmed engine boundary
+## Configuration resources
 
-Fix the first contract to OpenColorIO v2.5.2 CPU, with identified build,
-optimization settings and frozen configuration resources. Do not silently
-substitute a system library or a newer config. GPU requires a separate future
-contract. Rolling documentation for a later release does not expand this scope.
+Admit v1/v2 configs readable by the fixed engine, including user configs and built-in ACES configs identified by their exact versioned names. Freeze config text, explicit context variables and all resources actually referenced by the selected processing path into owned resources. Required missing resources fail. Do not use ambient OCIO environment selection, system monitor configuration or latest/default builtin aliases as runtime sources; do not upgrade config versions implicitly. No filesystem/environment mutation after freezing may change results.
 
-## Confirmed configuration resources
+## Color and alpha scope
 
-Admit v1/v2 configs readable by the fixed engine, including user configs and
-built-in ACES configs identified by their exact versioned names. Freeze config
-text, explicit context variables and all resources actually referenced by the
-selected processing path into owned resources. Required missing resources fail.
-Do not use ambient OCIO environment selection, system monitor configuration or
-latest/default builtin aliases as runtime sources; do not upgrade config versions
-implicitly. No filesystem/environment mutation after freezing may change results.
+Each call transforms one explicitly selected three-component color group, preserving dtype, shape and ordered component slots. Alpha and other groups/AOVs are copied bit-for-bit outside the processor. Reject transforms that depend on real alpha or modify alpha; prove admission during construction, not from hasChannelCrosstalk alone. Gray first expands explicitly to three components; CMYK conversion remains FMT-12. All image results retain canonical straight form.
 
-## Confirmed color and alpha scope
+## Dtype boundary
 
-Each call transforms one explicitly selected three-component color group,
-preserving dtype, shape and ordered component slots. Alpha and other groups/AOVs
-are copied bit-for-bit outside the processor. Reject transforms that depend on
-real alpha or modify alpha; prove admission during construction, not from
-hasChannelCrosstalk alone. Gray first expands explicitly to three components;
-CMYK conversion remains FMT-12. All image results retain canonical straight form.
+Support Float32 and Float64 public tensors with matching output dtype. Float64 selected colors first round to Float32 under NUM rules, run an F32-to-F32 OCIO processor, then widen exactly back to Float64. Float32 colors run directly. Finite representable narrowing is an unchecked caller premise. This explicitly loses Float64 precision; neither public dtype promises a different internal engine. Bypass alpha/AOVs never pass through narrowing and retain their original bit patterns.
 
-## Confirmed dtype boundary
+## Reference-space bridge
 
-Support Float32 and Float64 public tensors with matching output dtype. Float64
-selected colors first round to Float32 under NUM rules, run an F32-to-F32 OCIO
-processor, then widen exactly back to Float64. Float32 colors run directly.
-Finite representable narrowing is an unchecked caller premise. This explicitly loses Float64 precision;
-neither public dtype promises a different internal engine. Bypass alpha/AOVs
-never pass through narrowing and retain their original bit patterns.
+Default reference_bridge=reject. Implicit scene-reference/display-reference crossing by a color-space conversion requires explicit config_default, then records the actual default ViewTransform chosen by the fixed engine/config. This applies to Look process-space conversions and nested color-space nodes as well as A. B explicitly selects its display/view route. No extra native FMT-15 rendering is added before or after a configured route.
 
-## Confirmed reference-space bridge
+## Coordinate interpretation
 
-Default reference_bridge=reject. Implicit scene-reference/display-reference
-crossing by a color-space conversion requires explicit config_default, then
-records the actual default ViewTransform chosen by the fixed engine/config.
-This applies to Look process-space conversions and nested color-space nodes as
-well as A. B explicitly selects its display/view route. No extra native FMT-15
-rendering is added before or after a configured route.
+Identify configured coordinates by frozen config resource identity and resolved canonical space name, or an explicit complete endpoint declaration where the transform does not define one. Permit explicit analytic-space bindings as in FMT-12, without guessing definitions/units from names such as ACEScg or sRGB. Execute config-native numeric coordinates; do not automatically normalize them to [0,1]. If a Lab transform expects L* while the project uses l=L*/100, the caller explicitly converts values and interpretation at the boundary.
 
-## Confirmed coordinate interpretation
+## Execution configurations
 
-Identify configured coordinates by frozen config resource identity and resolved
-canonical space name, or an explicit complete endpoint declaration where the
-transform does not define one. Permit explicit analytic-space bindings as in
-FMT-12, without guessing definitions/units from names such as ACEScg or sRGB.
-Execute config-native numeric coordinates; do not automatically normalize them
-to [0,1]. If a Lab transform expects L* while the project uses l=L*/100, the
-caller explicitly converts values and interpretation at the boundary.
+execution=optimized is default and fixes the v2.5.2 OPTIMIZATION_DEFAULT set; reference selects OPTIMIZATION_NONE. Default includes fast log/exp/pow and inverse LUT approximations. The two paths need not agree bit-for-bit and neither claims NUM correct rounding or four-ULP conformance. Within an identified build/CPU path and configuration, batch/ROI/thread scheduling must not change result bits. Ambient environment variables must not override the selected optimization. NONE still permits required engine finalization/config construction behavior.
 
-## Confirmed execution configurations
+## Dynamic-property policy
 
-execution=optimized is default and fixes the v2.5.2 OPTIMIZATION_DEFAULT set;
-reference selects OPTIMIZATION_NONE. Default includes fast log/exp/pow and inverse
-LUT approximations. The two paths need not agree bit-for-bit and neither claims
-NUM correct rounding or four-ULP conformance. Within an identified build/CPU path
-and configuration, batch/ROI/thread scheduling must not change result bits.
-Ambient environment variables must not override the selected optimization.
-NONE still permits required engine finalization/config construction behavior.
+Resolve exposure/contrast/gamma and other dynamic grading properties to an explicit immutable compile-time snapshot, then make the processor non-dynamic. Changing values requires rebuilding. No shared mutable property may change between workers/tiles of an execution. Runtime typed control ports are a future separate extension, not an implicit capability of this family.
 
-## Confirmed dynamic-property policy
+## Directions
 
-Resolve exposure/contrast/gamma and other dynamic grading properties to an
-explicit immutable compile-time snapshot, then make the processor non-dynamic.
-Changing values requires rebuilding. No shared mutable property may change
-between workers/tiles of an execution. Runtime typed control ports are a future
-separate extension, not an implicit capability of this family.
+All members expose static direction=forward (default) or inverse. Endpoint parameters describe the forward route; inverse consumes its exit interpretation and publishes its entry interpretation. Use the engine's selected inverse construction, failing if unavailable. Inverse Look sequences reverse order and flip individual directions. Availability is not proof of lossless recovery; display rendering, clipping and LUT inversion may remain lossy/approximate.
 
-## Confirmed directions
+## Look candidates
 
-All members expose static direction=forward (default) or inverse. Endpoint
-parameters describe the forward route; inverse consumes its exit interpretation
-and publishes its entry interpretation. Use the engine's selected inverse
-construction, failing if unavailable. Inverse Look sequences reverse order and
-flip individual directions. Availability is not proof of lossless recovery;
-display rendering, clipping and LUT inversion may remain lossy/approximate.
+Support ordered candidate Look sequences (OCIO's | fallback), resolved once during compilation against frozen resources, with the selected candidate recorded. Only missing-file failures try the next candidate; a missing Look name or other construction failure is fatal under v2.5.2. File changes cannot select another candidate at execution. Within a candidate, ordered entries all apply and each has an explicit forward/inverse direction. All candidates failing to resolve is a missing-resource error, not a no-op.
 
-## Confirmed Look candidates
+## Display Looks
 
-Support ordered candidate Look sequences (OCIO's | fallback), resolved once
-during compilation against frozen resources, with the selected candidate
-recorded. Only missing-file failures try the next candidate; a missing Look name
-or other construction failure is fatal under v2.5.2. File changes cannot select
-another candidate at execution. Within a candidate, ordered entries all apply
-and each has an explicit forward/inverse direction. All candidates failing to
-resolve is a missing-resource error, not a no-op.
+B executes its view's configured Looks by default; explicit looks_bypass=true skips them and is part of processor identity. Additional user Looks compose through C rather than being implicitly appended by B. Always select display and view explicitly; no current-screen or menu-default selection occurs.
 
-## Confirmed display Looks
+## Configuration bypass
 
-B executes its view's configured Looks by default; explicit looks_bypass=true
-skips them and is part of processor identity. Additional user Looks compose
-through C rather than being implicitly appended by B. Always select display
-and view explicitly; no current-screen or menu-default selection occurs.
+Retain and record engine construction skips for identical names/equalitygroup. A/B expose data_bypass=true by default, explicitly settable to false; nested transforms retain their own declared/default setting. Semantic entry/exit spaces marked isData fail; raw may deliberately select them. A no-op processor still passes selected Float64 samples through RN32 and exact widening and is not an automatic bit-preserving view/copy. CPU reference does not undo config skips.
 
-## Confirmed configuration bypass
+## Finite numerical domain
 
-Retain and record engine construction skips for identical names/equalitygroup.
-A/B expose data_bypass=true by default, explicitly settable to false; nested
-transforms retain their own declared/default setting. Semantic entry/exit spaces
-marked isData fail; raw may deliberately select them. A no-op processor still
-passes selected Float64 samples through RN32 and exact widening and is not an
-automatic bit-preserving view/copy. CPU reference does not undo config skips.
+Description-based and finite-only raw paths require consumed color inputs, narrowed Float32 values and requested outputs finite as unchecked caller premises. No adapter scan checks source, narrowed or output values. Use finite negative/HDR coordinates without an adapter clamp; a configured Range/LUT/rendering transform may itself clip. The proposed raw path omits analytic interpretation checks, but still requires explicit endpoint configuration and finite samples. No path attaches an output description.
 
-## Confirmed finite numerical domain
+## File interpolation
 
-Description-based and finite-only raw paths require consumed color inputs, narrowed Float32 values
-and requested outputs finite as unchecked caller premises. No adapter scan
-checks source, narrowed or output values. Use finite negative/HDR coordinates without an
-adapter clamp; a configured Range/LUT/rendering transform may itself clip.
-The proposed raw path omits analytic interpretation checks, but still requires
-explicit endpoint configuration and finite samples. No path attaches an output
-description.
+E exposes supported interpolation choices including default/nearest/linear/ tetrahedral/best. Record the selected reader and effective interpretation; default/best resolve under that fixed v2.5.2 reader. Reject an explicit concrete mode unsupported by an affected LUT instead of accepting a warning/fallback to a different mode. Non-LUT stages in compound files retain their file-defined processing. File options and selection are static processor identity. Apply the same strict concrete-request policy to public LUT/FileTransform nodes explicitly authored in F. Existing interpolation declarations inside imported configs/files retain the pinned reader's interpretation unless an applicable public override was explicitly supplied; record their actual behavior. A public concrete override that a reader cannot apply is rejected, not silently ignored.
 
-## Confirmed file interpolation
+## Public selectors
 
-E exposes supported interpolation choices including default/nearest/linear/
-tetrahedral/best. Record the selected reader and effective interpretation;
-default/best resolve under that fixed v2.5.2 reader. Reject an explicit concrete
-mode unsupported by an affected LUT instead of accepting a warning/fallback to
-a different mode. Non-LUT stages in compound files retain their file-defined
-processing. File options and selection are static processor identity.
-Apply the same strict concrete-request policy to public LUT/FileTransform nodes
-explicitly authored in F. Existing interpolation declarations inside imported
-configs/files retain the pinned reader's interpretation unless an applicable
-public override was explicitly supplied; record their actual behavior. A public
-concrete override that a reader cannot apply is rejected, not silently ignored.
+Public color-space selectors explicitly distinguish name, alias and role. Resolve case-sensitive exact unique matches at compilation; missing/ambiguous matches fail. Store canonical config identity/name in prepared configuration and processor identity, retaining the supplied selector for diagnostics. A cannot select a NamedTransform as a color space; D selects that separate object class.
 
-## Confirmed public selectors
+## Demand and layout
 
-Public color-space selectors explicitly distinguish name, alias and role.
-Resolve case-sensitive exact unique matches at compilation; missing/ambiguous
-matches fail. Store canonical config identity/name in prepared configuration and processor
-identity, retaining the supplied selector for diagnostics. A cannot select a
-NamedTransform as a color space; D selects that separate object class.
+Every requested transformed coordinate consumes the complete source triple at that point, even for a reported no-op. Mathematical support has no halo. Bypass alpha/AOV output tiles consume only their corresponding source component; alpha=0 does not suppress requested hidden-color processing. Requested components are published without a validation pass. Actual shared engine execution failures propagate; violated sample premises have no required diagnostic.
 
-## Confirmed demand and layout
+layout=auto (default) and materialize both allocate distinct dense output tiles. Reject view, including Float32 no-op cases. Bypass read-window reuse concerns source access only and does not alias produced storage. ## Static interface and member identity
 
-Every requested transformed coordinate consumes the complete source triple at
-that point, even for a reported no-op. Mathematical support has no halo.
-Lowering closes retained output tiles and each input's tile grid before issue.
-Bypass alpha/AOV output tiles consume only their corresponding
-source component; alpha=0 does not suppress requested hidden-color processing.
-Evaluate full target triples in scratch if needed and publish requested
-components without a validation pass. Actual shared engine execution failures
-propagate; violated sample premises have no required diagnostic.
-
-layout=auto (default) and materialize both allocate distinct dense output tiles.
-Reject view, including Float32 no-op cases. Bypass read-window reuse concerns
-source access only and does not alias produced storage. Fixed execution has no
-incremental dirty invalidation. Required upstream tasks retain their declared
-read/write support and operational failures; complete tile closure is explicit.
-
-## Static interface and member identity
-
-All six members are native external-engine adapters. F's internal group is one
-processor, not separate project tensor nodes with intermediate rounding. Each
-takes one `input` tensor and returns same-dtype/same-shape `values` with the same
-channel axis and ordered source slots. Proposed keys are:
+All six members are native external-engine adapters. F's internal group is one processor, not separate project tensor nodes with intermediate rounding. Each takes one `input` tensor and returns same-dtype/same-shape `values` with the same channel axis and ordered source slots. Operation keys:
 
 | Member | Key | Required forward-route parameters |
 | --- | --- | --- |
@@ -229,259 +100,63 @@ channel axis and ordered source slots. Proposed keys are:
 | [E](FMT-13E_apply_ocio_file.md) | color.ocio_file_transform_2_5_2_cpu | frozen file, entry_space, exit_space |
 | [F](FMT-13F_apply_ocio_transform_tree.md) | color.ocio_transform_tree_2_5_2_cpu | transform tree, entry_space, exit_space |
 
-Parameters are static: selectors, config/context/resources, tree values and
-directions, property snapshots, interpolation, execution, bypass/bridge, layout
-and interpretation. Structural changes require inference and reconstruction.
-Only pixel values vary within a compiled workflow. Preserve NUM checked-size
-and generic tensor rank rules subject to actual planar image-axis capabilities.
-Selectors resolve axes directly or from explicit input configuration; never guess HWC/CHW.
+Parameters are static: selectors, config/context/resources, tree values and directions, property snapshots, interpolation, execution, bypass/bridge, layout and interpretation. Structural changes require inference and reconstruction. Only pixel values vary within a compiled workflow. Preserve NUM checked-size and generic tensor rank rules subject to actual planar image-axis capabilities. Selectors resolve axes directly or from explicit input configuration; never guess HWC/CHW.
 
-Semantic mode selects one complete three-component group; raw selects three
-distinct ordered slots and explicitly supplies all numerical endpoint/config
-parameters. Integer/F16 storage requires prior explicit conversion to admitted
-Float32/Float64. Public endpoint coordinates must match the declared config-native
-units; no implicit FMT-06 decoder or RGB transfer stage is inserted.
+Semantic mode selects one complete three-component group; raw selects three distinct ordered slots and explicitly supplies all numerical endpoint/config parameters. Integer/F16 storage requires prior explicit conversion to admitted Float32/Float64. Public endpoint coordinates must match the declared config-native units; no implicit FMT-06 decoder or RGB transfer stage is inserted.
 
-Top-level color-space selectors distinguish name/alias/role. Display/view and
-Look names use exact case-sensitive lookup in their object namespaces. D uses
-an explicit NamedTransform name/alias selector. Canonicalize resolved objects
-before passing names to OCIO. Native references inside an imported config or
-file retain the pinned reader's own resolution semantics and are recorded in
-the construction trace; they are not silently rewritten to a different config
-dialect. F's explicit symbolic nodes are resolved as part of its static tree.
+Top-level color-space selectors distinguish name/alias/role. Display/view and Look names use exact case-sensitive lookup in their object namespaces. D uses an explicit NamedTransform name/alias selector. Canonicalize resolved objects before passing names to OCIO. Native references inside an imported config or file retain the pinned reader's own resolution semantics and are recorded in the construction trace; they are not silently rewritten to a different config dialect. F's explicit symbolic nodes are resolved as part of its static tree.
 
-E/F may omit config only if their transform is self-contained. In that case use
-a fixed versioned empty resolver context with no color spaces, Looks, defaults,
-system configuration or ambient variables. A symbolic dependency requires an
-explicit frozen config/context. E uses interpolation=default when omitted and
-an explicit optional ccc_id (empty means the pinned reader's default selection);
-record the actual selected record and fail unavailable selections. F requires
-a finite, acyclic typed tree with fixed supported node types and parameters.
-Empty GroupTransform is permitted as an engine no-op, with normal dtype
-adaptation/validation. No arbitrary pointers, callbacks, code or plugin loading.
+E/F may omit config only if their transform is self-contained. In that case use a fixed versioned empty resolver context with no color spaces, Looks, defaults, system configuration or ambient variables. A symbolic dependency requires an explicit frozen config/context. E uses interpolation=default when omitted and an explicit optional ccc_id (empty means the pinned reader's default selection); record the actual selected record and fail unavailable selections. F requires a finite, acyclic typed tree with fixed supported node types and parameters. Empty GroupTransform is permitted as an engine no-op, with normal dtype adaptation/validation. No arbitrary pointers, callbacks, code or plugin loading.
 
-C supplies an explicit sequence or ordered alternatives; an explicitly empty
-sequence performs just its declared source/destination conversion. Each item
-contains a Look selector and direction. Serialize only unambiguous representable
-Look syntax; do not invent escaping for a name the engine grammar cannot address.
-complete-input inverse reverses each sequence and flips directions while retaining
-alternative priority. A missing inverse is not silently replaced with identity.
+C supplies an explicit sequence or ordered alternatives; an explicitly empty sequence performs just its declared source/destination conversion. Each item contains a Look selector and direction. Serialize only unambiguous representable Look syntax; do not invent escaping for a name the engine grammar cannot address. complete-input inverse reverses each sequence and flips directions while retaining alternative priority. A missing inverse is not silently replaced with identity.
 
 ## Explicit configuration and selected route
 
-Input and output interpretations are explicit static configuration. Config
-identity, resolved context and canonical space identity determine configured
-coordinates. Analytic/endpoint bindings are caller assertions with required
-structural/unit/reference consistency, not proof that arbitrary LUTs equal
-analytic formulas. Config reference-space enums control engine routing; they
-do not establish nits, a physical scene reference or a [0,1] sample range.
+Input and output interpretations are explicit static configuration. Config identity, resolved context and canonical space identity determine configured coordinates. Analytic/endpoint bindings are caller assertions with required structural/unit/reference consistency, not proof that arbitrary LUTs equal analytic formulas. Config reference-space enums control engine routing; they do not establish nits, a physical scene reference or a [0,1] sample range.
 
-A/C compute coordinates for the resolved destination space. B computes the
-resolved display/view output space. D/E/F use explicit exit configuration;
-inverse swaps entry/exit. Require complete endpoint declarations whenever the
-route alone is insufficient. Preparation retains canonical route information
-and resources. Outputs contain numeric data and structure; consumers receive
-the needed configuration explicitly. View/Look provenance does not imply that
-pre-view information can be recovered from pixels.
+A/C compute coordinates for the resolved destination space. B computes the resolved display/view output space. D/E/F use explicit exit configuration; inverse swaps entry/exit. Require complete endpoint declarations whenever the route alone is insufficient. Preparation retains canonical route information and resources. Outputs contain numeric data and structure; consumers receive the needed configuration explicitly. View/Look provenance does not imply that pre-view information can be recovered from pixels.
 
-Check logical source/process/destination reference-space crossings before CPU
-optimization or config identity/equalitygroup elision. config_default authorizes
-only the recorded engine/config default bridge. An explicit DisplayViewTransform
-node is an explicit view route, as B is; implicit extra bridges inside its Look
-or color-space dependencies still require the policy above. When the config
-omits default_view_transform and the pinned engine selects its first eligible
-ViewTransform, record that concrete object. Never choose a view from the OS.
+Check logical source/process/destination reference-space crossings before CPU optimization or config identity/equalitygroup elision. config_default authorizes only the recorded engine/config default bridge. An explicit DisplayViewTransform node is an explicit view route, as B is; implicit extra bridges inside its Look or color-space dependencies still require the policy above. When the config omits default_view_transform and the pinned engine selects its first eligible ViewTransform, record that concrete object. Never choose a view from the OS.
 
-Construction trace includes resolved names/context, actual forward/inverse
-definitions, candidate choice, reference bridges, bypass/elisions, file reader,
-effective interpolation, frozen properties and optimized processor identity.
-OCIO cache IDs alone are not authoritative resource/content identity.
+Construction trace includes resolved names/context, actual forward/inverse definitions, candidate choice, reference bridges, bypass/elisions, file reader, effective interpolation, frozen properties and optimized processor identity. OCIO cache IDs alone are not authoritative resource/content identity.
 
 ## Alpha admission and exact processing
 
-Inspect the selected resolved operation graph before CPU optimization. Require
-a conservative per-operation proof of RGB independence from alpha and identity
-of its alpha mapping; reject unsupported/unknown alpha effects. Do not accept
-an alpha-changing operation merely because a later operation cancels it, the
-current alpha is constant, or finite probes appear unchanged. Unselected config
-branches need not pass sample-processing admission. hasChannelCrosstalk is not
-an alpha proof: a 3x3 RGB matrix has legitimate cross-component dependencies.
+Inspect the selected resolved operation graph before CPU optimization. Require a conservative per-operation proof of RGB independence from alpha and identity of its alpha mapping; reject unsupported/unknown alpha effects. Do not accept an alpha-changing operation merely because a later operation cancels it, the current alpha is constant, or finite probes appear unchanged. Unselected config branches need not pass sample-processing admission. hasChannelCrosstalk is not an alpha proof: a 3x3 RGB matrix has legitimate cross-component dependencies.
 
-Use an authorized Tensor window with only the selected three planes and no real alpha plane.
-The fixed engine fills absent scratch alpha with zero. Admission makes this
-irrelevant to selected color; it is not an opacity assumption about the image.
-Real alpha/AOV bypass preserves every bit including nonfinite and signed zeros.
-Use prepared same-grid windows, gather into bounded planar scratch where tile
-address maps cannot be described by uniform strides, and never read missing
-pixels or row padding as colors. Do not publish temporary engine planes.
+Use an authorized Tensor window with only the selected three planes and no real alpha plane. The fixed engine fills absent alpha with zero. Admission makes this irrelevant to selected color; it is not an opacity assumption about the image. Real alpha/AOV bypass preserves every bit including nonfinite and signed zeros. Missing pixels and row padding are never read as colors.
 
-RN32 conversion, engine processing and requested output conversion run directly
-under the finite/representability premises. No source, narrowed-value or output
-scan is performed. Empty and bypass-only observations still perform static
-resource/processor construction, including structural alpha-effect checks.
-The host visitor checks node types, hierarchy, LUT/curve sizes, interpolation
-and alpha support without scanning numeric coefficients or LUT samples. Frozen
-nodes are not subjected to an extra host `validate()` call; actual processor
-construction and its engine failures remain part of preparation.
+RN32 conversion, engine processing and requested output conversion run directly under the finite/representability premises. No source, narrowed-value or output scan is performed. Empty and bypass-only observations still perform static resource/processor construction, including structural alpha-effect checks. Static acceptance requires supported node types, valid hierarchy and LUT/curve dimensions, supported interpolation and the alpha constraints above. Numerical coefficient and LUT-sample domains remain unchecked caller premises. Processor construction and its engine failures remain part of preparation.
 
 ## Execution recipe and reproducibility
 
-Both configurations run F32-to-F32 after explicit adaptation. Snapshot properties
-in private resolved transform instances before CPU optimization, make each
-non-dynamic, then require final isDynamic()==false. Avoid a flag that silently
-changes reference's intended optimization set; perform staticization as a
-separate identified preparation step. Do not mutate the source config/resource.
-Freeze each transform instance's own property values; a getter returning only
-the first property of a given type cannot supply every instance's snapshot.
-Test repeated same-type properties with different values and reject unresolved
-mutable state rather than silently sharing one value across them.
+Both configurations run F32-to-F32 after explicit dtype adaptation. Dynamic properties are snapshotted in private resolved transform instances before CPU optimization and made non-dynamic; the final processor reports isDynamic()==false. Each transform instance's own property values are frozen, so repeated same-type properties with different values keep their own values; unresolved mutable state is rejected. The source config/resource is not mutated.
 
-Pin the engine release plus host-integration revision, compiler options,
-dependency versions, architecture/ISA dispatch and math runtime. Fix nearest-even
-and gradual underflow; prohibit fast-math/reassociation or compiler contraction
-that changes the selected build recipe, and restore the caller's FP environment.
-The explicitly selected OCIO fast-math operations in optimized remain part of
-that processor; compiler policy does not turn them into NUM strict operations.
-Use OPTIMIZATION_NONE or the exact v2.5.2 OPTIMIZATION_DEFAULT mask, with no
-environment override. Do not choose flags, inverse quality or precision based
-on memory pressure. Reference does not undo config-level skip or finalization.
+Optimization is OPTIMIZATION_NONE or the exact v2.5.2 OPTIMIZATION_DEFAULT mask, with no environment override and no choice of flags, inverse quality or precision based on resource pressure. Reference does not undo config-level skip or finalization. The explicitly selected OCIO fast-math operations in optimized remain part of that processor. Arithmetic is nearest-even with gradual underflow and the caller's FP environment is restored.
 
-The normative point oracle uses the selected CPUProcessor on one F32 pixel via
-a planar descriptor with absent alpha, enclosed by public dtype adaptation.
-Batched/SIMD evaluation is admitted only if it preserves this point result for
-the supported build/path, including tails, alignment, sparse requests and worker
-partitions. Otherwise retain the conforming point path; no throughput claim is
-made here. Native NUM error bounds are not substituted for this engine contract.
+The normative point result is the selected CPUProcessor applied to one F32 pixel via a planar descriptor with absent alpha, enclosed by public dtype adaptation. Any batched evaluation preserves this point result, including tails, sparse requests and worker partitions. Native NUM error bounds are not substituted for this engine contract. Within one build and configuration, ROI, batch and worker scheduling preserve output bits; the two configurations may differ and no universal four-ULP, Delta-E or reversible-transform bound is claimed.
 
-Independent direct-OCIO integration checks use the same frozen resources,
-resolved definitions, staticization, flags and build. Separately use analytic
-small transforms and independently specified LUTs to check coordinate/slot and
-rounding boundaries. Record reference/optimized and cross-build corpus errors;
-they do not establish a universal four-ULP, Delta-E or reversible-transform bound.
-Each configuration's within-build/path scheduling invariance is exact.
+## Frozen resources
 
-## Frozen resources, memory and cancellation
+The immutable resource manifest owns config/tree bytes, context values, logical path mapping and resolved file bytes. The entire supplied mapping is part of the identity; lookup absence is frozen too. Config-declared context defaults and explicit caller overrides are resolved without loading the process environment. Missing required variables, recursion or unresolved required references fail; empty values are never substituted. A selected candidate's missing file is eligible for the Look fallback only if no host failure caused the lookup miss. Resources irrelevant to the selected processor need not be read, but no later lookup acquires bytes from outside the snapshot. A new resource mapping is a new identity. The engine does not read the ambient environment (including OCIO_OPTIMIZATION_FLAGS and active display/view overrides), host file-system fallback paths or global caches.
 
-The immutable resource manifest owns config/tree bytes, context values, logical
-path mapping and resolved file bytes. Include the entire supplied mapping in
-identity; lookup absence is frozen too. Resolve config-declared context defaults
-and explicit caller overrides without loading process environment. Missing
-required variables, recursion or unresolved required references fail; do not
-silently substitute empty values. A selected candidate's missing file is eligible
-for the specified Look fallback only if no host failure caused the lookup miss.
-Resources irrelevant to the selected processor need not be read, but no later
-lookup may acquire new bytes from outside the snapshot. A new resource mapping
-is a new identity and requires reconstruction. This does not promise every other
-route in that config is executable with the selected resource package.
+## Errors
 
-Prepared state, plans and active execution retain immutable config/processor
-resources through their use. Published Results and read windows retain only
-their actual data backing owners. Charge copied streams, parsed
-curves/LUTs, inverse lookup structures, snapshots, compiled renderers, staging,
-diagnostics, output pages and all concurrently live ancestors. No arbitrary
-profile-size-to-memory estimate replaces audited actual accounting or a proven
-reservation bound. Validate dimensions/counts before products and allocations.
-Stages/curves/tree depth/resources must obey root capacity/work/stage limits.
+Static unsupported dtype/group/layout or incompatible semantic model uses TypeMismatch; missing/conflicting selectors, endpoints, resources, invalid tree/config/inverse/bridge or alpha-effect admission uses InvalidArgument/InvalidDomain. Forced view and unsupported concrete interpolation are static InvalidArgument/InvalidDomain. Numeric parameter domains, finite consumed values, representable narrowing and finite requested results are unchecked caller premises. A genuine private-engine execution failure is OperationFailed with a bounded message. A failed execution publishes no successful result and does not substitute a different engine/config/optimization/identity copy. Host failures never trigger config or Look alternatives.
 
-The private v2.5.2 integration makes the following audited changes:
+## Acceptance
 
-- YAML/config construction may read ambient environment; CPU creation may read
-  OCIO_OPTIMIZATION_FLAGS. Active display/view/inactive-space overrides and cache
-  controls must also be isolated. Never temporarily mutate process environment
-  or global current config as a per-DAG strategy.
-- ConfigIOProxy does not itself guarantee closed lookup. The pinned implementation
-  may fall back to host file hashing/ifstream for absolute paths after empty
-  proxy results or exceptions. Disable such fallback. Latch construction budget
-  failures independently; do not reinterpret them as missing resources eligible
-  for Look fallback, nor accept a processor returned after a swallowed failure.
-- Global file/hash caches are path-keyed and not isolated by a private Config.
-  Use content-identity-qualified logical paths and audited isolated/accounted
-  cache state; processor-cache OFF alone is insufficient. The initial adapter
-  disables optional caches, including these global paths through integration
-  hooks. Retained compiled state remains explicitly owned/charged. Do not call
-  global ClearAllCaches while another graph relies on live state.
-- Public APIs do not account all std::vector/new/stream allocations or expose
-  work admission throughout parse/CLUT/inverse construction. Add reviewed hooks
-  or proven equivalent accounting and checked work probes. Construction has
-  no cancellation probes. A proxy or checks only around a long call are
-  insufficient to account internal allocation and work.
+Both dtypes and configurations; exact identity Float64 narrowing; simple matrices/ranges/gamma and independent LUT fixtures; valid negative/HDR cases; aliases/roles/case errors; both directions and lossy inverse cases; same-name/equalitygroup/isData skips; default bridges and explicit views; Look candidate selection; static dynamic-property values; alpha mixing/replacement rejection and valid RGB cross-talk; bypass/empty, noncanonical slots, disjoint/offset/cross-tile ROI and missing-file no-host-fallback.
 
-Freeze successful numeric behavior while adding host hooks and identify that
-integration revision. Use private construction state, then immutable non-dynamic
-processor instances; concurrent sharing requires actual thread-safety validation,
-otherwise retain private worker instances under budgets. Cancellation/currentness
-checks occur before/after bounded pixel batches; construction uses work/memory
-admission without cancellation checks. No detached work or asynchronous thread
-killing. Discard unpublished
-writes/state on failure, retain valid published owners and release all temporary
-capacity. Same-identity resources may be shared only under normal root accounting.
+GPU execution, runtime dynamic-property ports, config authoring/baking/export, heuristic cross-config matching and automatic display selection are outside this contract. Cross-config use requires explicit intermediate interpretation and graph composition. ACES support is through explicit versioned config/builtin transforms, not a promise that a space name adopts all ACES workflows. FMT-15/18 retain their own native rendering/proofing contracts.
 
-## Errors and acceptance
+## References
 
-Inherit NUM Status delivery, transaction/publication scope and required-upstream
-failure propagation. Static unsupported dtype/group/layout or incompatible
-semantic model uses TypeMismatch; missing/conflicting selectors, endpoints,
-resources, invalid tree/config/inverse/bridge or alpha-effect admission uses
-InvalidArgument/InvalidDomain. Forced view and unsupported concrete interpolation
-are static InvalidArgument/InvalidDomain. Numeric parameter domains, finite
-consumed values, representable narrowing and finite requested results are
-unchecked caller premises. Genuine private-engine execution failure remains
-OperationFailed; no sample-domain diagnostic is promised. ResourceExhausted preserves the
-root limit reason; Cancelled/stale retains inherited precedence and attribution.
-Integration invariant failures are not misreported as invalid user configs.
-
-Construction inspection identifies immutable resources and selected routes
-without dumping resource bytes. Fixed runtime invocation reports a bounded
-Status message for actual engine execution failure; it does not promise
-per-sample coordinates, component values or a numeric report stream. Actual execution
-failure publishes no successful result and does not substitute a different
-engine/config/optimization/identity copy. There is no output validation gate. Actual host failures cannot trigger config or Look alternatives.
-
-Regression coverage includes both dtypes and configurations; exact identity
-Float64 narrowing; simple matrices/ranges/gamma and independent LUT fixtures;
-valid negative/HDR cases and actual engine failures; aliases/roles/case errors; both directions and
-lossy inverse cases; same-name/equalitygroup/isData skips; default bridges and
-explicit views; Look candidate selection; static dynamic-property values;
-alpha mixing/replacement rejection and valid RGB cross-talk; bypass/empty,
-noncanonical slots, disjoint/offset/cross-tile ROI, lane tails and worker schedules.
-Check low budgets in parse/LUT inversion and cancellation during pixel execution; cache-off,
-same-path/different-resource isolation, missing-file no-host-fallback and latched
-failure cleanup. Verify output/read windows survive context destruction and
-all final allocations retire. Supply actual public workflows plus direct-engine
-and independent numeric evidence in [implementation, validation and performance](../FMT-12-13-18_implementation.md). Benchmark construction
-separately from application, reporting exact build/CPU path and managed memory.
-
-This revision does not implement GPU execution, runtime dynamic-property ports,
-config authoring/baking/export, heuristic cross-config matching or automatic
-display selection. Cross-config use requires explicit intermediate interpretation
-and graph composition; no new implicit inter-config processor is introduced.
-ACES support is through explicit versioned config/builtin transforms, not a
-promise that a space name adopts all ACES workflows. FMT-15/18 retain their own
-native rendering/proofing contracts.
-
-## Primary sources inspected
-
-- [OCIO transforms](https://opencolorio.readthedocs.io/en/v2.4.2/guides/authoring/transforms.html):
-  initial API terminology; not the eventual engine version selection.
-- [OCIO releases](https://github.com/AcademySoftwareFoundation/OpenColorIO/releases):
-  v2.5.2 is listed as the latest release when inspected on 2026-09-23.
-- [Pinned public types](https://github.com/AcademySoftwareFoundation/OpenColorIO/blob/v2.5.2/include/OpenColorIO/OpenColorTypes.h)
-  and [public API](https://github.com/AcademySoftwareFoundation/OpenColorIO/blob/v2.5.2/include/OpenColorIO/OpenColorIO.h):
-  bit depth, optimization, resource and processor interfaces.
-- [CPUProcessor](https://github.com/AcademySoftwareFoundation/OpenColorIO/blob/v2.5.2/src/OpenColorIO/CPUProcessor.cpp)
-  and [image packing](https://github.com/AcademySoftwareFoundation/OpenColorIO/blob/v2.5.2/src/OpenColorIO/ImagePacking.cpp):
-  F32 engine and absent-alpha behavior.
-- [ColorSpaceTransform](https://github.com/AcademySoftwareFoundation/OpenColorIO/blob/v2.5.2/src/OpenColorIO/transforms/ColorSpaceTransform.cpp),
-  [DisplayViewTransform](https://github.com/AcademySoftwareFoundation/OpenColorIO/blob/v2.5.2/src/OpenColorIO/transforms/DisplayViewTransform.cpp)
-  and [LookTransform](https://github.com/AcademySoftwareFoundation/OpenColorIO/blob/v2.5.2/src/OpenColorIO/transforms/LookTransform.cpp):
-  configured routes, skips and candidate behavior.
-- [Processor construction](https://github.com/AcademySoftwareFoundation/OpenColorIO/blob/v2.5.2/src/OpenColorIO/Processor.cpp),
-  [YAML loader](https://github.com/AcademySoftwareFoundation/OpenColorIO/blob/v2.5.2/src/OpenColorIO/OCIOYaml.cpp)
-  and [Config](https://github.com/AcademySoftwareFoundation/OpenColorIO/blob/v2.5.2/src/OpenColorIO/Config.cpp):
-  environment and resolution boundaries.
-- [FileTransform](https://github.com/AcademySoftwareFoundation/OpenColorIO/blob/v2.5.2/src/OpenColorIO/transforms/FileTransform.cpp)
-  and [PathUtils](https://github.com/AcademySoftwareFoundation/OpenColorIO/blob/v2.5.2/src/OpenColorIO/PathUtils.cpp):
-  proxy fallback and global cache integration prerequisites.
-- [Transform API](https://github.com/AcademySoftwareFoundation/OpenColorIO/blob/v2.5.2/include/OpenColorIO/OpenColorTransforms.h)
-  and [op optimization](https://github.com/AcademySoftwareFoundation/OpenColorIO/blob/v2.5.2/src/OpenColorIO/OpOptimizers.cpp):
-  static property preparation and optimization behavior.
+- [OCIO transforms](https://opencolorio.readthedocs.io/en/v2.4.2/guides/authoring/transforms.html): initial API terminology; not the eventual engine version selection.
+- [OCIO releases](https://github.com/AcademySoftwareFoundation/OpenColorIO/releases): v2.5.2 is listed as the latest release when inspected on 2026-09-23.
+- [Pinned public types](https://github.com/AcademySoftwareFoundation/OpenColorIO/blob/v2.5.2/include/OpenColorIO/OpenColorTypes.h) and [public API](https://github.com/AcademySoftwareFoundation/OpenColorIO/blob/v2.5.2/include/OpenColorIO/OpenColorIO.h): bit depth, optimization, resource and processor interfaces.
+- [CPUProcessor](https://github.com/AcademySoftwareFoundation/OpenColorIO/blob/v2.5.2/src/OpenColorIO/CPUProcessor.cpp) and [image packing](https://github.com/AcademySoftwareFoundation/OpenColorIO/blob/v2.5.2/src/OpenColorIO/ImagePacking.cpp): F32 engine and absent-alpha behavior.
+- [ColorSpaceTransform](https://github.com/AcademySoftwareFoundation/OpenColorIO/blob/v2.5.2/src/OpenColorIO/transforms/ColorSpaceTransform.cpp), [DisplayViewTransform](https://github.com/AcademySoftwareFoundation/OpenColorIO/blob/v2.5.2/src/OpenColorIO/transforms/DisplayViewTransform.cpp) and [LookTransform](https://github.com/AcademySoftwareFoundation/OpenColorIO/blob/v2.5.2/src/OpenColorIO/transforms/LookTransform.cpp): configured routes, skips and candidate behavior.
+- [Processor construction](https://github.com/AcademySoftwareFoundation/OpenColorIO/blob/v2.5.2/src/OpenColorIO/Processor.cpp), [YAML loader](https://github.com/AcademySoftwareFoundation/OpenColorIO/blob/v2.5.2/src/OpenColorIO/OCIOYaml.cpp) and [Config](https://github.com/AcademySoftwareFoundation/OpenColorIO/blob/v2.5.2/src/OpenColorIO/Config.cpp): environment and resolution boundaries.
+- [FileTransform](https://github.com/AcademySoftwareFoundation/OpenColorIO/blob/v2.5.2/src/OpenColorIO/transforms/FileTransform.cpp) and [PathUtils](https://github.com/AcademySoftwareFoundation/OpenColorIO/blob/v2.5.2/src/OpenColorIO/PathUtils.cpp): proxy fallback and global cache integration prerequisites.
+- [Transform API](https://github.com/AcademySoftwareFoundation/OpenColorIO/blob/v2.5.2/include/OpenColorIO/OpenColorTransforms.h) and [op optimization](https://github.com/AcademySoftwareFoundation/OpenColorIO/blob/v2.5.2/src/OpenColorIO/OpOptimizers.cpp): static property preparation and optimization behavior.

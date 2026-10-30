@@ -15,48 +15,23 @@ proposed_operation_keys:
 
 # FMT-13C: explicit Look sequences
 
-Inherit [FMT-13](FMT-13_ocio_transform_contract.md). C is one native processor
-using LookTransform, not independently rounded project nodes for each Look.
-The CPU implementation is available; the decision status remains Proposed. See [implementation, validation and performance](../FMT-12-13-18_implementation.md).
+Inherits [FMT-13](FMT-13_ocio_transform_contract.md). C is one processor using LookTransform, not independently rounded nodes for each Look.
 
-## Parameters and construction
+## Interface
 
-Require frozen config/context, explicit source_space/destination_space and an
-ordered Look sequence or ordered candidate sequences. Each item has an exact
-Look name and forward/inverse direction. Empty explicitly supplied sequence
-means only source-to-destination conversion. Direction of the complete operation
-defaults forward; inverse exchanges effective endpoints, reverses each sequence
-and flips item directions while preserving candidate priority.
+Frozen config/context, explicit source_space/destination_space and an ordered Look sequence or ordered candidate sequences are required. Each item has an exact Look name and forward/inverse direction. An explicitly supplied empty sequence means only the source-to-destination conversion. Direction of the complete operation defaults forward; inverse exchanges effective endpoints, reverses each sequence and flips item directions while preserving candidate priority.
 
-Keep engine process-space conversion enabled; there is no skipColorSpaceConversion
-shortcut in C's interface. Process-space implicit reference bridges obey the
-family guard. The Look's authored forward/inverse definitions and pinned fallback
-construction determine the map. Do not replace a configured process space with
-the input's current analytic space.
+Engine process-space conversion stays enabled; C has no skipColorSpaceConversion shortcut. Process-space implicit reference bridges obey the family guard. The Look's authored forward/inverse definitions and pinned fallback construction determine the map. A configured process space is not replaced with the input's current analytic space.
 
-Candidate fallback happens during construction on the frozen manifest and only
-for engine missing-file conditions. A missing Look or general error is fatal.
-Latched host resource/cancellation failure is never an eligible missing-file
-condition. Record the chosen sequence, then reuse that resolved choice during
-execution. Runtime filesystem changes cannot change it.
+Candidate fallback happens during construction on the frozen manifest and only for engine missing-file conditions. A missing Look or general error is fatal. A host resource failure is never an eligible missing-file condition. The chosen sequence is recorded and reused during execution; later filesystem changes cannot change it.
 
-## Outputs and acceptance
+## Behavior
 
-One input/output tensor retains dtype/shape/slots. The effective destination and Look configuration remain explicit parameters;
-output data carries no description. Family alpha admission, F32
-boundary, request/materialization and accounting rules apply to the whole chain.
+One input/output tensor retains dtype/shape/slots. The effective destination and Look configuration remain explicit parameters; output data carries no description. Family alpha admission, the F32 boundary and request/materialization rules apply to the whole chain.
 
-- Two simple affine Looks distinguish authored order from reversed order and
-  verify complete inverse ordering. Compare one-processor evaluation to its own
-  oracle; do not assume separately materialized Looks have identical rounding.
-- Test explicit inverse_transform preference and engine inversion when only
-  the opposite authored direction is available. Unavailable inverses fail.
-- First candidate missing a LUT may select a second candidate. Missing Look,
-  malformed LUT or host budget failure must not silently select that candidate.
-  Adding the missing file outside the frozen package does not alter the result.
-- Cover process-space crossing rejection/explicit bridge, empty sequence, names
-  containing unaddressable engine grammar delimiters, alpha admission and F64
-  no-op narrowing. Test exact ROI and both execution configurations.
+## Acceptance
 
-Public resource helpers, executable operation usage, independent oracle commands
-and measured validation coverage are recorded in [implementation, validation and performance](../FMT-12-13-18_implementation.md).
+- Two simple affine Looks distinguish authored order from reversed order and verify complete inverse ordering. One-processor evaluation is compared to its own oracle; separately materialized Looks need not have identical rounding.
+- Explicit inverse_transform preference and engine inversion when only the opposite authored direction is available. Unavailable inverses fail.
+- A first candidate missing a LUT may select a second candidate. A missing Look or malformed LUT does not select that candidate. Adding the missing file outside the frozen package does not alter the result.
+- Process-space crossing rejection/explicit bridge, empty sequence, names containing unaddressable engine grammar delimiters, alpha admission and F64 no-op narrowing; exact ROI and both execution configurations.

@@ -17,7 +17,7 @@ members:
 
 The two conductance functions are separate profiles. Their parameters are not interchangeable with ROF TV lambda.
 
-Inherit the [FILTER common contract](FILTER_common_contract.md), [RES native floating-point contract](RES_native_contract.md), and [FMT](../../02-format-color/op_specs/FMT_common_contract.md). These proposed specifications do not claim runtime implementation or registration.
+Inherit the [FILTER common contract](FILTER_common_contract.md), [RES native floating-point contract](RES_native_contract.md), and [FMT](../../02-format-color/op_specs/FMT_common_contract.md).
 
 Image inputs use distinct static Int64 `y_axis` and `x_axis`; all other axes are independent batch/channel planes.
 
@@ -28,7 +28,7 @@ Image inputs use distinct static Int64 `y_axis` and `x_axis`; all other axes are
 | RES-06C | [Exponential conductance, asynchronous early stop](RES-06C_diffusion_exponential_early_stop.md) | primitive | F |
 | RES-06D | [Reciprocal conductance, asynchronous early stop](RES-06D_diffusion_reciprocal_early_stop.md) | primitive | F |
 
-## Shared recurrence and units
+## Mathematics
 
 For each plane, perform explicit synchronous time steps over the finite grid with no-flux boundary. For each undirected in-domain neighbor edge `(i,j)`, compute `d=(u_j-u_i)/spacing_ij` and one native input-dtype conductance `c_ij`, shared in both directions. Then update simultaneously:
 
@@ -38,13 +38,13 @@ The state follows main input dtype `t`; conductance uses the input dtype. Conduc
 
 Fixed-step members require `max_iterations>=0`, use that as the exact number of updates, and do not stop early. Zero steps return an input bit-copy. Early-stop members are separate profiles with `rate_tolerance` and explicit check interval and iteration bound; their rate predicates and asynchronous semantics follow [FILTER iterative contract](FILTER_iterative_contract.md). No fixed maximum image size or iteration count is implied beyond checked representation and execution budgets.
 
-Ordinary arithmetic follows RES_native_contract, without a cross-backend NaN payload guarantee. Callers guarantee finite positive algorithm controls and the stated control-model/stability domain; production evaluation does not validate them. Resource exhaustion fails explicitly and must not change the algorithm, precision or requested step limit.
+Ordinary arithmetic follows [RES native floating-point contract](RES_native_contract.md), without a cross-backend NaN payload guarantee. Callers guarantee finite positive algorithm controls and the stated control-model/stability domain.
 
-complete-input-plane dependency applies to each fixed-step profile. Members declare mathematical support and fixed compiled reads; a theoretical finite halo does not authorize partial-state sharing. Account for two state generations, native edge conductances, work, checker-held state and checker workspace for early-stop members. Cancellation and owner lifetime follow common execution contracts.
+Each fixed-step profile depends on the complete input plane. Members declare mathematical support; a theoretical finite halo does not authorize partial-state sharing.
 
 ## Acceptance
 
-Independently check the one-step equation, shared conductance symmetry, constant preservation, oracle-only diagnostics for invalid stability bounds and each early-stop predicate. Runtime compiled ROI/tile selection, ownership, cancellation and budget claims require runtime evidence beyond reference fixtures.
+Check the one-step equation, shared conductance symmetry, constant preservation, and each early-stop predicate.
 
 ## References
 

@@ -16,7 +16,7 @@ members:
 
 Standard two-window regression; scalar and vector guides have distinct input contracts.
 
-Inherits the [FILTER common contract](FILTER_common_contract.md), [NUM](../../01-numeric/op_specs/NUM_common_contract.md), and [FMT](../../02-format-color/op_specs/FMT_common_contract.md). All listed members are implemented as CPU operations or explicit SDK/workflow authoring helpers through fixed invocation ABI 8 in `plugins/ops/05-filter/`. Specification acceptance remains Proposed and document maturity remains D1.
+Inherits the [FILTER common contract](FILTER_common_contract.md), [NUM](../../01-numeric/op_specs/NUM_common_contract.md) and [FMT](../../02-format-color/op_specs/FMT_common_contract.md).
 
 ## Members
 
@@ -25,20 +25,10 @@ Inherits the [FILTER common contract](FILTER_common_contract.md), [NUM](../../01
 | FIL-07A | [Scalar guided filter](FIL-07A_guided_scalar.md) | primitive | S: coefficients RN64; final E |
 | FIL-07B | [Vector guided filter](FIL-07B_guided_vector.md) | primitive | S: coefficients RN64; final E |
 
-Member suffixes identify distinct mathematical or interface objects, not backend-selectable quality tiers. A primitive may propose separately named strict and accelerated variants. A helper only orchestrates explicit stages. An external engine requires pinned resources and approval before it can have an executable configuration.
+## Numeric semantics
 
-## Shared mathematics, units, and profiles
+Numeric classes E, B and S, and NaN/Inf, signed-zero, overflow and underflow behavior, follow the [numeric reference](FILTER_numeric_reference.md) and the corresponding NUM operations. Positive-weight normalization, signed kernels, local regression and global inverse problems have distinct alpha semantics; see [color composition](FILTER_color_composition.md). Spatial extension, anchors and origins follow the [boundary contract](FILTER_boundary_contract.md); structured outputs follow the [collections contract](FILTER_collections_contract.md). Shapes depend only on descriptors.
 
-See each member specification listed above for its formula. Members do not share undeclared preprocessing; parameters with the same name are reusable only when their units, boundary, normalization, and RN stages match.
+## Behavior
 
-## Shared execution and numerical obligations
-
-E means evaluate the exact expression and round once to RN_t; B means explicitly generated, fixed coefficients; S means declared intermediate rounding stages. See the [numeric reference](FILTER_numeric_reference.md). FILTER has no category-wide finite-only rule except for finite-domain preconditions explicitly required by a member or NUM. Ordinary floating-point arithmetic produces NaN/Inf according to the corresponding NUM rules; ordinary floating-point overflow is not converted wholesale into operation failure. Member-defined strict bits, FP32-scaled four-ULP bounds, gradual underflow, copy behavior, and exact discrete branches continue to follow NUM.
-
-Positive-weight normalization, signed kernels, local regression, and global inverse problems have distinct semantics and must not share a blanket alpha-blurring rule. See [color composition](FILTER_color_composition.md). Spatial extension, anchors, and origins follow the [boundary contract](FILTER_boundary_contract.md); structured outputs follow the [collection contract](FILTER_collections_contract.md). Shapes depend only on descriptors; each member defines mathematical support and fixed compiled reads.
-
-## Dependencies and acceptance
-
-Each member’s support set is normative. Having a halo does not imply independent execution on an arbitrarily cropped ROI, and paged access does not remove a whole-image dependency. Follow each member’s declared staged rounding, global connectivity, transforms, and iterative state. Only selected computation and required algorithmic control contribute payload reads; no payload-validation phase is introduced.
-
-All members must follow the [acceptance protocol](FILTER_oracle_protocol.md). The [oracle README](../../../../oracle/ops/filter/README.md) describes mathematical references and recorded self-checks; reference self-checks and Photospider runtime/backend validation are separate evidence levels. D1/D2 indicate draft maturity, not acceptance status.
+Each member's declared support is normative. A halo does not make an arbitrarily cropped ROI an independent image boundary, and a whole-image dependency stays whole-image. Staged rounding, global connectivity, transforms and iterative state follow each member's definition.

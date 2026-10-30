@@ -16,68 +16,24 @@ implementation_status: implemented
 
 # NUM-04C: sqrt
 
-Numeric profile: strict retains the exact reference defined below. Floating
-arithmetic in accelerated profiles follows the shared
-[final FP32 four-ULP contract](NUM_accelerated_contract.md), including its
-range/fallback rules. Discrete results, copies, selected endpoints and special
-values remain exact.
+Numeric profile: strict is the exact reference defined below. Floating arithmetic in accelerated profiles follows the shared [final FP32 four-ULP contract](NUM_accelerated_contract.md). Discrete results, copies, selected endpoints and special values are exact. Inherits the [NUM baseline](NUM_common_contract.md) and the [NUM-04 unary contract](NUM-04_unary_contract.md); explicit rules below take precedence.
 
-Inherit the [NUM baseline](NUM_common_contract.md) for specification status,
-registration, shared execution and acceptance requirements; explicit rules below
-and in the named family contract take precedence.
+Computes the nonnegative square root of each Float32/Float64 value, preserving shape and dtype. Integer input is TypeMismatch; conversion is explicit. There are no static parameters. Keys: `numeric.sqrt_strict`, `numeric.sqrt_accelerated_apple_silicon`, `numeric.sqrt_accelerated_x86_64`.
 
-Compute the nonnegative square root for each observed Float32/Float64 value,
-preserving shape and dtype. Inherit the [NUM-04 common contract](NUM-04_unary_contract.md)
-for the parameter-free input/values interface, fixed tile reads and structural preparation,
-NaN propagation, generic output, lifetime and resource/public acceptance rules.
-Integer input is TypeMismatch; conversion must be explicit.
-
-## Exact numeric behavior
+## Mathematics
 
 | Input | Output |
 | --- | --- |
 | Positive finite x | Correctly rounded mathematical sqrt(x), directly in input/output dtype |
 | +0 / -0 | Same signed zero |
 | +infinity | +infinity |
-| Negative finite x or -infinity | Canonical positive quiet NaN from the common contract; successful observation |
+| Negative finite x or -infinity | Canonical positive quiet NaN from the unary contract; successful observation |
 | NaN | Quiet input NaN, preserving payload and sign |
 
-Strict requires correctly rounded bits. Accelerated sqrt follows the shared
-FP32-scaled final-result bound. Float32 output is defined by rounding the mathematical
-root directly to Float32, not by an assumed-safe intermediate conversion.
-All generic numeric inputs have a defined numeric result. Domain cases do not
-raise OperationFailed; shape/type, typed-input, resource and upstream failures
-retain the common Status behavior.
+Strict requires correctly rounded bits; accelerated follows the shared FP32-scaled final-result bound. Float32 output is the mathematical root rounded directly to Float32. Every numeric input has a defined result; domain cases are not failures. NUM-01's expression sqrt has a different input/output/error contract.
 
-## Algorithm and acceptance
+## Acceptance
 
-A hardware/software sqrt is acceptable when it establishes the selected
-correct-rounding and floating-environment behavior. An independent exact oracle
-can locate the destination candidate by comparing x against squares of adjacent
-rounding midpoints with exact binary-rational arithmetic, including ties-to-even.
-Do not accept a small residual as proof of rounding. Classify special inputs by
-bits first to preserve NaNs and avoid host traps. Any unresolved accelerated
-rounding uses an exact path; no weaker approximate result is published.
+sqrt(0)=+0, sqrt(-0)=-0, sqrt(1)=1, sqrt(4)=2, correctly rounded sqrt(2), negative inputs and -Inf give canonical NaN, +Inf unchanged, payload-preserving quieting of signaling NaNs, smallest positive subnormal and largest finite input, and destination rounding boundaries. The reference locates the destination candidate by comparing x against squares of adjacent rounding midpoints with exact binary-rational arithmetic, including ties-to-even.
 
-Finite input/output formats bound the reference arithmetic sizes. Cost is O(M)
-primitive roots with implementation-specific constant/exact-rounding work and
-O(1) element scratch, plus inherited input/output and validation resources.
-Keep exact refinement in preallocated scratch and query cancellation during long arithmetic.
-
-Required checks: sqrt(0)=+0, sqrt(-0)=-0, sqrt(1)=1, sqrt(4)=2, correctly rounded
-sqrt(2), negative inputs and -Inf canonical NaN, +Inf unchanged, payload-preserving
-quieting of signed NaNs, smallest positive subnormal and largest finite input,
-and destination rounding boundaries. Compare strict bits and accelerated final FP32-scaled accuracy to an
-independent oracle. Include caller rounding-mode/underflow settings, disjoint
-ROI without reading remote samples, new bindings, concurrent Runs, and common
-ownership/cancellation/budget tests.
-
-Conceptual public fixture: input `[-1,-0,0,4,+Inf]` produces
-`[canonical_NaN,-0,+0,2,+Inf]` with the same dtype and no attached domain description. The maintained public executable and run command are documented below. NUM-01's
-expression sqrt has a different input/output/error contract.
-
-## Maintained implementation and validation
-
-This operation is registered in `plugins/ops/01-numeric/numeric_unary.cpp` and
-exposed through `photospider/ops/numeric/unary.hpp`. It uses one fixed CPU invocation per selected output tile, validated input views and preallocated output/scratch. Its numerical path follows
-[the shared implementation notes](../math-implementation.md).
+Fixture: `[-1,-0,0,4,+Inf]` gives `[canonical_NaN,-0,+0,2,+Inf]` with the same dtype.

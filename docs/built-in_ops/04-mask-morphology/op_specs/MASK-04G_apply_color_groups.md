@@ -16,65 +16,28 @@ registered_operation_keys:
 
 # MASK-04G: Apply grouped color selection
 
-Inherit [MASK-common](MASK_common_contract.md) and the
-[family contract](MASK-04_color_range_contract.md). Numerical rules follow
-01-numeric. This Proposed member is registered in the bundled strict CPU set
-through fixed invocation ABI 8.
+Inherits [MASK-common](MASK_common_contract.md) and the [family contract](MASK-04_color_range_contract.md).
 
-## Ports, parameters and output inference
+## Interface
 
-image: Float32/Float64 planar[C_image,H,W], model:complete grouped-color Result
--> values: Coverage[H,W], image dtype. Required statics: channels;
-input_description; shared
-inner,outer finite Float64, 0<=inner<=outer; curve linear|smoothstep.
-No per-group overrides, priors or hidden color conversions. The workflow supplies the same input_description used to interpret the model
-coordinates and pairs it with a compatible selected complete image group;
-this semantic pairing is a caller premise.
+Registered operation key: `mask.apply_color_groups_strict`.
 
-## Exact model consumption and response
+image: Float32/Float64 planar[C_image,H,W], model: complete grouped-color Result -> values: Coverage[H,W], image dtype.
 
-Preparation checks model schema and dimensions and the explicit description.
-Model count, IDs, numerical entries and canonical padding are unchecked caller
-premises. Effective IDs are positive, unique and sorted; means/lower factors are
-finite Float64, upper triangle is +0 and every effective diagonal is positive.
-An empty model is legal. No fitting-source ObjectId match is required.
+Required statics: `channels`; `input_description`; shared `inner`,`outer` finite Float64 with 0<=inner<=outer; `curve` linear|smoothstep. There are no per-group overrides, priors or hidden color conversions. The workflow supplies the same `input_description` used to interpret the model coordinates and pairs it with a compatible selected complete image group; this semantic pairing is a caller premise.
 
-For each effective group solve L*z=x-mean in exact arithmetic on the stored
-binary values. Let d=sqrt(sum z^2). No rounded inverse matrix or sequential
-Float64 solve defines the reference. Form the shared inner/outer response as in
-the family and return the maximum response, with empty maximum +0. Equivalently,
-use the exact minimum squared distance, then apply the shared monotone response
-once and RN_T once. Equal distances give equal coverage; no winning-group output
-is defined. Group population and fitting weight are not blend weights.
+The model input has schema photospider.ops.mask.color_groups version 1 with the count/ids/mean/cholesky directory specified by [MASK-04E](MASK-04E_fit_color_groups_table.md#registered-result-schemas). Static capacity and selected component count determine the schema.
 
-## Demand, errors and acceptance
+## Mathematics
 
-For nonempty output selection, consume the model's effective prefix and selected
-image samples for a nonempty model, including all groups needed by the minimum.
-An empty model produces +0 without evaluating image samples; schema and explicit
-description checks still apply. Compile a fixed input-tile superset covering the
-complete model capacity and the image support for all selected output tiles;
-runtime count never extends the Plan. No input/model scan or publication
-validator is added. Account for model retention and exact triangular-solve
-scratch, and poll across pixels/groups.
+Model count, IDs, numerical entries and canonical padding are unchecked caller premises. Effective IDs are positive, unique and sorted; means and lower factors are finite Float64, the upper triangle is +0 and every effective diagonal is positive. An empty model is legal. No fitting-source ObjectId match is required. The consumer evaluates only the effective prefix given by count; zero padding does not participate.
 
-Production acceptance uses valid empty/nonempty models, covariance correlation,
-groups with identical responses, shared threshold equality, both image dtypes,
-unrelated-channel exclusion and another image with compatible interpretation.
-Duplicate/nonpositive IDs, invalid triangles and nonpositive pivots are oracle
-input diagnostics only. Numeric oracle inputs carry ids/mean/cholesky; actual SDK
-schemas, public execution, fixed reads, budgets and ownership require native checks.
+For each effective group solve L*z=x-mean in exact arithmetic on the stored binary values. Let d=sqrt(sum z^2). No rounded inverse matrix or sequential Float64 solve defines the reference. Form the shared inner/outer response as in the family and return the maximum response, with empty maximum +0. Equivalently, use the exact minimum squared distance, then apply the shared monotone response once and RN_T once. Equal distances give equal coverage; no winning-group output is defined. Group population and fitting weight are not blend weights.
 
-Oracle entry: `apply_color_groups` in [reference.py](../../../../oracle/ops/mask_morphology/mask04/reference.py).
+## Behavior
 
-The consumer reads count from its prepared fixed input bindings and evaluates only
-the effective prefix. Zero padding does not participate in response evaluation
-and is not scanned for canonicality. MASK-04E/F define capacity and zero-fill.
+For nonempty output selection, the output depends on the model's effective prefix and the selected image samples. An empty model produces +0 without evaluating image samples; schema and description checks still apply.
 
-## Registered model binding
+## Acceptance
 
-The model input requires schema photospider.ops.mask.color_groups version 1
-from [photospider/ops/mask.hpp](../../../../plugins/ops/include/photospider/ops/mask.hpp),
-with the exact count/ids/mean/cholesky directory and CompleteBundle publication
-specified by MASK-04E/F. Static capacity and selected component count determine
-the schema; the runtime effective count does not change compiled reads.
+Cases: valid empty and nonempty models, covariance correlation, groups with identical responses, shared threshold equality, both image dtypes, unrelated-channel exclusion and another image with compatible interpretation.

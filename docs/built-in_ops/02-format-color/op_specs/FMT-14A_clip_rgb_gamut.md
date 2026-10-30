@@ -16,43 +16,18 @@ proposed_operation_keys:
 
 # FMT-14A: RGB component gamut clipping
 
-Inherit the complete [FMT-14 family](FMT-14_gamut_mapping_contract.md), including
-its normative A algorithm, interface, metadata, finite-domain raw, errors,
-resource obligations and strict numerical reference. The specification remains Proposed; the strict CPU operation is registered with fixed invocation ABI 8. See [implementation and validation](../FMT-14-15_implementation.md).
+Inherits the [FMT-14 family](FMT-14_gamut_mapping_contract.md), including its normative A algorithm, interface, finite-domain raw form and errors. The strict CPU operation is the only key.
 
-## Ports, parameters and output
+## Interface
 
-One `input` Float32/Float64 Tensor. Output `values` preserves dtype, shape and RGB slots; alpha and unrelated channels copy unchanged.
-Select one native relative linear RGB group, or explicit raw ordered slots.
-Interpretation is explicit static configuration; layout defaults to auto; materialize is supported and
-view rejected. All metadata/geometry/member parameters are static. No implicit
-basis, transfer, range encoding or tone conversion occurs.
+One `input` Float32/Float64 Tensor. Output `values` preserves dtype, shape and RGB slots; alpha and unrelated channels copy unchanged. Select one native relative linear RGB group, or explicit raw ordered slots. Interpretation is explicit static configuration; layout defaults to auto; materialize is supported and view is rejected. All description/geometry/member parameters are static. No basis, transfer, range encoding or tone conversion is implied.
 
-## Computation and exact request behavior
+## Mathematics
 
-Each requested RGB component reads only its corresponding source sample.
-Use the corresponding family section for every branch and rounding boundary.
-There is no spatial halo or data-dependent demand elision. Static admission
-still runs for empty or bypass-only requests. Mapping hidden colors does not read
-alpha. Mathematical source support is closed on fixed input tiles; no incremental
-dirty-propagation service is defined.
+Each requested RGB component reads only its corresponding source sample. The family section gives every branch and rounding boundary. There is no spatial halo or data-dependent demand elision. Static admission runs also for empty or bypass-only requests. Hidden colors are mapped without reading alpha. Finite-domain conditions are unchecked caller premises. No sample-dependent identity branch makes the node eligible for view.
 
-## Storage, errors and implementation
+## Acceptance
 
-Native CPU strict primitive; no acceleration/GPU promise. Each selected output
-tile has independent dense storage and preallocated bounded scratch. The call
-publishes after its required tasks succeed and retires in order. Finite-domain
-conditions are unchecked caller premises. Resource, cancellation and required
-upstream failures retain their operational status and drain accepted work;
-already retired Results remain valid while owned.
-No sample-dependent identity branch makes the whole node eligible for view.
+For R=-0.25 and G=NaN, an output containing only R returns +0. An output that consumes G violates the finite caller premise and has no required diagnostic. Clipping can alter hue and luminance. Also cover sparse/ROI, dtype and description cases.
 
-## Independent acceptance and conceptual public workflow
-
-For R=-0.25 and G=NaN, an output tile containing only R returns +0. A retained output tile that consumes G violates the finite caller premise and has no required diagnostic. Clipping can alter hue and luminance.
-
-Also run the family sparse/ROI, dtype, metadata, resource and lifetime cases.
-Conceptual workflow: explicit source decoding/basis conversion -> this member ->
-consumer of mapped RGB or diagnostic mask. Implementations must supply an actual
-public workflow and independent oracle before marking this spec implemented.
-Source comparisons and algorithm compatibility limits are recorded in the family.
+Conceptual workflow: explicit source decoding/basis conversion -> this member -> consumer of mapped RGB.

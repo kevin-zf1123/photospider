@@ -10,151 +10,52 @@ implementation_status: partially_implemented
 
 # FILTER common contract
 
-This category defines FIL-01..20, FRQ-01..10 and RES-01..14: 44 families.
-Member letters identify distinct mathematical/interface objects. Proposed keys,
-specification maturity, runtime registration and oracle coverage are separate facts.
-FIL-01..20 are implemented through fixed invocation ABI 8: 45 primitive members
-provide 129 registered keys, and two authoring helpers compose existing operations.
-FRQ and RES families retain their own implementation statuses. Proposed/D1 describes
-specification acceptance and maturity separately from runtime availability.
+This category defines FIL-01..20, FRQ-01..10 and RES-01..14: 44 families. Member letters identify distinct mathematical/interface objects.
 
 ## Inheritance and representation
 
-Member rules refine family rules and this category contract. FRQ-01A/B and
-FRQ-02A/B use the explicit ordinary floating-point F exception in
-[FRQ-01](FRQ-01_contract.md#shared-mathematics-units-and-profiles). RES-01 through RES-12 use the scoped [RES native F contract](RES_native_contract.md). Other members do not override
-the rounding/accuracy baseline in [NUM](../../01-numeric/op_specs/NUM_common_contract.md)
-and [NUM acceleration](../../01-numeric/op_specs/NUM_accelerated_contract.md), or
-straight color and storage in [FMT](../../02-format-color/op_specs/FMT_common_contract.md),
-[relative coordinates](../../02-format-color/op_specs/FMT_relative_coordinate_scale.md)
-and [tensor storage](../../../kernel-specs/Tensor-Storage-and-Region-Access.md).
-The Gabor and Gaussian/Laplacian FilterBands forms have explicit SDK/runtime integration; other proposed collection forms require their own integration before registration.
-FIL-01D explicitly admits NUM color-sample arithmetic as documented in [color composition](FILTER_color_composition.md), while retaining explicit FMT interpretation, straight representation and the unchecked finite-coverage premise.
+Member rules refine family rules and this category contract. FRQ-01A/B and FRQ-02A/B use the explicit ordinary floating-point F exception in [FRQ-01](FRQ-01_contract.md#shared-mathematics-units-and-profiles). RES-01 through RES-12 use the scoped [RES native F contract](RES_native_contract.md). Other members do not override the rounding/accuracy baseline in [NUM](../../01-numeric/op_specs/NUM_common_contract.md) and [NUM acceleration](../../01-numeric/op_specs/NUM_accelerated_contract.md), or straight color and storage in [FMT](../../02-format-color/op_specs/FMT_common_contract.md), [relative coordinates](../../02-format-color/op_specs/FMT_relative_coordinate_scale.md) and [tensor storage](../../../kernel-specs/Tensor-Storage-and-Region-Access.md). FIL-01D explicitly admits NUM color-sample arithmetic as documented in [color composition](FILTER_color_composition.md), while retaining explicit FMT interpretation, straight representation and the unchecked finite-coverage premise.
 
-All operation ports carry Results with fixed Tensor member schemas in member-table order; authoring helpers compose those ports explicitly. Data use generic tensors, with no new Image, Layer or complex dtype. Arithmetic inputs are Float32/Float64; related image inputs have matching
-dtypes. Outputs retain the main input dtype unless explicitly specified otherwise.
-Kernel/calibration coefficients declared Float64 retain that precision. Integer
-images require explicit FMT conversion. Dtype never implies a 0..1 or 0..255 scale.
+Operation ports carry Results with fixed Tensor member schemas in member-table order. Data use generic tensors, with no new Image, Layer or complex dtype. Arithmetic inputs are Float32/Float64; related image inputs have matching dtypes. Outputs retain the main input dtype unless explicitly specified otherwise. Kernel/calibration coefficients declared Float64 retain that precision. Integer images require explicit FMT conversion. Dtype never implies a 0..1 or 0..255 scale.
 
-Image logical rank is 2..8. Static Int64 y_axis and x_axis are distinct nonnegative
-axes; other axes are independent batch/channel planes. Axis indices address the complete sample shape, including the batch-axis prefix. An explicit component_axis
-for vector guides, RGB or matrices cannot coincide with either spatial axis.
-Examples written [H,W,C] do not require interleaved storage. Extents are positive;
-the inherited 2^40 element limit and checked static shape/capacity arithmetic apply. Runtime indices and address-control payloads are unchecked caller premises.
-Scalars use [1]; zero-length Values cannot represent empty valid convolutions.
-Shapes depend only on descriptors and static parameters. A runtime radius field
-cannot change output shape and has an explicit admitted max_radius.
+Image logical rank is 2..8. Static Int64 y_axis and x_axis are distinct nonnegative axes; other axes are independent batch/channel planes. Axis indices address the complete sample shape, including the batch-axis prefix. An explicit component_axis for vector guides, RGB or matrices cannot coincide with either spatial axis. Examples written [H,W,C] do not require interleaved storage. Extents are positive; the inherited 2^40 element limit and checked static shape arithmetic apply. Runtime indices and address-control payloads are unchecked caller premises. Scalars use [1]; zero-length Values cannot represent empty valid convolutions. Shapes depend only on descriptors and static parameters. A runtime radius field cannot change output shape and has an explicit admitted max_radius.
 
-## Static structure and unchecked execution
+## Static structure and unchecked inputs
 
-Compilation and static preparation check schema/version, member directories, dtype, rank, positive extents, axes and shape relations, parameter presence/types/syntax, fixed read/write/scratch signatures and static capacity arithmetic. Runtime counts, offsets, indices, masks, IDs, associations, padding/encoding, PSF/model constraints and numerical/geometric domains are unchecked caller premises. Static numerical parameters retain their finite/range/order/positivity premises; only constraints that determine static structure are checked.
+Static checks cover schema/version, member directories, dtype, rank, positive extents, axes and shape relations, parameter presence/types/syntax and static capacity arithmetic. Runtime counts, offsets, indices, masks, IDs, associations, padding/encoding, PSF/model constraints and numerical/geometric domains are unchecked caller premises. Static numerical parameters retain their finite/range/order/positivity premises; only constraints that determine static structure are checked.
 
-Producers construct each declared output without a validation pass; consumers use valid payloads without rescanning or comparing them. No result, diagnostic or recovery is promised outside those premises. Algorithmic predicates, candidate/branch selection, correct-rounding refinement, explicit clipping and quality measurements remain required computations. Resource exhaustion, cancellation, backend failures and explicitly defined no-solution outcomes on valid inputs remain operational. Independent oracles may diagnose malformed reference inputs without imposing production validation. Implementations consume the [physical execution contract](../../../kernel-architecture/Compiler-and-Execution.md). FIL implementations retain fixed invocation ABI 8; FRQ-01..06 use explicit typed CPU invocation 9 for Run arithmetic/limb and refinement-stage admission. Module ABI 8, native service ABI 2 and Plan format remain unchanged.
+No result, diagnostic or recovery is promised outside those premises. Algorithmic predicates, candidate/branch selection, correct-rounding refinement, explicit clipping and quality measurements remain required computations. Explicitly defined no-solution outcomes on valid inputs are results, not failures.
 
 ## Parameters and numerical semantics
 
-Every static parameter is explicitly supplied. Configurable boundary, Gaussian
-sigma_x/y and radius_x/y, custom kernel/footprint anchors (including odd shapes),
-and selectable empty-support policy have no constructor defaults. A fixed boundary
-or anchor defined by a named mathematical profile remains fixed. Members whose
-support is necessarily nonempty have no redundant empty policy. Unknown, missing
-or mistyped parameters fail before sample reads. Integer sizes/radii/levels/steps
-are Int64; real static parameters are finite Float64 stored values unless the
-member explicitly specifies a different parameter domain.
+Every static parameter is explicitly supplied. Configurable boundary, Gaussian sigma_x/y and radius_x/y, custom kernel/footprint anchors (including odd shapes), and selectable empty-support policy have no constructor defaults. A fixed boundary or anchor defined by a named mathematical profile remains fixed. Members whose support is necessarily nonempty have no redundant empty policy. Unknown, missing or mistyped parameters are rejected. Integer sizes/radii/levels/steps are Int64; real static parameters are finite Float64 stored values unless the member explicitly specifies a different parameter domain.
 
-[Numeric reference](FILTER_numeric_reference.md) defines exact expressions, baked
-constants, staged state and the F native arithmetic exceptions. Outside that exception,
-NaN/Inf, payload, signed zero, floating overflow and
-underflow follow corresponding NUM operations. There is no category-wide finite
-sample requirement and no category-wide floating-overflow failure. Parameter, mask, PSF, geometry and model domains are member-defined caller premises. Nonfinite arithmetic follows the member's F or NUM behavior and does not suppress required upstream failures.
+[Numeric reference](FILTER_numeric_reference.md) defines exact expressions, baked constants, staged state and the F native arithmetic exceptions. Outside that exception, NaN/Inf, payload, signed zero, floating overflow and underflow follow corresponding NUM operations. There is no category-wide finite sample requirement and no category-wide floating-overflow failure. Parameter, mask, PSF, geometry and model domains are member-defined caller premises. Nonfinite arithmetic follows the member's F or NUM behavior.
 
-Physical units are mathematical units: spatial lengths, guide distances, noise
-standard deviations, squared-unit variances/epsilon and model-specific solver
-parameters. There is no universal intensity knob, implicit normalization, inferred
-image range or unit-conversion helper. Lab uses FMT l=L*/100. Scaling relationships
-do not imply bit identity through floating conversion and staged rounding.
+Physical units are mathematical units: spatial lengths, guide distances, noise standard deviations, squared-unit variances/epsilon and model-specific solver parameters. There is no universal intensity knob, implicit normalization, inferred image range or unit-conversion helper. Lab uses FMT l=L*/100. Scaling relationships do not imply bit identity through floating conversion and staged rounding.
 
 Raw field operators consume explicit values, axes and parameters. Color/alpha/units/sampling interpretation is caller-owned configuration; Results carry no attached descriptions or sample-validity proofs. Output schemas establish structural axes and member layouts, and the caller supplies the next consumer's interpretation. Semantic color entry points obey [color composition](FILTER_color_composition.md).
 
-## Fixed support and publication
+## Support
 
-Data and Control denote mathematical sample support; Descriptor denotes static schema requirements. There is no separate Validation read set. Empty Q introduces no payload tasks. Lowering emits finite, fixed member-tile reads for kernel/guide/radius/mask computation and uses a static superset for data-dependent addresses. Boundary extension uses the full logical domain. Support closes on source tile grids; runtime selection cannot request additional producers. Complete-input algorithms declare their complete input dependency group and shared intermediate tasks. Changed descriptors/statics require compilation; the executor has no dirty-propagation or content-cache path. A local halo does not establish locality of connectivity, transforms or iterative solvers.
+Data and Control denote mathematical sample support; Descriptor denotes static schema requirements. Boundary extension uses the full logical domain. For data-dependent addresses (runtime kernel, guide, radius or mask), the result depends on the complete statically bounded control table and on a static superset of the addressed samples. Complete-input algorithms depend on their complete input. A local halo does not establish locality of connectivity, transforms or iterative solvers. Region and tile results equal the corresponding region of the complete-input result. Missing coverage is not zero.
 
-Requests normalize to complete retained tiles on each Result's own grid. Every materialized tile has an independent allocation, one producer and fully initialized declared writes, including specified padding. Shared computation uses explicit tasks and private SSA values; persistent iteration state crosses CFG edges explicitly. A successful task enables dependents, and a call publishes selected Result exports only after its required tasks succeed and the call retires in IR order. A failed task prevents successful publication of that call; already retired calls remain valid. Missing coverage is not zero. Result/read-window owners can outlive ExecutionContext until final release. Output selection eliminates unrelated computation without promising failure isolation within one call. Collection representation and selected-band dependencies follow [collections](FILTER_collections_contract.md).
+Output selection computes only the requested outputs of a call and their mathematical ancestors. Collection representation and selected-band dependencies follow [collections](FILTER_collections_contract.md).
 
-## Resources, cancellation and capabilities
+## Numerical profiles
 
-Mathematically valid sizes, radii, levels and iteration counts are governed by
-inherited representability limits, necessary profile constraints and execution
-budgets. Do not impose arbitrary fixed capability caps. An oracle's tiny-image
-work cap is not a runtime input limit. For E/B/S members, CPU strict reference is the baseline;
-Apple Silicon and x86_64 acceleration require named capabilities, actual ISA checks,
-final-value NUM error bounds and strict fallback. GPU support is not implicit.
+Fixed-step E/B/S strict profiles are reproducible state trajectories. Their accelerated profiles retain exact discrete decisions and NUM final-value bounds. Native RES fixed-step profiles retain their specified recurrence and dtype-aware numerical acceptance. Operator-defined stopping and explicit state follow the [iteration contract](FILTER_iterative_contract.md).
 
-Charge outputs, kernels, scratch, iterative states, arbitrary-precision limbs,
-retained ancestors, collection owners and comparison-resource snapshots to root
-capacity/work/stage budgets. Mathematical operation counts exclude neither limb
-cost nor refinement work from actual accounting. FIL and FRQ CPU callbacks poll cancellation
-every 1024 scalar work units or sooner, including refinement and long solves.
-FRQ-01/02 may prepay deterministic transform lines, root construction, input/output blocks and column gather/scatter blocks as defined in [FRQ-01](FRQ-01_contract.md#runtime-integration-and-remaining-acceptance); independent cancellation checks inside each block retain this interval.
-RES CPU execution follows the [algorithmic-block rules below](#res-work-admission-and-cancellation).
-A GPU profile must declare a finite work bound per nonpreemptive native submission,
-check cancellation before submission and after completion, and drain submitted
-work before releasing any referenced owner. It must report measured cancellation
-latency separately from its work bound. Cancellation prevents further submissions
-and successful result publication; it does not imply device preemption. Resource failure
-does not lower precision, change algorithms or spill to disk. Early-stop state
-retention and cooperative termination follow [iteration](FILTER_iterative_contract.md).
+The F-profile transforms and RES01-12 have their scoped native arithmetic exceptions; E/B/S members retain their own whole-expression rounding obligation. A composition of ordinary FFT outputs does not establish an E-strict result. Mathematically valid sizes, radii, levels and iteration counts are limited only by representability and necessary profile constraints; resource exhaustion neither lowers precision nor changes the algorithm.
 
-Fixed-step E/B/S strict profiles preserve reproducible state trajectories. Their accelerated profiles retain exact discrete decisions and NUM final-value bounds. Native RES fixed-step profiles retain their specified recurrence and dtype-aware numerical acceptance. Independent
-asynchronous early-stop invocations may select different returned rounds; the frozen executor retains no cross-Run result cache. Operator-defined stopping and explicit state follow the iteration contract.
+## Errors
 
-### RES work admission and cancellation
+| Condition | Status |
+| --- | --- |
+| Missing/mistyped parameter, invalid syntax/enum or structural anchor/shape constraint | InvalidArgument / InvalidDomain |
+| Unsupported dtype/rank/shape/semantic structure | TypeMismatch / None |
+| Violated dynamic control, model, association or numerical/geometric premise | Outside the contract; no validation, repair or diagnostic guarantee |
+| Floating invalid arithmetic, division by zero, overflow | Successful F-profile or NUM NaN/Inf result according to the member |
+| Static shape/capacity arithmetic overflow | Explicit failure |
 
-RES-01..14 separate work admission from cancellation polling. Deterministic computation may admit a conservative finite work bound before executing a block, stage or invocation; data-dependent selection, refinement and iteration retain incremental admission or a conservative bound covering all executed work. Node and Run limits, stage charges and terminal failure propagation keep their existing scopes. Work units measure the declared algorithmic cost independently of the number of cancellation callbacks.
-
-RES CPU callbacks check cancellation at admission and at bounded algorithmic checkpoints during computation. Each implementation documents its block sizes in samples, taps, candidates or transform/codelet dimensions, including SIMD width and bounded scalar tails. Fixed-size scalar or SIMD codelets may finish between checks; generic loops over image sizes, radii, candidate counts or iterations must contain recurring checks with a documented finite block bound. These algorithmic block bounds replace the category-wide 1024-scalar-unit polling interval for RES. Block sizing balances throughput and cancellation responsiveness; measured cancellation latency is recorded separately from the work bound.
-
-For RES-01B, the deterministic selected pointwise region may be prepaid at six scalar work units per sample, with cancellation checks before spans of at most 128 samples and at completion. RES-01A keeps incremental accounting and checkpoints within data-dependent selection. RES-02 prepays its declared invocation bound and polls independently within gather, patch, weight and output blocks as specified by its [family contract](RES-02_contract.md#resources-and-runtime). A RES helper that calls an existing FIL/FRQ operation preserves that operation's own accounting and checkpoint contract. All RES execution retains the existing cancellation status, suppression of successful publication for a cancelled call, and drain-before-release ownership rules.
-
-### Shared executor ownership
-
-Implemented and proposed members inherit [Context shutdown and coordinator
-ownership](../../../kernel-architecture/Compiler-and-Execution.md#context-shutdown-and-coordinator-ownership)
-and [managed allocation](../../../kernel-architecture/Managed-Resources.md).
-External Context destruction waits for accepted execution and delivery to settle
-and for coordinator-owned execution references to be released. Provider cleanup
-on a coordinator can release the final Context owner; that shutdown stops the
-coordinators and lets their ownership unwind without self or cross-Context joins.
-Caller-retained Runs, PreparedPlans, Results, read windows and observations remain
-valid and charged according to their owners. Observer callbacks retain their
-existing restrictions.
-
-Every accepted internal task must finish or be stopped and drained before
-invocation completion, including failure, cancellation and partial startup
-failure. A process-local scheduling pool may outlive a Context while retaining
-no invocation views, scratch, cancellation state or Run services after return.
-The resource model's exclusions remain in force; managed capacity is not RSS.
-
-Host mapping and first-touch policy, effective CPU lane counts and omitted
-intermediate exports without an observer are shared executor behavior. They do
-not change the member's mathematics, complete-write obligation or scratch size
-for one invocation. The F-profile transforms and RES01–12 have their scoped native arithmetic exceptions; E/B/S members retain their own whole-expression rounding obligation. A composition of ordinary FFT outputs does not establish
-an E-strict result.
-
-## Errors and acceptance
-
-| Condition | Phase | Status obligation |
-| --- | --- | --- |
-| Missing/mistyped parameter, invalid syntax/enum or structural anchor/shape constraint | Compile/preparation | InvalidArgument / InvalidDomain |
-| Unsupported dtype/rank/shape/semantic structure | Compile/preflight | TypeMismatch / None |
-| Violated dynamic control, model, association or numerical/geometric premise | Outside the contract | No validation, repair or diagnostic guarantee |
-| Floating invalid arithmetic, division by zero, overflow | Evaluation | Successful F-profile or NUM NaN/Inf result according to the member |
-| Static shape/capacity arithmetic overflow | Compile/preparation/admission | Explicit failure |
-| Unavailable backend | Capability | BackendUnavailable / None |
-| Resource, cancellation, upstream failure | Original phase | Preserve original failure |
-
-Operational diagnostics use existing Status/FailureReason fields; strings do not add enumerators. Ordinary kernel completion failure is attributed to its task/call. Host Run-budget rejection uses `Resource`/`Run` attribution with the known node/task, aborts scheduling and drains accepted work. Neither path invents per-sample diagnostics or a report-submission ABI. No success is published for a failed call. Numerical and association premise violations impose no diagnostic requirement. Production acceptance uses valid payloads; malformed oracle fixtures exercise only reference-tool diagnostics.
-[Acceptance](FILTER_oracle_protocol.md) separates mathematical evidence, third-party
-comparisons, runtime behavior and image-quality scores. Conceptual DAGs are not
-executable public APIs.
+[Acceptance](FILTER_oracle_protocol.md) separates mathematical evidence, third-party comparisons and image-quality scores. Conceptual DAGs are not executable public APIs.

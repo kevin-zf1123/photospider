@@ -18,7 +18,7 @@ The suffixed family accepts dynamic scalar start/end and separately named coeffi
 
 Its separate grammar adds pi/e, tan and named identifiers, and uses `ln` rather than the unsuffixed key's `log`. Strict evaluates each primitive with RN64 before its parent. Accelerated four-lane batches enclose the complete strict reference and replay uncertain samples, preserving the final FP32-scaled error bound. Numeric domains and selected-coordinate precision are unchecked caller preconditions. Selected outputs share one IR call's publication outcome.
 
-The helper is [`sample_expression_node`](../../plugins/ops/include/photospider/ops/numeric/expression.hpp). It authors one WorkflowNode and canonicalizes the exact name/connection map. See [NUM-01](../built-in_ops/01-numeric/op_specs/NUM-01_sample_expression.md) and [fixed expression execution](../built-in_ops/01-numeric/expression-execution.md) for the complete sampling, numerical and resource contract.
+The helper is [`sample_expression_node`](../../plugins/ops/include/photospider/ops/numeric/expression.hpp). It authors one WorkflowNode and canonicalizes the exact name/connection map. See [NUM-01](../built-in_ops/01-numeric/op_specs/NUM-01_sample_expression.md) for the complete sampling, numerical and resource contract.
 
 ## Linear LUT application
 

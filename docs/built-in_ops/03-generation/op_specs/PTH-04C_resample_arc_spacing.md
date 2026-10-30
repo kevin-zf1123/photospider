@@ -14,60 +14,30 @@ operation_keys:
 
 # PTH-04C: resample arc spacing
 
-Inherit [PTH-04](PTH-04_resampling_contract.md), [GEN common](GEN_common_contract.md),
-and the applicable [random](NOI_random_contract.md) and
-[geometry](PTH_geometry_contract.md) contracts. A key includes algorithm version and profile; within one version/profile,
-output bits and discrete decisions are fixed.
+Inherits [PTH-04](PTH-04_resampling_contract.md) and [GEN common](GEN_common_contract.md).
 
-## Interface and representation
+## Interface
+
+Operation keys: `path.resample_arc_spacing_v1_strict`.
 
 PathSet,positive spacing[1] in px; PathSamplesArc Result.
 
 The associated Result uses `photospider.ops.path_samples_arc` v1 from the [shared geometry schema](PTH_geometry_contract.md). Payload validity is unchecked.
 
-## Parameters and domain
+### Parameters and domain
 
 include_open_end default true, hard max_count; closed seam not repeated.
 
-## Mathematical specialization
+`max_count` defaults to 4096 and is a hard capacity; `max_refinements` defaults to 4096. The spacing and `include_open_end` determine the mathematical targets; neither a table tolerance nor a rounded total length decides the count.
 
-Per subpath emit0,delta,2delta,... strictly below true L; optionally append open L once.
-L0 emits one valid point. Determine count from certified true length, not its
-already-rounded published approximation. Invert as PTH-04B.
+## Mathematics
 
-## Runtime implementation
+Per subpath emit0,delta,2delta,... strictly below true L; optionally append open L once. L0 emits one valid point. Determine the count from the true length, not its rounded published approximation. Each absolute target is the exact rational `j*spacing` through the count comparison, the inversion and the `arc_s` rounding; exact length relations from PTH-04B decide integer-count and endpoint ties. An appended open endpoint uses the true total length, independently of the next spacing multiple. Invert as PTH-04B.
 
-`path_arc_sampling.cpp` implements the strict key using certified true-length comparisons for sample count and inversion. `max_count` defaults to 4096 and remains a hard capacity. Its integration/refinement limits match PTH-04B. The spacing input and `include_open_end` affect the mathematical target; neither table tolerance nor rounded total length determines the count.
+## Behavior
 
-Retain each absolute target as the exact rational `j*spacing` through count comparison, inversion and `arc_s` rounding. Exact analytic length relations from PTH-04B resolve integer-count and endpoint ties. An appended open endpoint uses the true total length, independently of the next spacing multiple.
+Support class: complete input. A constructed result larger than `max_count` is a capacity failure.
 
-## Dependencies, resources and failures
+## Acceptance
 
-Execution support: **complete input**. Lower the complete mathematical input
-support and required output member tiles into explicit tasks. Share global work
-through private intermediate Results and fixed dependencies. Required members
-publish on successful call retirement. Empty output selection performs static
-preparation without payload tasks; there is no runtime dependency discovery or
-dirty propagation.
-
-complete-input; allocate from the statically inferred max_count capacity, determine effective count by refining true-length comparisons, and report an operational capacity failure if the constructed result exceeds that capacity.
-
-All output, scratch, indices, algorithmic work and retained owners are accounted. Poll
-cancellation in bounded loops. Preserve static structural failures and actual
-resource, cancellation, backend and upstream statuses. Member-specific no-solution,
-refinement or quality failures apply to valid inputs and the explicitly declared
-algorithm; numerical-premise violations have no prescribed runtime diagnostic.
-Never replace budget/cancellation failure with a lower-quality successful prefix. Views,
-lifetime and actual returned coverage inherit GEN-common.
-
-## Independent fixtures and acceptance
-
-L100/delta30 emits0,30,60,90,100 when open; closed excludes100; exact multiples and
-near-boundary lengths.
-
-Check selected-tile/full-output equivalence, source-grid read closure, legal
-strides/offsets, separate/joint outputs, version/profile identity, low budgets, cancellation,
-associations and retained owners as applicable. The [oracle
-coverage](../oracle-coverage.md) describes the available finite reference subset; it is
-not runtime completion. The registered CPU implementation uses the bounded algorithms and failure rules specified here. No unverified GPU or third-party bit
-identity is implied by these requirements.
+L100/delta30 emits0,30,60,90,100 when open; closed excludes100; exact multiples and near-boundary lengths.

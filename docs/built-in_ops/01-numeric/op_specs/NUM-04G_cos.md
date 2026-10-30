@@ -16,71 +16,25 @@ implementation_status: implemented
 
 # NUM-04G: cos
 
-Numeric profile: strict retains the exact reference defined below. Floating
-arithmetic in accelerated profiles follows the shared
-[final FP32 four-ULP contract](NUM_accelerated_contract.md), including its
-range/fallback rules. Discrete results, copies, selected endpoints and special
-values remain exact.
+Numeric profile: strict is the exact reference defined below. Floating arithmetic in accelerated profiles follows the shared [final FP32 four-ULP contract](NUM_accelerated_contract.md). Discrete results, copies, selected endpoints and special values are exact. Inherits the [NUM baseline](NUM_common_contract.md), the [trigonometric contract](NUM-04_trigonometric_contract.md) and the [unary contract](NUM-04_unary_contract.md); explicit rules below take precedence.
 
-Inherit the [NUM baseline](NUM_common_contract.md) for specification status,
-registration, shared execution and acceptance requirements; explicit rules below
-and in the named family contract take precedence.
+Computes cos(x), interpreting x as an exact floating-point value in radians. Input/output dtype is Float32 or Float64 and shape is unchanged. The output is `values`, with no attached domain description; there are no static parameters. Keys: `numeric.cos_strict`, `numeric.cos_accelerated_apple_silicon`, `numeric.cos_accelerated_x86_64`.
 
-Compute cos(x), interpreting x as an exact floating-point value in radians. Inherit all interface, rounding, error,
-resource, demand, backend and acceptance requirements from the
-[trigonometric contract](NUM-04_trigonometric_contract.md) and
-[unary contract](NUM-04_unary_contract.md).
-
-Input/output dtype is Float32 or Float64 and shape is unchanged. The named
-output is values, with no attached domain description; there are no static numeric parameters.
-
-## Function-specific values
+## Mathematics
 
 | Input | Output |
 | --- | --- |
 | +0 / -0 | Exactly 1 |
-| ±Inf | Fixed positive quiet NaN |
+| +-Inf | Fixed positive quiet NaN |
 | NaN | Quiet input NaN, preserving payload/sign |
 
-Other finite inputs use the shared correctly rounded strict or <=4-ULP
-accelerated contract, with the shared special-value requirements.
-Cosine is even numerically; input NaN sign preservation remains the common
-payload rule rather than an arithmetic evenness claim. Output must stay in
-[-1,1] as well as meeting its ULP bound. An unproved algorithm followed by
-clamping is not a substitute for the error contract.
+Other finite inputs use the shared correctly rounded strict or <=4-ULP accelerated contract.
+Cosine is numerically even; input NaN sign preservation follows the common payload rule rather than an arithmetic evenness claim. Output stays in [-1,1] as well as meeting its ULP bound.
 
-## Acceptance and current status
+## Acceptance
 
-The conceptual public fixture is `[+0,-0]` -> `[1,1]`.
-Build a WorkflowDocument with that floating array bound to input,
-compile one selected key and inspect output bits
-through ExecutionContext. Repeat in both dtypes and platform profiles, including
-disjoint requests and exact declared input tiles.
+Fixture: `[+0,-0]` gives `[1,1]`.
 
-For a nontrivial finite fixture, input=[1] represents exactly one radian.
-Strict cos(1) has Float32 bits `0x3f0a5140` and Float64 bits
-`0x3fe14a280fb5068c`. Accelerated results obey the shared four-ULP bound;
-this fixture does not turn 1 radian into a special-angle identity requirement.
-Independent alternating-series rational enclosures for sin(1)/cos(1), with
-positive-denominator interval division for tan(1), and direct destination
-rounding establish these reference bits without using the production libm.
+Nontrivial finite fixture: input `[1]` is exactly one radian. Strict cos(1) has Float32 bits `0x3f0a5140` and Float64 bits `0x3fe14a280fb5068c`. Accelerated results obey the shared four-ULP bound; 1 radian carries no special-angle identity. The reference bits come from independent rational enclosures of the series, with direct destination rounding.
 
-Also test ordinary small/large finite radian inputs, signed zero, NaN payloads,
-infinity, neighbors of rounded pi multiples, independent correct
-rounding and accelerated ULP/classification. Apply all shared resources, concurrent Runs,
-lifetime and cancellation cases. A real public executable, run commands and
-the maintained public run command is documented below; local timing is recorded in the implementation notes.
-
-## Maintained implementation and validation
-
-This operation is registered in `plugins/ops/01-numeric/numeric_unary.cpp` and
-exposed through `photospider/ops/numeric/unary.hpp`. It uses one fixed CPU invocation per selected output tile, validated input views and preallocated output/scratch. Its numerical path follows
-[the shared implementation notes](../math-implementation.md).
-
-Float32 accelerated cos uses an explicit-FMA NEON/AVX2 even polynomial for `|x| <= 1`.
-
-The maintained analytic certificate includes coefficient, arithmetic and final
-reference rounding errors under the existing four-step contract. Float64
-arguments retain their existing implementation. Nonfinite values and inputs
-outside the polynomial admission use the existing semantic/fallback layer. See
-[the proof, validation and performance report](../trig-performance.md).
+Also test small/large finite radian inputs, signed zero, NaN payloads, infinity, and neighbors of rounded pi multiples; strict compares bits, accelerated compares ULP distance and classification.

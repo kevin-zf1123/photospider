@@ -16,56 +16,14 @@ implementation_status: implemented
 
 # NUM-04J: ceil
 
-Numeric profile: strict retains the exact reference defined below. Floating
-arithmetic in accelerated profiles follows the shared
-[final FP32 four-ULP contract](NUM_accelerated_contract.md), including its
-range/fallback rules. Discrete results, copies, selected endpoints and special
-values remain exact.
+Numeric profile: strict is the exact reference defined below. Discrete results are exact and bitwise identical across the three keys. Inherits the [NUM baseline](NUM_common_contract.md) and the [NUM-04 unary contract](NUM-04_unary_contract.md); explicit rules below take precedence.
 
-Inherit the [NUM baseline](NUM_common_contract.md) for specification status,
-registration, shared execution and acceptance requirements; explicit rules below
-and in the named family contract take precedence.
+For a floating x, returns the least integer greater than or equal to x, stored in the original floating dtype. UInt8 and Int64 are exact identity. Shape and dtype are preserved; there are no static parameters or implicit conversion to an integer output array. Keys: `numeric.ceil_strict`, `numeric.ceil_accelerated_apple_silicon`, `numeric.ceil_accelerated_x86_64`.
 
-For a finite floating x, return the least integer greater than or equal to x,
-stored in the original floating dtype. UInt8 and Int64 are exact identity.
-Shape and dtype are preserved; there are no operation parameters or implicit
-conversion to an integer output array. Inherit the
-[NUM-04 common contract](NUM-04_unary_contract.md) for the input/values interface,
-fixed tile reads and structural preparation, output structure, resources and lifetime.
+## Mathematics
 
-## Exact semantics
+Negative finite inputs above -1 yield -0; positive fractional values yield the next higher integer. Both input signed zeros keep their sign, and any finite zero result uses the input sign. Infinities return unchanged; input NaNs are quieted with payload and sign preserved. Integer extrema are copied exactly and never pass through Float64. Finite floating numbers whose representation is already integral return unchanged. The result does not depend on the caller's rounding mode. No arithmetic overflow or ULP tolerance applies.
 
-Both input signed zeros keep their sign. Any finite zero result uses the input
-sign. Negative finite inputs above -1 yield -0; positive fractional values yield the next higher integer.
-Infinities return unchanged; input NaNs are quieted with payload/sign preserved.
-All generic numeric inputs have a successful numeric result. Integer extrema
-are copied exactly and are never passed through Float64.
+## Acceptance
 
-All three versions must have identical bits. Implement directed integral
-rounding through a verified primitive or exponent/fraction-bit logic; the result
-does not depend on the caller's current rounding mode. Large finite floating
-numbers whose representation is already integral return unchanged. Special
-inputs are classified by bits first; no NaN payload conversion is allowed.
-No arithmetic overflow or ULP tolerance is needed for this operation.
-
-## Resources and acceptance
-
-Work is O(M), element scratch O(1) and output payload M*b, plus common mapping
-and structural preparation costs. SIMD must preserve zero signs and NaN quieting within each selected output tile. Fixed invocation cancellation and final-owner rules apply.
-
-Analytic public fixture: [-1.5,-0.25,-0,+0,1.5] -> [-1,-0,-0,+0,2].
-Verify output dtype is unchanged. Cover all UInt8 values, Int64 values above
-2^53 and extrema, floating neighbors of integers, subnormals, signed zeros,
-infinities and NaN payloads. Compare to an independent rational integral oracle
-and explicit bit handling; check all three keys bitwise and apply shared public
-ROI/fixed-read/lifetime/resource validation.
-
-The maintained implementation is in the numeric operator registry. Its public
-WorkflowDocument -> Compiler -> ExecutionContext run command is documented below.
-This specification alone does not claim a product test run.
-
-## Maintained implementation and validation
-
-This operation is registered in `plugins/ops/01-numeric/numeric_unary.cpp` and
-exposed through `photospider/ops/numeric/unary.hpp`. It uses one fixed CPU invocation per selected output tile, validated input views and preallocated output/scratch. Its numerical path follows
-[the shared implementation notes](../math-implementation.md).
+Fixture: `[-1.5,-0.25,-0,+0,1.5]` gives `[-1,-0,-0,+0,2]`. The output dtype is unchanged. Cases: all UInt8 values, Int64 values above 2^53 and extrema, floating neighbors of integers, subnormals, signed zeros, infinities and NaN payloads, compared against an independent rational integral reference with explicit bit handling.

@@ -58,6 +58,4 @@ Some reference pairs describe mathematical domain/overflow boundaries. Fixed NUM
 invocations treat those invalid numerical samples as outside caller premises;
 a temporary implementation adapter must select valid cases explicitly. Static
 description, old-codec, old report-version and resource admission are separate
-rejection checks. No oracle alone establishes runtime acceptance. Executed
-migration evidence is in
-[NUM-CRV_color_migration.md](../../../docs/built-in_ops/01-numeric/NUM-CRV_color_migration.md).
+rejection checks. No oracle alone establishes runtime acceptance.

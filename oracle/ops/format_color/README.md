@@ -52,9 +52,7 @@ success, 1 means InvalidDomain, and 2 means ArithmeticOverflow. For a mask only
 the first expected word is an output component.
 
 Both optimized and exact-reference arithmetic matched all 670 rows in the
-focused implementation validation. Public workflow and performance evidence is
-recorded separately in
-[FMT-14/15 implementation](../../../docs/built-in_ops/02-format-color/FMT-14-15_implementation.md).
+focused implementation validation.
 Regenerate expectations for future implementation work, write a temporary
 public workflow checker, then remove generated data and temporary runtime
 programs after the checks complete.
@@ -159,9 +157,7 @@ The final independent comparison matched **2232 rows across 204 public
 workflows**, with color and bypass bits checked separately. Workflow
 cancellation, sparse tiles, resource-budget failures, cleanup/concurrency,
 channel topology, inspection and configured-view validation are separate
-temporary runtime checks. Their measured results and performance scope are
-recorded in
-[FMT-12/13/18 implementation](../../../docs/built-in_ops/02-format-color/FMT-12-13-18_implementation.md).
+temporary runtime checks.
 
 After validation, remove the temporary reference build, generated fixtures
 and any runtime checking/benchmark programs. Retain only these independent

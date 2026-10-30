@@ -9,11 +9,7 @@ implementation_status: implemented
 
 # PTH-04: Resampling and flattening
 
-Samples carry Float64 positions, source segment and independently rounded local t; arc
-variants additionally carry arc_s. No arc_s is invented for parameter-only sampling.
-Formal variants must bind fields to source snapshots. Empty paths are empty Results,
-M-only paths are valid points. Flattening is a deterministic approximation, not
-original-curve exactness.
+Samples carry Float64 positions, source segment and independently rounded local t; arc variants additionally carry arc_s. No arc_s is invented for parameter-only sampling. Formal variants must bind fields to source snapshots. Empty paths are empty Results, M-only paths are valid points. Flattening is a deterministic approximation, not original-curve exactness.
 
 ## Members
 
@@ -24,18 +20,6 @@ original-curve exactness.
 | [PTH-04C](PTH-04C_resample_arc_spacing.md) | resample arc spacing |
 | [PTH-04D](PTH-04D_flatten_bezier_path.md) | flatten bezier path |
 
-## Shared execution and numerical rules
+## Shared rules
 
-Inherit [GEN common](GEN_common_contract.md), and applicable
-[random](NOI_random_contract.md) and [path geometry](PTH_geometry_contract.md) rules.
-Members declare Regional, Halo or complete-input from actual mathematical dependencies,
-independently of static structure checks. GPU capability is member/backend-specific.
-Same version/profile means bit-identical output; numerical error, geometry error and
-topology guarantees are separate. Source associations are unchecked caller premises; producers preserve declared ownership and lifetime by construction.
-
-## Acceptance and implementation boundary
-
-Use member-specific independent fixtures plus actual public workflow execution. The
-[oracle coverage](../oracle-coverage.md) identifies finite exact helpers, Measured
-diagnostics and remaining unsupported cases. It cannot establish public schema support,
-GPU admission or complete domain certification. The CPU members and public authoring helpers are implemented. Finite arithmetic, refinement and capacity limits remain operational bounds; member-specific conservative topology proofs may reject unproven results. No GPU execution is registered for these members.
+Members inherit [GEN common](GEN_common_contract.md) and [PTH geometry](PTH_geometry_contract.md).

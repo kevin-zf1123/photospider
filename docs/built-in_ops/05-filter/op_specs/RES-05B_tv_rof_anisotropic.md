@@ -17,15 +17,19 @@ oracle_scope: mathematical_reference
 
 Inherit the [RES-05 family contract](RES-05_contract.md), [FILTER common contract](FILTER_common_contract.md), [RES native floating-point contract](RES_native_contract.md), and [FMT](../../02-format-color/op_specs/FMT_common_contract.md). This is a raw numerical-field operation: it processes each plane independently and does not infer RGB, vector or alpha semantics from channel count or attached color metadata.
 
-## Ports and shape
+## Interface
 
-`input` and `output` are Results with matching fixed Tensor schemas and one independent solve per plane. The operation does not implement vector/color TV. Each materialized output tile has a distinct allocation. Color interpretation, if needed by a surrounding workflow, is explicit configuration rather than attached Result metadata.
+Operation key: `restoration.tv_rof_anisotropic`.
 
-## Required parameters and domain
+### Ports
+
+`input` and `output` are Results with matching fixed Tensor schemas and one independent solve per plane. The operation does not implement vector/color TV. Color interpretation, if needed by a surrounding workflow, is explicit configuration rather than attached Result metadata.
+
+### Parameters
 
 `lambda>=0`, `max_iterations>=0`, `tau>0`, `sigma>0`, `theta∈[0,1]`, `dx>0`, `dy>0`, and explicit `y_axis` and `x_axis` are required. Also require `tau*sigma*4*(1/dx^2+1/dy^2)<1`. There are no constructor defaults. `lambda` is in the units of the stated ROF objective; `dx,dy` are sample spacings. Real values mean their stored Float64 values, not exact decimal rationals. Fixed mathematical choices are the no-flux boundary and this member’s named `phi`; configurable parameters may not be omitted.
 
-## Mathematical and rounding contract
+## Mathematics
 
 For each plane minimize `0.5*Σ(u-f)^2 + lambda*Σ phi(K_y u,K_x u)`, with `phi(a,b)=abs(a)+abs(b)`. Initialize `u=f`, `ubar=f`, and `p=(0,0)`. At each complete synchronous Jacobi step:
 
@@ -36,16 +40,6 @@ For each plane minimize `0.5*Σ(u-f)^2 + lambda*Σ phi(K_y u,K_x u)`, with `phi(
 
 `K` is the finite-domain forward difference with invalid boundary differences zero; `K^T` is its exact matrix transpose. The member’s boundary and stored-state stages are part of the algorithm. A fixed number of steps does not claim an exact minimizer. Do not clip output to the input range. For `lambda=0` or `max_iterations=0`, return an input bit-copy. No implicit early exit is allowed.
 
-## Demand and resource behavior
-
-Each selected output plane has a complete-input mathematical dependency for the fixed-step profile. Lowering declares fixed whole-plane input reads and explicit shared state tasks; a theoretical finite-step halo does not authorize a different partial-state algorithm. Persistent state uses private SSA values and, when split into workflow iterations, explicit CFG arguments. Energy and residual diagnostics are not public result ports. Output schemas depend only on static parameters and input schemas. Numerical controls and model domains are unchecked caller premises, while shape/axis and parameter-type constraints are checked before execution.
-
-Work is `O(max_iterations*P*C)`, with dual planes and two generations each of `u`/`ubar`; P is plane pixel count and C plane count. Account for all stages and working buffers. Insufficient budget fails; do not shorten the iteration count, spill implicitly, lower precision, or publish a partial value. Cancellation, ownership and error publication follow FILTER shared contracts.
-
-## Acceptance and oracle
+## Acceptance
 
 Check the zero-lambda and zero-step bit-copy branches, constant preservation, a hand-computed 2×2 one-step result, and the bilinear identity `<Ku,p>=<u,K^T p>` within native-precision roundoff. The finite-grid adjoint must be the exact algebraic transpose, including boundary contributions; separately rounded inner products need not be bitwise equal. Account for accumulation length and absolute term magnitudes when checking cancellation-prone dot products. Isotropic TV does not claim rotational invariance under grid rotation. Do not require the objective to decrease monotonically at every Chambolle–Pock step.
-
-The oracle function is `res05.restoration.tv_cp(image, *, lam, iterations=100, tau=0.24, sigma=0.24, theta=1, dx=1, dy=1, isotropic=True, dtype="float64")` in [res05/restoration.py](../../../../oracle/ops/filter/res05/restoration.py). For this anisotropic member, pass `isotropic=False`. Its `iterations` argument corresponds to the proposed public `max_iterations` parameter. The `tv_one_step_False` fixture covers the reference formula using `ExactRationalStaged`; it does not establish runtime support or the full parameter, metadata, ROI, budget or cancellation contract. See the [oracle README](../../../../oracle/ops/filter/README.md).
-
-The proposed native keys are not registered or implemented. Native fp32/fp64 acceptance follows [RES native floating-point contract](RES_native_contract.md). No implementation or performance evidence is asserted.

@@ -1,6 +1,6 @@
 # 抠像、绘制与修补
 
-除下述已实现条目外，状态为 Proposed。阈值key、clone与简单despill为D1；matting、heal、patch搜索为D2；生成式处理见模型规划。输入图像、hole/edit mask、允许采样区域、参考层和原始快照分别提供。默认Float32、线性或算法声明的颜色域；alpha/coverage/confidence/labels不可混用。
+状态 Proposed。阈值key、clone与简单despill为D1；matting、heal、patch搜索为D2；生成式处理见模型规划。输入图像、hole/edit mask、允许采样区域、参考层和原始快照分别提供。默认Float32、线性或算法声明的颜色域；alpha/coverage/confidence/labels不可混用。
 
 ## 算子目录
 
@@ -27,7 +27,7 @@
 | PNT-10 smudge / paint feedback | previous stroke state+brush samples→new state/image | 搬运颜色、混色、湿度等有状态过程；D2 | 状态顺序、分段重放、颜色守恒政策；不伪装纯无状态滤镜 |
 | PNT-11 brightness to alpha | opaque artwork→line RGB+alpha | 提取指定亮度、反转或曲线→coverage，再按声明颜色重建 | 白底黑线端点，彩线的颜色保留策略 |
 
-本表固定结果可采用已实现命名多输出；动态字段和状态可用 Result schema。CPU参考先行；key/简单despill适合GPU，稀疏求解、补丁搜索和顺序paint需要独立并行与确定性方案。算法半径不一定等于依赖halo，迭代与连通求解按W或明确协调。
+固定结果使用命名多输出，动态字段和状态使用 Result schema。稀疏求解、补丁搜索和顺序 paint 需要明确的确定性规则。算法半径不一定等于依赖halo，迭代与连通求解按W或明确协调。
 
 ## D1 参考模式
 
@@ -49,7 +49,7 @@ Photoshop Content-Aware Fill对采样区域、颜色适应和新图层输出有�
 
 CSP的参考层填充、close-gap、灰尘清除、线宽、亮度转透明度和网点清理需纳入基本能力。[^csp] 参考图层集合与实际着色目标分别传入；小缝闭合应输出临时闭合边界/区域mask，避免永久改动线稿。网点移除要记录原网频/角度和恢复方法，局部平滑、频域notch与模型修复是不同质量等级。
 
-完整自然介质笔刷、笔刷素材系统、撤销和输入设备捕获属于宿主交互/后续状态模型。其可执行部分按明确笔迹和快照输入描述，不能承诺已有brush_circle涵盖CSP绘画引擎。
+完整自然介质笔刷、笔刷素材系统、撤销和输入设备捕获属于宿主交互/后续状态模型。其可执行部分按明确笔迹和快照输入描述，brush_circle 不涵盖 CSP 绘画引擎。
 
 ## 来源
 

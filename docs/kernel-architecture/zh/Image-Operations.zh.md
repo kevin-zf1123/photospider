@@ -28,7 +28,7 @@
 
 各族的运行调用协议见[通道与颜色算子](Channel-and-Color-Operations.zh.md)。原生数值 CPU profile 为 `strict`、`accelerated_apple_silicon` 和 `accelerated_x86_64`；加速 profile 要求匹配的主机能力。注册不代表支持全部空间布局或 GPU 后端。
 
-外部引擎构建同步且不可取消，保留内存/工作量准入与 Empty/bypass 完整验证；像素执行继续支持取消，无需改变冻结内核。详见[实现、独立验证与性能](../../built-in_ops/02-format-color/FMT-12-13-18_implementation.md)。
+外部引擎构建同步且不可取消，保留内存/工作量准入与 Empty/bypass 完整验证；像素执行继续支持取消，无需改变冻结内核。
 
 ## Alpha 与模型算子
 

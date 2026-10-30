@@ -16,56 +16,26 @@ operation_keys:
 
 # NOI-06D: footprint fbm
 
-Inherit [NOI-06](NOI-06_fractal_contract.md), [GEN common](GEN_common_contract.md), and
-the applicable [random](NOI_random_contract.md) and [geometry](PTH_geometry_contract.md)
-contracts. A key includes algorithm version
-and profile; within one version/profile, output bits and discrete decisions are fixed.
+Inherits [NOI-06](NOI-06_fractal_contract.md) and [GEN common](GEN_common_contract.md).
 
-## Interface and representation
+## Interface
 
-coordinates[S...,D], footprint[S...] finite nonnegative pre-frequency coordinate radius;
-values[S...].
+Operation keys: `noise.footprint_fbm_v1_strict`, `noise.footprint_fbm_v1_accelerated_apple_silicon`, `noise.footprint_fbm_v1_accelerated_x86_64`.
 
-## Parameters and domain
+coordinates[S...,D], footprint[S...] finite nonnegative pre-frequency coordinate radius; values[S...].
 
-NOI-06A parameters; fbm terms only; explicit upstream footprint, never inferred from ROI
-size.
+### Parameters and domain
 
-## Mathematical specialization
+NOI-06A parameters; fbm terms only; explicit upstream footprint, never inferred from ROI size.
 
-Inherit NOI-06A's exact basis coordinates, full weighted sum and one final RN, then
-multiply a_i by clamp(2-2*footprint*frequency*lacunarity^i,0,1). amplitude_sum
-denominator is the unattenuated sum gain^i, avoiding cutoff division by zero or
-amplification. Proven zero weights may skip basis evaluation.
+## Mathematics
 
-## Dependencies, resources and failures
+Inherit NOI-06A's exact basis coordinates, full weighted sum and one final RN, then multiply a_i by clamp(2-2*footprint*frequency*lacunarity^i,0,1). amplitude_sum denominator is the unattenuated sum gain^i, avoiding cutoff division by zero or amplification. Proven zero weights may skip basis evaluation.
 
-Execution support: **Regional**. Lower each selected complete output tile to
-fixed tasks with explicit query/sample and control-member tile reads. Close each
-read on its source grid; payload validity over the consumed support is a caller
-premise. Empty output selection performs static preparation without payload tasks.
-Shared computation uses explicit task dependencies and private intermediate
-Results under GEN-common.
+## Behavior
 
-Regional; assume demanded coordinates/footprint and shared controls satisfy their domains; this is an
-antialias heuristic, not strict band limitation.
+Support class: Regional. This is an antialiasing heuristic, not strict band limitation. Demanded coordinates, footprint and shared controls are assumed to satisfy their domains.
 
-All output, scratch, indices, algorithmic work and retained owners are accounted. Poll
-cancellation in bounded loops. Preserve static structural failures and actual
-resource, cancellation, backend and upstream statuses. Member-specific no-solution,
-refinement or quality failures apply to valid inputs and the explicitly declared
-algorithm; numerical-premise violations have no prescribed runtime diagnostic.
-Never replace budget/cancellation failure with a lower-quality successful prefix. Views,
-lifetime and actual returned coverage inherit GEN-common.
+## Acceptance
 
-## Independent fixtures and acceptance
-
-footprint0 matches A; footprint*frequency>=1 gives +0; continuous cutoff; spectral
-quality distinct from numeric accuracy.
-
-Check selected-tile/full-output equivalence, source-grid read closure, legal
-strides/offsets, separate/joint outputs, version/profile identity, low budgets, cancellation,
-associations and retained owners as applicable. The [oracle
-coverage](../oracle-coverage.md) describes the available finite reference subset; it is
-not runtime completion. No unverified GPU or third-party bit
-identity is implied by these requirements.
+footprint0 matches A; footprint*frequency>=1 gives +0; continuous cutoff; spectral quality distinct from numeric accuracy.

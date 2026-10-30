@@ -16,10 +16,20 @@ implementation_status: implemented_manual_acceptance
 
 # NUM-11B: reduce_minimum
 
-Inherit the [NUM baseline](NUM_common_contract.md) and [NUM-11 shared contract](NUM-11_reduction_contract.md). The strict key follows the exact reference. Floating selection and special-value behavior are exact in all profiles.
+Inherits the [NUM baseline](NUM_common_contract.md) and the [NUM-11 shared contract](NUM-11_reduction_contract.md). The strict key follows the exact reference. Floating selection and special-value behavior are exact in all profiles.
+
+## Interface
 
 `numeric.reduce_minimum_*` reduces complete groups along required static `axes`. Its single Result input contains exactly one tensor member at any key. The `values` Result uses schema `photospider.tensor` and member `samples`; it preserves input dtype and rank, replaces reduced extents with one, and carries no domain description. There is no dtype parameter.
 
-Select the numeric minimum with infinities in ordinary extended order. Int64 comparison remains integer comparison, including values above 2^53. The first NaN in logical row-major order wins, preserving its sign and payload while setting the quiet bit. A singleton sNaN is quieted. For mixed signed zeros, return -0; same-sign zeros retain their sign.
+## Mathematics
 
-For `input=[[1,2,3],[4,5,6]]` and `axes="1"`, the result is `[[1],[4]]` with shape `[2,1]`. Each selected output tile lowers to a fixed CPU task with all source tiles needed for its complete groups. The task uses private preallocated state and preserves logical group order across physical tile boundaries. Empty selection emits no task. See [fixed reduction execution](../reductions-execution.md).
+Selects the numeric minimum with infinities in ordinary extended order. Int64 comparison remains integer comparison, including values above 2^53. The first NaN in logical row-major order wins, preserving its sign and payload while setting the quiet bit. A singleton sNaN is quieted. For mixed signed zeros, the result is -0; same-sign zeros keep their sign.
+
+## Behavior
+
+Each output sample depends on every input sample of its group, in logical group order independent of physical tile boundaries. Empty selection reads nothing.
+
+## Acceptance
+
+`input=[[1,2,3],[4,5,6]]`, `axes="1"` gives `[[1],[4]]` with shape `[2,1]`.

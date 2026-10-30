@@ -9,28 +9,26 @@ implementation_status: implemented
 
 # Path geometry, associations and publication
 
-Inherit [GEN common](GEN_common_contract.md).
+Inherits [GEN common](GEN_common_contract.md).
 
-## Current implementation scope
+## Schema factories
 
-PTH-01 through PTH-12 are implemented as registered CPU members or explicit public authoring helpers. Member specs define their frozen algorithms, finite resource limits and conservative quality-success domains. All derived schemas have public SDK factories:
+Each derived schema has a public SDK factory declared in `photospider/ops/generation.hpp`. The factories construct static schemas only; they neither encode a persistent geometry object nor validate runtime payloads.
 
-| Schema | Public SDK factory / implementation |
+| Schema | Public SDK factory |
 | --- | --- |
-| `photospider.ops.path_core` | `generation::core_path_schema`, implemented. |
-| `photospider.ops.path_primitives` | `generation::primitive_path_schema`, implemented. |
-| `photospider.ops.path_partition` | `generation::path_partition_schema`, implemented and used by stable split. |
-| `photospider.ops.path_arclength_table` | `generation::path_arclength_schema`, implemented with producers. |
-| `photospider.ops.path_samples_param` | `generation::path_samples_schema (parameter variant)`, implemented with producers. |
-| `photospider.ops.path_samples_arc` | `generation::path_samples_schema (arc variant)`, implemented with producers. |
-| `photospider.ops.path_width` | `generation::path_width_schema`, implemented with producers. |
-| `photospider.ops.path_source_map` | `generation::path_source_map_schema`, implemented with producers. |
-| `photospider.ops.exact_polygon` | `generation::exact_polygon_schema`, implemented with producers. |
-| `photospider.ops.grid_polygon` | `generation::grid_polygon_schema`, implemented with producers. |
-| `photospider.ops.path_fit_report` | `generation::path_fit_report_schema`, implemented with producers. |
-| `photospider.ops.geometry_report` | `generation::geometry_report_schema`, implemented with producers. |
-
-The implemented factories in [generation.hpp](../../../../plugins/ops/include/photospider/ops/generation.hpp) construct and validate static schemas only. They do not encode a persistent geometry object or validate runtime payloads. Member specifications retain their separate operation/backend status.
+| `photospider.ops.path_core` | `generation::core_path_schema` |
+| `photospider.ops.path_primitives` | `generation::primitive_path_schema` |
+| `photospider.ops.path_partition` | `generation::path_partition_schema` |
+| `photospider.ops.path_arclength_table` | `generation::path_arclength_schema` |
+| `photospider.ops.path_samples_param` | `generation::path_samples_schema` (parameter variant) |
+| `photospider.ops.path_samples_arc` | `generation::path_samples_schema` (arc variant) |
+| `photospider.ops.path_width` | `generation::path_width_schema` |
+| `photospider.ops.path_source_map` | `generation::path_source_map_schema` |
+| `photospider.ops.exact_polygon` | `generation::exact_polygon_schema` |
+| `photospider.ops.grid_polygon` | `generation::grid_polygon_schema` |
+| `photospider.ops.path_fit_report` | `generation::path_fit_report_schema` |
+| `photospider.ops.geometry_report` | `generation::geometry_report_schema` |
 
 ## PathSet schema family
 
@@ -47,19 +45,21 @@ The CoreVerbs schema is `photospider.ops.path_core`, version 1, with positive st
 | `closed` | UInt8 `[S]` | Closed flags for valid subpaths. |
 | `counts` | Int64 `[3]` | Effective verb, control and subpath counts, in that order. |
 
-Counts are bounded by V/C/S respectively. An empty path has all three counts zero and the first offset in each offset member equal to zero. Verb codes M/L/Q/C/Z are 1/2/3/4/5, and valid closed flags are 0/1. Unused verbs and closed flags are zero; unused controls are positive zero. control_offsets entries after the effective verb terminator repeat the effective control count; subpath_offsets entries after the effective subpath terminator repeat the effective verb count. Thus a valid full offsets array remains nondecreasing, and the empty representation is all zero. These are unchecked payload invariants, not validation obligations. The Core constructor takes the six field tensors explicitly; counts is an ordinary input, not inferred by inspecting verbs or offsets. Capacities V/C/S come from the input shapes, with offsets of size V+1/S+1. Concat sums corresponding input capacities with checked static arithmetic; Core reverse reserves V+S verb rows and C+S control rows while retaining S subpaths, so a reversed old closing edge can be explicit when the first segment is curved. Affine centerline transform and stable split reuse input capacities. Reverse-twice equivalence is geometric; a redundant zero-length line can remain. Algorithms whose output bound is not structurally derivable take explicit max_verbs/max_controls/max_subpaths capacities. A logical zero bound uses one physical row and zero effective count. Insufficient output capacity is an operational failure, never permission for dynamic extent growth.
+Counts are bounded by V/C/S respectively. An empty path has all three counts zero and the first offset in each offset member equal to zero. Verb codes M/L/Q/C/Z are 1/2/3/4/5, and valid closed flags are 0/1. Unused verbs and closed flags are zero; unused controls are positive zero. control_offsets entries after the effective verb terminator repeat the effective control count; subpath_offsets entries after the effective subpath terminator repeat the effective verb count. Thus a valid full offsets array is nondecreasing, and the empty representation is all zero. These are unchecked payload invariants, not validation obligations.
 
-All six members are non-spatial with no batch axes. controls has component axis 1 and one trailing atomic axis; counts has one atomic trailing axis containing its three entries. Other members use scalar observations and no component axis. One CompleteBundle scope covers all members. Lowering explicitly writes the complete fixed capacity, including padding, and the workflow exports the complete value; the metadata does not add automatic validation or scheduling. Existing physical strides/offsets apply. The public generation SDK provides Core and Primitive schema factories.
+The Core constructor takes the six field tensors explicitly; counts is an ordinary input, not inferred by inspecting verbs or offsets. Capacities V/C/S come from the input shapes, with offsets of size V+1/S+1. Concat sums corresponding input capacities with checked static arithmetic; Core reverse reserves V+S verb rows and C+S control rows while retaining S subpaths, so a reversed old closing edge can be explicit when the first segment is curved. Affine centerline transform and stable split reuse input capacities. Reverse-twice equivalence is geometric; a redundant zero-length line can remain. Algorithms whose output bound is not structurally derivable take explicit max_verbs/max_controls/max_subpaths capacities. A logical zero bound uses one physical row and zero effective count. Insufficient output capacity is an operational failure, never permission for dynamic extent growth.
+
+All six members are non-spatial with no batch axes. controls has component axis 1 and one trailing atomic axis; counts has one atomic trailing axis containing its three entries. Other members use scalar observations and no component axis. One CompleteBundle scope covers all members.
 
 ## Shared representation rules
 
-All schemas below have version 1 and at most 16 fixed Tensor members. A capacity is a static parameter or is derived from input shapes. A logical zero capacity uses physical capacity one and a zero effective count; offset arrays have physical capacity plus one. Capacity arithmetic is checked as static structure. Exceeding an algorithm's output or limb budget is an operational failure, not a request to grow the schema.
+All schemas below have version 1 and at most 16 fixed Tensor members. A capacity is a static parameter or is derived from input shapes. A logical zero capacity uses physical capacity one and a zero effective count; offset arrays have physical capacity plus one. Capacity arithmetic is checked as static structure. Exceeding an algorithm's output or limb capacity is an operational failure, not a request to grow the schema.
 
 Only valid prefixes participate in mathematics. Unused ordinary rows are zero, with Float64 positive zero; unused offset entries repeat the valid terminal value. Closed flags, counts, offsets, indices, references, finite values, rational normalization and source pairing are unchecked premises. A producer writes canonical output by construction, without an additional validation pass.
 
-Members are non-spatial with no batch axes. Scalar arrays use scalar observations. A row containing a complete point, fixed record, tuple of counts or ObjectId bytes is atomic across its trailing field axes; logical component axes identify point/vector coordinates only. Physical strides and offsets follow the existing Tensor interface. CompleteBundle covers the members of each Result; lowering explicitly supplies complete coverage and successful retirement. No schema policy supplies missing reads, writes or semantic checks.
+Members are non-spatial with no batch axes. Scalar arrays use scalar observations. A row containing a complete point, fixed record, tuple of counts or ObjectId bytes is atomic across its trailing field axes; logical component axes identify point/vector coordinates only. CompleteBundle covers the members of each Result.
 
-Source ObjectIds are eight little-endian UInt8 bytes copied from known input identities, with no comparison or hashing. Producers containing such process-local identity bytes declare deterministic=false; numerical and discrete fields retain their specified deterministic behavior. Source ResultRefs needed for later calculations are explicit workflow/SDK arguments, not hidden references reconstructed from an ID. Except for the explicitly bound GEN-08 point-generation report, a geometry Result and its accompanying metadata are paired by the caller; metadata does not acquire a new target-output ObjectId or introduce a binding stage merely for validation.
+Source ObjectIds are eight little-endian UInt8 bytes copied from known input identities, with no comparison or hashing. Producers containing such process-local identity bytes declare deterministic=false; numerical and discrete fields keep their specified deterministic behavior. Source ResultRefs needed for later calculations are explicit workflow/SDK arguments, not hidden references reconstructed from an ID. Except for the explicitly bound GEN-08 point-generation report, a geometry Result and its accompanying metadata are paired by the caller; metadata does not acquire a new target-output ObjectId or introduce a binding stage merely for validation.
 
 ## Primitives schema
 
@@ -99,7 +99,7 @@ Constructor capacities come from the corresponding input shapes. Concat sums eac
 | `counts` | Int64 `[3]` | Effective segments, knots, subpaths. |
 | `source_object_id` | UInt8 `[8]` | Source path identity. |
 
-E/S are bounded by source segment/subpath capacity; N is max_table_rows. Knot s bounds accumulate in path traversal order without subpath jumps. Each stored local_t denotes its exact Float64 value, and the bounds refer to that value, not to an unrecorded rounded parameter. Internal integration may refine beyond the published knot table. Empty paths have zero counts and totals. The independent length output equals totals[0,0]. Table tolerances and stored intervals do not substitute for the member's correctly-rounded true-length computation.
+E/S are bounded by source segment/subpath capacity; N is max_table_rows. Knot s bounds accumulate in path traversal order without subpath jumps. Each stored local_t denotes its exact Float64 value, and the bounds refer to that value, not to an unrecorded rounded parameter. Empty paths have zero counts and totals. The independent length output equals totals[0,0]. Table tolerances and stored intervals do not substitute for the member's correctly-rounded true-length computation.
 
 ## PathSamples and PathPartition schemas
 
@@ -113,7 +113,7 @@ E/S are bounded by source segment/subpath capacity; N is max_table_rows. Knot s 
 
 `photospider.ops.path_width` is a separate Result representing the standard width binding with Linear profiles, paired with geometry by the workflow. It has profiles Int64 `[P,4]` (source_slot, domain, stop_begin, stop_end), bindings Int64 `[B,3]` (target_subpath, profile_row, source_subpath), stops Float64 `[K]`, widths Float64 `[K]`, source_object_ids UInt8 `[O,8]`, and counts Int64 `[4]` (bindings, profiles, stops, sources). P/B/K/O are static capacities from inputs or explicit output limits; concat sums the necessary capacities.
 
-Domains are 0=pathset_normalized_arclength, 1=subpath_normalized_arclength, 2=subpath_arclength_px. A path-wide profile uses source_subpath=-1; subpath-specific profiles use a valid source row. The standard key is the literal width and is not stored as a string table. Profile stop domains, nonnegative widths, bindings and source identity are unchecked. No other dynamic attribute keys or generic key/value codec are introduced. PCHIP remains an independent evaluation workflow; path_width v1 has no PCHIP interpolation code.
+Domains are 0=pathset_normalized_arclength, 1=subpath_normalized_arclength, 2=subpath_arclength_px. A path-wide profile uses source_subpath=-1; subpath-specific profiles use a valid source row. The standard key is the literal width and is not stored as a string table. Profile stop domains, nonnegative widths, bindings and source identity are unchecked. No other dynamic attribute keys or generic key/value codec exist. PCHIP remains an independent evaluation workflow; path_width v1 has no PCHIP interpolation code.
 
 PTH-05C returns the unchanged complete path value and a separate width Result. The workflow pairs them, retaining the path ObjectId and geometry bits. Replacing an explicit workflow binding follows replace_existing; a conflicting existing binding when replacement is disabled is outside the caller premises. After geometry operations, the returned width Result is paired with the new geometry by the workflow; no consumer validates that pairing. Drop-unmappable reports the width key and unmappable reason using the geometry report below.
 
@@ -123,154 +123,68 @@ A rational field with logical shape Q uses signs UInt8 `[Q...]`, sizes Int64 `[Q
 
 `photospider.ops.path_source_map` has records Int64 `[M,4]` (target_segment, source_slot, source_subpath, source_segment), source_object_ids UInt8 `[O,8]`, affine_signs UInt8 `[M,2]`, affine_sizes Int64 `[M,2,2]`, affine_limbs UInt8 `[M,2,2,L,4]`, and counts Int64 `[2]` (mappings, sources). Each row maps an entire target segment by t_source=a+b*t_target, with a/b stored as exact rationals. M is the target segment bound; O/L are static source/limb capacities. Source geometry and length tables remain explicit inputs when width evaluation requires them.
 
-This v1 map supports identity, reverse, exact rational subintervals and source reindexing. A nonrational true-arc cut, or a target segment spanning multiple source segments without one such affine map, is not represented by a rounded Float64 surrogate. Existing reject_unmappable or explicit drop_unmappable applies when an operation cannot construct the required mapping. No expression graph, new solver protocol or implicit width rebind is added. This is an output-representation limitation for valid inputs, not a payload validator.
+This v1 map supports identity, reverse, exact rational subintervals and source reindexing. A nonrational true-arc cut, or a target segment spanning multiple source segments without one such affine map, is not represented by a rounded Float64 surrogate. reject_unmappable or explicit drop_unmappable applies when an operation cannot construct the required mapping. No expression graph or implicit width rebind exists. This is an output-representation limitation for valid inputs, not a payload validator.
 
 ## Exact and grid polygon schemas
 
 `photospider.ops.exact_polygon` has coordinate_signs UInt8 `[V,2]`, coordinate_sizes Int64 `[V,2,2]`, coordinate_limbs UInt8 `[V,2,2,L,4]`, contour_offsets Int64 `[C+1]`, and counts Int64 `[2]` (vertices, contours). It uses the rational encoding above. Contours store cyclic vertices without repeating the initial vertex; consecutive vertices and cyclic closure define edges. Coincident exact coordinates preserve contact relations. No separate general graph representation is required. Orientation, contour rotation and ordering follow PTH-12A. V/C/L are explicit static capacities; exhausting them fails operationally without substituting Float64 or grid geometry.
 
-`photospider.ops.grid_polygon` has coordinates Int64 `[V,2]`, contour_offsets Int64 `[C+1]`, and counts Int64 `[2]`. Grid origin and positive spacing remain explicit static operation parameters, supplied consistently to producers and consumers. Grid coordinates are signed64; required input and output range representability is a caller premise. The storage schema itself does not imply a Boolean algorithm. [PTH-12D](PTH-12D_boolean_grid_result.md) freezes the implemented v1 choices: exact ties-even input quantization, exact rational arrangement, then ties-even result-vertex snapping with cycle order and degeneracies retained.
+`photospider.ops.grid_polygon` has coordinates Int64 `[V,2]`, contour_offsets Int64 `[C+1]`, and counts Int64 `[2]`. Grid origin and positive spacing remain explicit static operation parameters, supplied consistently to producers and consumers. Grid coordinates are signed64; required input and output range representability is a caller premise. The storage schema itself does not imply a Boolean algorithm; [PTH-12D](PTH-12D_boolean_grid_result.md) specifies the quantization and snapping rules.
 
 ## Minimal quality reports
 
-`photospider.ops.path_fit_report` has error_bound_px Float64 `[1]`, topology_status Int64 `[1]`, and source_object_id UInt8 `[8]`. The error is the algorithm's certified bidirectional Hausdorff upper bound including coordinate publication. Topology codes are 0=unverified, 1=preserved, 2=established change. Solver identity is the explicit operation/version; no trace, residual history or solver-name payload is added. Nonconvergence and certification failure use the existing operation failures.
+`photospider.ops.path_fit_report` has error_bound_px Float64 `[1]`, topology_status Int64 `[1]`, and source_object_id UInt8 `[8]`. The error is the algorithm's certified bidirectional Hausdorff upper bound including coordinate publication. Topology codes are 0=unverified, 1=preserved, 2=established change. Solver identity is the explicit operation and version; no trace, residual history or solver-name payload is added. Nonconvergence and certification failure use the existing operation failures.
 
-`photospider.ops.geometry_report` has error_bounds_px Float64 `[3]` (approximation, quantization, publication), topology_status Int64 `[1]`, dropped_width UInt8 `[1]`, and source_object_ids UInt8 `[O,8]`, where O is the static source arity. Unused error stages are +0. dropped_width=1 means the standard width key was explicitly dropped as unmappable; 0 means retained or absent. This records the existing policy without a generic reason or attribute dictionary. Error/topology fields are obtained from the operation's required mathematics, not from extra publisher/consumer scans. Source maps are provenance support for those bindings, not another user attribute.
+`photospider.ops.geometry_report` has error_bounds_px Float64 `[3]` (approximation, quantization, publication), topology_status Int64 `[1]`, dropped_width UInt8 `[1]`, and source_object_ids UInt8 `[O,8]`, where O is the static source arity. Unused error stages are +0. dropped_width=1 means the standard width key was explicitly dropped as unmappable; 0 means retained or absent. This records the existing policy without a generic reason or attribute dictionary. Error and topology fields are obtained from the operation's required mathematics, not from extra scans. Source maps are provenance support for those bindings, not another user attribute.
 
 ## Geometry authority and attributes
 
-Core verbs M/L/Q/C/Z have arity1/1/2/3/0. A single M is a legal zero-length open
-subpath. Z terminates the subpath, agrees with closed and represents one actual closing
-segment; do not add another closure edge. Empty paths have zero verb, control and
-subpath rows and offsets=[0]. The separate Primitives schema requires correctly associated references/payloads; it has no CoreVerbs fields.
+Core verbs M/L/Q/C/Z have arity 1/1/2/3/0. A single M is a legal zero-length open subpath. Z terminates the subpath, agrees with closed and represents one actual closing segment; no further closure edge is added. Empty paths have zero verb, control and subpath rows and offsets=[0]. The separate Primitives schema requires correctly associated references/payloads and has no CoreVerbs fields.
 
-A materialized copy has a new ObjectId; COPY does not rewrite separate association
-Results. The workflow preserves source provenance or explicitly rebuilds any
-binding that must target the copy. Concat preserves port and subpath order. Dynamic splitting returns a flat PathSet and partition
-table with fixed output ports, not nested Results or variable arity.
+A materialized copy has a new ObjectId; COPY does not rewrite separate association Results. The workflow preserves source provenance or explicitly rebuilds any binding that must target the copy. Concat preserves port and subpath order. Dynamic splitting returns a flat PathSet and partition table with fixed output ports, not nested Results or variable arity.
 
-The separate path_width schema above defines the three source domains and Linear binding; independent PCHIP evaluation uses its own member contract. Default reject_unmappable; explicit drop_unmappable records dropped_width=1 in the geometry_report when a width binding is discarded and preserves any explicitly mappable binding. Width is finite nonnegative full diameter in pixels, with exactly one explicit source: a workflow-paired path_width Result or an independent width-evaluation input. Bindings distinguish whole-path normalized length, subpath normalized length and subpath physical arc length. Complete-input-path accumulation excludes jumps between subpaths. Zero-length and seam behavior follows the width members. PCHIP evaluation alone does not establish an attribute codec or interpolation encoding.
+The path_width schema above defines the three source domains and the Linear binding; independent PCHIP evaluation uses its own member contract. The default is reject_unmappable; explicit drop_unmappable records dropped_width=1 in the geometry_report when a width binding is discarded and preserves any explicitly mappable binding. Width is finite nonnegative full diameter in pixels, with exactly one explicit source: a workflow-paired path_width Result or an independent width-evaluation input. Bindings distinguish whole-path normalized length, subpath normalized length and subpath physical arc length. Complete-input-path accumulation excludes jumps between subpaths. Zero-length and seam behavior follows the width members.
 
-Trim/dash retains original position/parameter and source-length mappings; explicit
-rebinding alone spreads the width function across each output fragment. Rounded output
-controls can alter length, so do not equate new arc length with the source interval
-length. The member specifies exact source queries for all three domains.
+Trim/dash retains original position/parameter and source-length mappings; explicit rebinding alone spreads the width function across each output fragment. Rounded output controls can alter length, so the new arc length is not equated with the source interval length. The member specifies exact source queries for all three domains.
 
 ## Evaluation and canonical boundaries
 
-Absolute-control Bezier evaluation uses the full Bernstein/de Casteljau expression and
-one final RN. CRV relative-handle reconstruction has its own explicit RN64 stage;
-adapters must preserve it. Local t is in[0,1]; endpoint position copies control bits
-after required dtype conversion. Derivative is dP/dt. Zero derivative has zero tangent
-and valid0; tangent requests must not divide by zero.
+Absolute-control Bezier evaluation uses the full Bernstein/de Casteljau expression and one final RN. CRV relative-handle reconstruction has its own explicit RN64 stage; adapters preserve it. Local t is in [0,1]; endpoint position copies control bits after required dtype conversion. Derivative is dP/dt. Zero derivative has zero tangent and valid 0; tangent requests never divide by zero.
 
-Arc position is c+u*cos(theta0+t*sweep)+v*sin(theta0+t*sweep). FullTurn endpoints reuse
-the start result under the specified direction, not rounded sin(2*pi). B-spline t maps
-to [k[d],k[n]], with the final endpoint using the left limit and interior knots the
-member's specified right limit. Core segment IDs are verb rows (M is not evaluable, Z
-closes current point to M); primitive IDs are reference rows.
+Arc position is c+u*cos(theta0+t*sweep)+v*sin(theta0+t*sweep). FullTurn endpoints reuse the start result under the specified direction, not rounded sin(2*pi). B-spline t maps to [k[d],k[n]], with the final endpoint using the left limit and interior knots the member's specified right limit. Core segment IDs are verb rows (M is not evaluable, Z closes the current point to M); primitive IDs are reference rows.
 
-At cumulative arc-length junctions choose the following positive-length segment, except
-the final endpoint; skip zero-length segments. Zero total length with a valid point
-remains a valid point, while an actually empty path follows each member's explicit
-empty/NoSolution behavior.
+At cumulative arc-length junctions the following positive-length segment is chosen, except at the final endpoint; zero-length segments are skipped. Zero total length with a valid point remains a valid point, while an actually empty path follows each member's explicit empty/NoSolution behavior.
 
 ## Length and sample Results
 
-True length s(t)=integral_0^t norm(P'(u)) du. Straight segments are analytic. Bezier
-dyadic subdivision can bound length with chord lower/control-polygon upper bounds and
-directed accumulation. Ordinary quadrature error estimates or matching high-precision
-values are not correct-rounding certificates. RN64 true length requires refinement to a
-unique rounding cell or an exact tie proof even after a table tolerance is met;
-exhausted certification fails.
+True length s(t)=integral_0^t norm(P'(u)) du. Straight segments are analytic. Bezier dyadic subdivision can bound length with chord lower/control-polygon upper bounds and directed accumulation. Ordinary quadrature error estimates or matching high-precision values are not correct-rounding certificates. RN64 true length requires refinement to a unique rounding cell or an exact tie proof even after a table tolerance is met; exhausted certification fails.
 
-The ArcLengthTable schema records source segment IDs and ranges, ordered t knots
-with cumulative lower/upper s bounds, totals and a correctly-rounded length. Fields bind
-to the source path snapshot and table identity. PathSamples variants carry positions,
-source segment and local t, with arc_s only when computed. PathPartition and quality
-reports use the schemas above. The public SDK implements PathPartition, ArcLengthTable, both PathSamples variants and both quality-report factories, with producers in the corresponding PTH members as listed above.
+The ArcLengthTable schema records source segment IDs and ranges, ordered t knots with cumulative lower/upper s bounds, totals and a correctly-rounded length. Fields bind to the source path snapshot and table identity. PathSamples variants carry positions, source segment and local t, with arc_s only when computed. PathPartition and quality reports use the schemas above.
 
 ## Deterministic flattening
 
-For Bezier degree d, split exactly at t=1/2, DFS left first. Let Q_i be the degree-d
-control vector of the endpoint chord: Q_i=(1-i/d)*P0+(i/d)*Pd. Bounding every
-norm(P_i-Q_i) bounds parameter-matched distance; perpendicular-only flatness would miss
-collinear reversals. Include maximum published endpoint RN64 displacement in the leaf
-bound. Default maximum depth24 and output-segment limit1,048,576 are explicit budgets.
-If Float64 has insufficient publication precision, more subdivision may not help: report
-InvalidQuality instead of silently changing coordinates.
+For Bezier degree d, split exactly at t=1/2, DFS left first. Let Q_i be the degree-d control vector of the endpoint chord: Q_i=(1-i/d)*P0+(i/d)*Pd. Bounding every norm(P_i-Q_i) bounds parameter-matched distance; perpendicular-only flatness would miss collinear reversals. The maximum published endpoint RN64 displacement is included in the leaf bound. The default maximum depth is 24 and the output-segment limit is 1,048,576. If Float64 has insufficient publication precision, more subdivision may not help: InvalidQuality is reported instead of silently changing coordinates.
 
-Use epsilon_geom_px>0, default0.05 target-canvas pixels, explicit preview0.25. These are
-engineering presets, not measured optimality claims. Persist the actual parameter.
-Subsequent transforms propagate the declared error or compute a new algorithmic certificate; publishers and consumers do not rescan it. Strict arithmetic on the published
-polyline does not imply strict original-curve area or distance. Distance bounds do not
-establish coverage or topology bounds. Default allow_change reports unverified topology
-unless actually checked; reject_unproven requires the member's defined proof. Never
-relax epsilon to hide budget exhaustion.
+epsilon_geom_px>0 defaults to 0.05 target-canvas pixels, with an explicit preview value of 0.25. These are engineering presets, not measured optimality claims. The actual parameter is persisted. Subsequent transforms propagate the declared error or compute a new algorithmic certificate. Strict arithmetic on the published polyline does not imply strict original-curve area or distance. Distance bounds do not establish coverage or topology bounds. Default allow_change reports unverified topology unless actually checked; reject_unproven requires the member's defined proof. Epsilon is never relaxed to hide a limit failure.
 
 ## Filled regions, Boolean and distance
 
-Open contours close at fill consumption without mutating the source. Default
-nonzero/evenodd selection is explicit. Single points and zero-area edges contribute zero
-coverage. Half-open ray crossing defines boundary ownership, without changing area.
-Regularized Boolean output contains area, not isolated points or lines. Predicates and
-discrete topology cannot use accelerated ULP tolerance.
+Open contours close at fill consumption without mutating the source. The nonzero/evenodd selection is explicit. Single points and zero-area edges contribute zero coverage. Half-open ray crossing defines boundary ownership, without changing area. Regularized Boolean output contains area, not isolated points or lines. Predicates and discrete topology are not subject to accelerated ULP tolerance.
 
-Exact rational Result, Float64 publication and explicit-grid algorithms are distinct
-members. Exact-to-Float64 conversion constructs rounded coordinates and accumulates
-their displacement bound. Representability, the requested displacement budget and
-preserved incidence/topology are unchecked caller premises, with no post-rounding
-geometry scan or publication gate. Conversion reports unverified topology (code 0);
-an explicit topology-analysis operation may compute a different status. Grid members
-use the same publication premises and must specify quantization and backend degeneracy
-behavior. Never silently replace exact-input geometry with a grid result. Exact line
-intersections do not imply support for circular/offset constructions.
+Exact rational Result, Float64 publication and explicit-grid algorithms are distinct members. Exact-to-Float64 conversion constructs rounded coordinates and accumulates their displacement bound. Representability, the requested displacement budget and preserved incidence/topology are unchecked caller premises, with no post-rounding geometry scan or publication gate. Conversion reports unverified topology (code 0); an explicit topology-analysis operation may compute a different status. Grid members use the same publication premises and specify quantization and degeneracy behavior. Exact-input geometry is never silently replaced by a grid result. Exact line intersections do not imply support for circular/offset constructions.
 
-For polygon publication, let each exact vertex be (x_i,y_i) and its constructed
-RN64 vertex be (X_i,Y_i), expressed in the same geometric pixel coordinates.
-While constructing vertices, accumulate exactly
-`M=max_i((X_i-x_i)^2+(Y_i-y_i)^2)`, starting from zero. The reported publication
-bound is `RU64(sqrt(M))`: the least Float64 value not below the exact square root,
-with empty output and exact zero reported as +0. This also bounds corresponding
-line-segment displacement under the same linear edge parameterization. The
-reporting calculation neither compares this bound with epsilon to authorize
-publication nor checks rounded topology. Required report representability is an
-unchecked numerical premise; arithmetic work/capacity exhaustion still fails.
+For polygon publication, let each exact vertex be (x_i,y_i) and its constructed RN64 vertex be (X_i,Y_i), expressed in the same geometric pixel coordinates. While constructing vertices, accumulate exactly `M=max_i((X_i-x_i)^2+(Y_i-y_i)^2)`, starting from zero. The reported publication bound is `RU64(sqrt(M))`: the least Float64 value not below the exact square root, with empty output and exact zero reported as +0. This also bounds corresponding line-segment displacement under the same linear edge parameterization. The reporting calculation neither compares this bound with epsilon to authorize publication nor checks rounded topology. Required report representability is an unchecked numerical premise.
 
-Distance uses the exposed boundary of the selected region, excluding internal
-shared/overlap edges. Min of individual SDFs is not general exact distance inside a
-union. Closest ties use (source subpath,segment,t) lexicographically, smaller t first;
-generated Boolean boundaries use canonical edge order. Boundary SDF is +0. An empty
-region permits +max_distance only in an explicitly truncated distance member; a
-requested missing closest point fails NoSolution.
+Distance uses the exposed boundary of the selected region, excluding internal shared/overlap edges. The minimum of individual SDFs is not general exact distance inside a union. Closest ties use (source subpath, segment, t) lexicographically, smaller t first; generated Boolean boundaries use canonical edge order. Boundary SDF is +0. An empty region permits +max_distance only in an explicitly truncated distance member; a requested missing closest point fails NoSolution.
 
 ## Stroke geometry
 
-Width0 gives empty coverage, never implicit hairline. Caps are round/butt/square; joins
-round/bevel/miter. Miter limit>=1 compares outer corner distance divided by half-width;
-equality retains miter, excess uses bevel. Resolve self-overlap as a geometric union
-before coverage, not repeated source-over. Closed paths have no end caps. A lone point
-or zero-length subpath gives a radius-width/2 disk for round, a centered axis-aligned
-width square for square, or empty for butt. Reversal joins must be finite and follow the
-same union construction.
+Width 0 gives empty coverage, never an implicit hairline. Caps are round/butt/square; joins are round/bevel/miter. Miter limit >= 1 compares the outer corner distance divided by half-width; equality retains miter, excess uses bevel. Self-overlap is resolved as a geometric union before coverage, not repeated source-over. Closed paths have no end caps. A lone point or zero-length subpath gives a radius-width/2 disk for round, a centered axis-aligned width square for square, or empty for butt. Reversal joins are finite and follow the same union construction.
 
-Variable-round strokes use the explicitly defined variable-disk sweep, not a
-constant-radius offset formula. Curved boundary approximation is separately named and
-reports its geometry error. Centerline transforms preserve width in pixels; outline
-transforms move the whole already-stroked object.
+Variable-round strokes use the explicitly defined variable-disk sweep, not a constant-radius offset formula. Curved boundary approximation is separately named and reports its geometry error. Centerline transforms preserve width in pixels; outline transforms move the whole already-stroked object.
 
-## Fitting, support and resources
+## Fitting and support
 
-Each fitting backend solver is its own versioned operator with fixed initialization,
-split/tie/stop behavior. Shared continuous Hausdorff acceptance includes publication
-error and endpoint/locked/corner constraints. Discrete residuals are insufficient; no
-minimum-segment guarantee or silent solver fallback is provided. Default topology policy
-is allow_change, with optional reject_unproven and explicit proof requirements.
+Each fitting backend solver is its own versioned operator with fixed initialization, split/tie/stop behavior. The shared continuous Hausdorff acceptance includes publication error and endpoint/locked/corner constraints. Discrete residuals are insufficient; no minimum-segment guarantee and no silent solver fallback exist. The default topology policy is allow_change, with optional reject_unproven and explicit proof requirements.
 
-Raster output is Regional; complete mathematical control reads may remain conservative. A BVH may discard only proven irrelevant candidates, including tie cases.
-Compiled conservative stroke support includes width, caps, miter extension and
-geometry error, not only control-point bounds. If payload-dependent support cannot
-be bounded statically, declare the complete path as a fixed input. Charge exact
-arithmetic, intersections (worst-case quadratic), indexes, independent tile backing
-and algorithmic certification work; tiled output does not imply a streaming algorithm. Public
-execution must honor cancellation and preserve retained-owner lifetime.
+Raster output is Regional: a pixel depends on the geometry within the stroke extent, which includes width, caps, miter extension and geometry error, not only control-point bounds. Culling may discard only proven irrelevant candidates, including in tie cases. If the support cannot be bounded from the parameters alone, the complete path is a dependency.

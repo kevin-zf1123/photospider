@@ -14,73 +14,30 @@ operation_keys:
 
 # GEN-07B: triangle mesh gradient
 
-Inherit [GEN-07](GEN-07_mesh_gradients_contract.md), [GEN
-common](GEN_common_contract.md), and the applicable [random](NOI_random_contract.md) and
-[geometry](PTH_geometry_contract.md) contracts. A key includes algorithm version and profile; within one version/profile,
-output bits and discrete decisions are fixed.
+Inherits [GEN-07](GEN-07_mesh_gradients_contract.md) and [GEN common](GEN_common_contract.md).
 
-## Interface and representation
+## Interface
 
-vertices[V,2], triangles[F,3] Int64, controls[V,C], C>=1; values[H,W,C] and UInt8
-valid[H,W].
+Operation keys: `generation.triangle_mesh_gradient_v1_strict`.
 
-## Parameters and domain
+vertices[V,2], triangles[F,3] Int64, controls[V,C], C>=1; values[H,W,C] and UInt8 valid[H,W].
 
-canvas/dtype; nonzero triangle areas; no interior overlaps, shared edges/vertices
-allowed; outside=zero+valid0.
+### Parameters and domain
 
-## Mathematical specialization
+canvas/dtype; nonzero triangle areas; no interior overlaps, shared edges/vertices allowed; outside=zero+valid0.
 
-Exact orientation locates triangles; shared-boundary ownership chooses smallest face
-row. Exact barycentric weights form each complete component expression before RN. Shared
-vertices share control vectors; outside components are +0. No color/alpha inference.
+Ports: input 0 `vertices`, input 1 `triangles`, input 2 `controls`; outputs `values` and `valid`. Parameters: Int64 `height`, `width` (required), Int64 `origin_x`, `origin_y` (default 0), String `dtype` (default `float64`). The `valid` output depends only on `vertices` and `triangles`.
 
-## Dependencies, resources and failures
+## Mathematics
 
-Execution support: **Regional**. Lower each selected complete output tile to
-fixed tasks with explicit query/sample and control-member tile reads. Close each
-read on its source grid; payload validity over the consumed support is a caller
-premise. Empty output selection performs static preparation without payload tasks.
-Shared computation uses explicit task dependencies and private intermediate
-Results under GEN-common.
+Exact orientation locates triangles; shared-boundary ownership chooses smallest face row. Exact barycentric weights form each complete component expression before RN. Shared vertices share control vectors. A vertex hit copies that vertex's control with dtype conversion and preserves signed zero. Outside values are canonical +0 with valid=0. Faces are visited in row order. No color/alpha inference.
 
-Regional pixels with the complete topology/control mathematical support under unchecked premises; indexes may only eliminate
-proven irrelevant faces.
+## Behavior
 
-All output, scratch, indices, algorithmic work and retained owners are accounted. Poll
-cancellation in bounded loops. Preserve static structural failures and actual
-resource, cancellation, backend and upstream statuses. Member-specific no-solution,
-refinement or quality failures apply to valid inputs and the explicitly declared
-algorithm; numerical-premise violations have no prescribed runtime diagnostic.
-Never replace budget/cancellation failure with a lower-quality successful prefix. Views,
-lifetime and actual returned coverage inherit GEN-common.
+Support class: Regional.
 
-## CPU implementation
+Each pixel depends on the complete topology under the unchecked mesh premises.
 
-The registered strict CPU operation takes vertices, triangles and controls in that
-order. Named outputs are `values` and `valid`. Canvas/dtype parameters and the
-independent `max_work=INT64_MAX` budget follow GEN-common. The `valid` output
-depends only on vertices and triangles; requesting it alone does not read controls.
+## Acceptance
 
-Faces are visited in row order. Outward intervals can prove a face irrelevant or
-certify containment; uncertain determinants or boundaries use exact orientation.
-Exact numerators establish containment before barycentric division, and one pixel's
-weights are reused across all components. Float32 interpolation is accepted only
-with a complete-expression rounding certificate; other cases use exact arithmetic.
-A vertex hit copies that vertex's control with destination dtype conversion,
-preserving signed zero. Outside values are canonical +0 with validity 0.
-The reference traversal is O(area(Q)*(F+C)); no topology payload validator is run.
-Arithmetic storage and retained weights are admitted as Host scratch.
-No GPU implementation or architecture-dependent approximate profile is registered.
-
-## Independent fixtures and acceptance
-
-Shared-edge continuity, reversed triangle orientation, valid nonoverlapping interiors, outside
-validity and arbitrary C.
-
-Check selected-tile/full-output equivalence, source-grid read closure, legal
-strides/offsets, separate/joint outputs, version/profile identity, low budgets, cancellation,
-associations and retained owners as applicable. The [oracle
-coverage](../oracle-coverage.md) describes the available finite reference subset; it is
-not runtime completion. No unverified GPU or third-party bit
-identity is implied by these requirements.
+Shared-edge continuity, reversed triangle orientation, valid nonoverlapping interiors, outside validity and arbitrary C.

@@ -66,8 +66,8 @@ affine 可映射矩形顶点后扩大 filter footprint；homography 须排除分
 [^mls]: Schaefer、McPhail、Warren，[*Image Deformation Using Moving Least Squares*](https://people.engr.tamu.edu/schaefer/research/mls.pdf)，SIGGRAPH2006。
 [^nuke]: Foundry，[*STMap*](https://learn.foundry.com/nuke/content/reference_guide/transform_nodes/stmap.html)，滚动参考；[SplineWarp](https://learn.foundry.com/nuke/content/reference_guide/transform_nodes/splinewarp.html)记录不同warp版本的影响范围差异。
 
-## 当前 STMap 实现边界
+## STMap 接口
 
-`image.stmap(source,map,boundary)` 当前接收单 Tensor Float32 HWC RGBA source 和 Float64 `[Ho,Wo,2]` map。Source batch 保留到输出；无 batch map 广播，带 batch map 必须匹配 source。输出仅有 `value`，使用 `photospider.image` v1/member `pixels`。UV 为绝对来源像素中心坐标，filter 固定 bilinear，boundary 必填且支持 constant/clamp/wrap/reflect/mirror。Normalized UV、其他 filter、map alpha decode 和 validity 输出仍属于提议目录，不是此接口参数。
+`image.stmap(source,map,boundary)` 接收单 Tensor Float32 HWC RGBA source 和 Float64 `[Ho,Wo,2]` map。Source batch 保留到输出；无 batch map 广播，带 batch map 必须匹配 source。输出仅有 `value`，使用 `photospider.image` v1/member `pixels`。UV 为绝对来源像素中心坐标，filter 固定 bilinear，boundary 必填且支持 constant/clamp/wrap/reflect/mirror。Normalized UV、其他 filter、map alpha decode 和 validity 输出仍属于提议目录，不是此接口参数。
 
-默认 straight alpha 的重采样在算子内部计算 `A=ΣwᵢAᵢ` 和 `RGB=ΣwᵢAᵢRGBᵢ/A`；A 为零时 RGB 为正零。Kernel 不转换或认证 association。STMap 不执行颜色空间转换，data map 不作为颜色处理。每个所选输出 tile 使用一个固定 CPU task，直接借用 affine views，声明 scratch 为零，输出为独立 dense RGBA 存储。Task 不嵌套启动 worker。UV 转换为整数地址前检查 finite 和 +/-2^40 上限；仅检查实际所选输出像素，未使用的 map 坐标不被扫描。当前实现契约见[依赖采样](../../kernel-architecture/Dependency-Sampling.md)。
+默认 straight alpha 的重采样在算子内部计算 `A=ΣwᵢAᵢ` 和 `RGB=ΣwᵢAᵢRGBᵢ/A`；A 为零时 RGB 为正零。Kernel 不转换或认证 association。STMap 不执行颜色空间转换，data map 不作为颜色处理。依赖范围见[依赖采样](../../kernel-architecture/Dependency-Sampling.md)。

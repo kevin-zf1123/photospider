@@ -11,27 +11,23 @@ implementation_status: implemented
 
 # NUM-10: scatter into a base tensor
 
-The four operations `scatter_replace`, `scatter_sum`, `scatter_minimum` and `scatter_maximum` have strict and two CPU accelerated profiles. Inputs are base, Int64 indices `[M]`, and updates. Every Result contains one tensor under any schema/member key; complete sample shapes include batch axes and have rank 1..8, positive extents and at most 2^40 elements. Base/updates share UInt8, Int64, Float32 or Float64 dtype. Required static Int64 `axis` is in range. Updates match base except axis length M. Output `values` uses `photospider.tensor`/`samples` with ordinary base axes and unchanged dtype. Base is immutable.
+## Interface
 
-## Indices, contributors and selected outputs
+The four operations `scatter_replace`, `scatter_sum`, `scatter_minimum` and `scatter_maximum` have strict and two CPU accelerated profiles. Inputs are base, Int64 indices `[M]`, and updates. Every Result contains one tensor under any schema/member key; complete sample shapes include batch axes and have rank 1..8, positive extents and at most 2^40 elements. Base and updates share UInt8, Int64, Float32 or Float64 dtype. The required static Int64 `axis` is in range. Updates match base except that the axis length is M. Output `values` uses `photospider.tensor`/`samples` with ordinary base axes and unchanged dtype. Base is not modified.
 
-Every nonempty selection creates one fixed task that stably groups `{target_index,original_position}` pairs with eight radix passes and publishes one private dense Int64 `[M,2]` tile. Every index lies in the base axis, including indices unrelated to selected output, as an unchecked caller premise. No index scan validates this premise. Original positions remain increasing within each target group by construction.
+Static validation rejects incompatible types, ranks, shapes, axis and logical counts. This contract overrides the [NUM baseline](NUM_common_contract.md).
 
-Each selected output tile has a consumer task. It reads base tiles intersecting that output region, update tiles with the same non-axis region and the complete M axis, and the shared private table. Bounded searches find contributor ranges. Normalized update positions below M are trusted without a consumer bounds check. Preparation checks complete read sets and exact dense private view signatures; runtime producer association is a caller premise. Empty selection emits no tasks or payload reads.
+## Indices and contributors
 
-A no-hit coordinate copies base bits exactly, including signaling NaNs. Replace selects the greatest matching original position and copies that update without arithmetic. Aggregate variants start with base and then process matching updates in original position order. The first source NaN wins, with preserved sign/payload and a set quiet bit, before generated exceptional results.
+Every index lies in the base axis extent, including indices unrelated to the selected output, as an unchecked caller premise. A coordinate is a hit when at least one index equals its position along `axis`; its contributors are the updates with that target index, ordered by increasing original position in the index vector.
 
-For Sum, mixed positive and negative infinities produce the fixed positive quiet NaN; otherwise infinity sets the result sign. Finite contributors sum exactly with one final floating conversion. Integer final representability is an unchecked caller precondition; no diagnostic is promised outside that domain. Intermediate exact totals can exceed destination range. Exact zero is negative only when every contributor is negative zero; underflow preserves the exact sign. Strict conversion is correctly rounded; accelerated profiles retain the [shared floating bound](NUM_accelerated_contract.md).
+A no-hit coordinate copies base bits exactly, including signaling NaNs. Replace selects the contributor with the greatest original position and copies that update without arithmetic. Aggregate variants start with base and then process matching updates in original position order. The first source NaN wins, with preserved sign/payload and a set quiet bit, before generated exceptional results. No-hit and Replace results never quiet NaNs.
 
-Minimum/maximum use NUM-05 numerical ordering with exact integer comparisons. Mixed zero signs yield -0 for minimum and +0 for maximum; equal zero signs remain unchanged. These aggregate rules apply only to hit coordinates. Unselected outputs are not evaluated; no-hit and Replace paths never quiet NaNs.
+## Aggregation
 
-## Storage, preparation and lifetime
+Sum: mixed positive and negative infinities produce the fixed positive quiet NaN; otherwise infinity sets the result sign. Finite contributors sum exactly with one final floating conversion; intermediate exact totals may exceed the destination range. Integer final representability is an unchecked caller precondition. Exact zero is negative only when every contributor is negative zero; underflow preserves the exact sign. Strict conversion is correctly rounded; accelerated profiles follow the [shared floating bound](NUM_accelerated_contract.md).
 
-The normalized table occupies `16*M` bytes. Scatter uses that output as one radix buffer and a second `16*M`-byte scratch buffer, with the final eight-pass result in the table. Consumer aggregate tasks use private preallocated ExactAggregate scratch; Replace needs no consumer scratch. The executor reserves maximum block scratch per CPU lane, so capacity can exceed one task's scratch demand. Output storage consists only of declared independent dense tiles.
-
-Prepared state owns immutable metadata and read-slot maps. Runtime mutable state is stack storage, the private tile or admitted lane scratch; no runtime payload allocation is used. Negative/zero input strides and unaligned elements are supported after physical bounds checks. Index work checks cancellation every 256 entries, output copying every 64 samples, and aggregate arithmetic through cancellation callbacks. Operational failures prevent successful call retirement. Successful output owners outlive context destruction. Per-sample work counters, NumericDiagnostics and completed-result caches are unavailable.
-
-Static validation rejects incompatible types, ranks, shapes, axis and logical counts. Prepare rejects missing/extra reads, incorrect private views, task parameters or scratch. See [fixed indexing execution](../indexing-execution.md) for validation and runtime boundaries. This contract overrides the [NUM baseline](NUM_common_contract.md); specification status remains Proposed.
+Minimum/maximum use NUM-05 numerical ordering with exact integer comparisons. Mixed zero signs yield -0 for minimum and +0 for maximum; equal zero signs are unchanged. These aggregate rules apply only to hit coordinates.
 
 ## Individual specifications
 

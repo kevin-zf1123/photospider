@@ -14,142 +14,58 @@ clarification_status: complete
 
 # CRV-06D: color_ramp_cielch
 
-Dynamic inputs inherit the [family Result tensor-port contract](CRV-06_color_ramp.md#result-tensor-ports): each is a Result with exactly one tensor member, under any structurally valid schema id/version/member key. Shape checks use complete `sample_shape()` values, including batch axes.
+Dynamic inputs follow the [family Result tensor-port contract](CRV-06_color_ramp.md#interface): each is a Result with exactly one tensor member, under any structurally valid schema id/version/member key. Shape checks use complete `sample_shape()` values, including batch axes.
+
+Numeric profile: strict retains the exact reference defined below. Floating arithmetic in accelerated profiles follows the shared [final FP32 four-ULP contract](NUM_accelerated_contract.md). Discrete results, copies, selected endpoints and special values remain exact.
 
 ## Native lightness and explicit description
 
-The [shared scale contract](../../02-format-color/op_specs/FMT_relative_coordinate_scale.md)
-uses native CIELAB/CIELCh `l=L*/100` for ramp colors, LUT input axes, output
-table coordinates and validation points. Finite values outside 0..1 remain
-legal. Opponent/chroma scales, hue winding and arithmetic formulas are unchanged.
-The implementation uses canonical TensorDescription v4/v5 tuple parameters.
-The old ColorArray types and decoder are removed; old payloads and explicit
-L* units are rejected without sample-magnitude inference.
+The [shared scale contract](../../02-format-color/op_specs/FMT_relative_coordinate_scale.md) uses native CIELAB/CIELCh `l=L*/100` for ramp colors, LUT input axes, output table coordinates and validation points. Finite values outside 0..1 remain legal. Opponent/chroma scales, hue winding and arithmetic formulas are unchanged. Color configuration uses canonical TensorDescription v4/v5 tuple parameters; explicit L* units are rejected without sample-magnitude inference.
 
-Numeric profile: strict retains the exact reference defined below. Floating
-arithmetic in accelerated profiles follows the shared
-[final FP32 four-ULP contract](NUM_accelerated_contract.md), including its
-range/fallback rules. Discrete results, copies, selected endpoints and special
-values remain exact.
+This is the CIELCh(ab) ramp, distinct from CIELAB, OKLab and OKLCh. It has three color channels and no alpha, with explicit stops and a complete color-array description. This shared contract defines three independent input entrypoints; there is no runtime input-representation mode.
 
-This is the independently required CIELCh(ab) ramp, distinct from CIELAB,
-OKLab and OKLCh. The initial variant has three color channels and no alpha.
-Use explicit stops and a complete color-array description. This shared contract
-defines three independent input entrypoints; it does not register a runtime
-input-representation mode. The three primitives are implemented separately.
+## Interface
 
-## Coordinates and unnormalized hue
+Inherit the [CIELAB ramp](CRV-06C_color_ramp_cielab.md) for dynamic input/stops, finite strictly increasing stops, K=1..65536, clamp/reject default clamp, singleton semantics, mixed Float32/Float64 ports, positive extents and logical element limits of 2^40. Input rank is 1..7; values has shape sample_shape(input)+[3]. Floating entrypoints default output dtype to colors dtype; the rational entrypoint defaults it to lightness_chroma dtype. Numerator/denominator are Int64[K], with the same K as stops and lightness_chroma. No implicit broadcast is performed.
 
-Channels are l=L*/100, C*, h. l accepts finite extensions, C* is finite and nonnegative,
-and white is explicit, default D50. No alpha is present. Hue uses floating radians,
-floating pi multiples or exact Int64 p/q*pi. Selected rows require q>0, while an
-unselected generic q<=0 value adds no numerical precondition. Upstream failures still propagate through declared source tiles. Unreduced fractions are valid. Preserve the
-original hue value, its sign and winding count;
-there is no modulo reduction, one-turn output range or hue_path parameter.
+Direct nodes supply static color_description, dtype, out_of_domain and output_hue_unit; constructors write the defaults specified here. The explicit description identifies CIELCh(ab), reference-white xy (default D50), channel units, no alpha, and the entrypoint's input hue representation. For rational input, the description interprets the coordinated ports as one color table; lightness_chroma[K,2] alone is not a complete three-channel color tuple. Output is a complete CIELCh(ab) color whose hue unit is the selected floating output_hue_unit. No RGB transfer, gamut conversion, alpha or white adaptation occurs. `tensor_description_parameter` encodes the logical three-component TensorDescription, with `channel_axis=0` and an explicit hue unit.
 
-Input hue remains active even when C*=0, including at direct hit/clamp and when
-both selected chromas are zero. Never borrow another hue or force achromatic hue
-to zero. The same rule holds when output chroma underflows to zero.
+### Coordinates and unnormalized hue
 
-Three independent entrypoints use colors[K,3] for floating hues, or
-lightness_chroma[K,2], hue_numerator[K], hue_denominator[K] for rational pi hues.
-Output remains three floating color channels. Static output_hue_unit is radian
-or pi_multiple, default radian for radian input and pi_multiple otherwise.
-The output_hue_unit parameter records that unit; the Result has no attached description. Rational input is retained
-exactly through interpolation and any unit conversion, then rounded only at output.
+Channels are l=L*/100, C*, h. l accepts finite extensions, C* is finite and nonnegative, and white is explicit, default D50. No alpha is present. Hue uses floating radians, floating pi multiples or exact Int64 p/q*pi. Selected rows require q>0, while an unselected generic q<=0 value adds no numerical precondition. Upstream failures still propagate through declared source tiles. Unreduced fractions are valid. Preserve the original hue value, its sign and winding count; there is no modulo reduction, one-turn output range or hue_path parameter.
 
-## Ports, parameters and descriptor
+Input hue remains active even when C*=0, including at direct hit/clamp and when both selected chromas are zero. Never borrow another hue or force achromatic hue to zero. The same rule holds when output chroma underflows to zero.
 
-Inherit the [CIELAB ramp](CRV-06C_color_ramp_cielab.md) for dynamic input/stops,
-finite strictly increasing stops, K=1..65536, clamp/reject default clamp,
-singleton semantics, mixed Float32/Float64 ports, positive extents and logical
-element limits of 2^40. Input rank is 1..7; values has shape sample_shape(input)+[3].
-Floating entrypoints default output dtype to colors dtype; the rational entrypoint
-defaults it to lightness_chroma dtype. Numerator/denominator are Int64[K], with
-the same K as stops and lightness_chroma. No implicit broadcast is performed.
+Three independent entrypoints use colors[K,3] for floating hues, or lightness_chroma[K,2], hue_numerator[K], hue_denominator[K] for rational pi hues. Output remains three floating color channels. Static output_hue_unit is radian or pi_multiple, default radian for radian input and pi_multiple otherwise. The output_hue_unit parameter records that unit; the Result has no attached description. Rational input is retained exactly through interpolation and any unit conversion, then rounded only at output.
 
-Direct nodes supply static color_description, dtype, out_of_domain and
-output_hue_unit; constructors write the defaults specified here. The explicit
-description identifies CIELCh(ab), reference-white xy (default D50), channel units,
-no alpha, and the entrypoint's input hue representation. For rational input, the description interprets the coordinated ports
-as one color table; lightness_chroma[K,2] alone is not a complete three-channel
-color tuple. Output is a complete CIELCh(ab) color whose hue unit is the
-selected floating output_hue_unit. No RGB transfer, gamut conversion, alpha or
-white adaptation occurs. `tensor_description_parameter` encodes the logical
-three-component TensorDescription, with `channel_axis=0` and an explicit hue unit.
+## Mathematics
 
-## Exact interpolation and unit conversion
+For an interior query, w=(input-stops[j])/(stops[j+1]-stops[j]) exactly. Compute L=(1-w)*L0+w*L1 and C=(1-w)*C0+w*C1. For floating radian input, the exact source hue is h in radians; for floating pi input it is h*pi; for rational pi input it is (p/q)*pi. Interpolate those original mathematical angles linearly: H=(1-w)*H0+w*H1. Output H for radian, or H/pi for pi_multiple. Never replace an endpoint by a coterminal angle. In particular 0 to 4*pi has midpoint 2*pi.
 
-For an interior query, w=(input-stops[j])/(stops[j+1]-stops[j]) exactly.
-Compute L=(1-w)*L0+w*L1 and C=(1-w)*C0+w*C1. For floating radian input, the
-exact source hue is h in radians; for floating pi input it is h*pi; for rational
-pi input it is (p/q)*pi. Interpolate those original mathematical angles linearly:
-H=(1-w)*H0+w*H1. Output H for radian, or H/pi for pi_multiple. Never replace
-an endpoint by a coterminal angle. In particular 0 to 4*pi has midpoint 2*pi.
+Strict correctly rounds the complete formula to output dtype, ties-to-even. Accelerated uses the shared FP32-scaled final-result bound. When input and output hue units match, cancel pi symbolically rather than performing an unnecessary rounded multiply/divide. Exact rational source hues must not first become rounded floating multipliers. Do not round weights, intermediate endpoint differences, pi products or components before the final destination conversion.
 
-Strict correctly rounds the complete formula to output dtype, ties-to-even.
-Accelerated uses the shared FP32-scaled final-result bound. When input and output hue units
-match, cancel pi symbolically rather than performing an unnecessary rounded
-multiply/divide. Exact rational source hues must not first become rounded
-floating multipliers. Do not round weights, intermediate endpoint differences,
-pi products or components before the final destination conversion.
+Hit/clamp/K=1 selects one row and directly converts L/C and hue to the output units/dtype. Identical selected rows give the same result; both remain dependencies. All mathematically selected floating source components and returned components must be finite. C>=0 is required; negative zero C is valid. No intermediate-overflow failure is allowed when the exact final result is representable. Exact rational handling covers INT64_MIN without signed abs or intermediate overflow.
 
-Hit/clamp/K=1 selects one row and directly converts L/C and hue to the output
-units/dtype. Identical selected rows give the same result; both remain dependencies.
-All mathematically selected floating source components and returned components must be finite. C>=0 is required; negative zero C is valid. No intermediate-overflow
-failure is allowed when the exact final result is representable. Exact rational
-handling covers INT64_MIN without signed abs or intermediate overflow.
+Results are independent of query order and request partition. Direct hit/clamp/identical-row conversions preserve source floating hue zero signs, including across positive pi unit conversion. A rational zero numerator represents +0. On genuine interpolation, exact zero hue is +0 and nonzero underflow retains the mathematical sign. Apply the same direct/identical versus mixed zero rules to L/C. Selected complete-row legality is a caller precondition, including when a shortcut applies.
 
-Exact unit conversion may require certified precision for pi. ResourceExhausted
-is returned if the host budget is exhausted before rounding is determined; it
-never authorizes a 4-ULP approximation. Rational-to-same-unit interpolation can
-use integer/rational arithmetic; mixed pi/radian output uses certified intervals
-and exact cancellation as needed. Results are independent of query order and
-request partition. Direct hit/clamp/identical-row conversions preserve source floating hue zero
-signs, including across positive pi unit conversion. A rational zero numerator
-represents +0. On genuine interpolation, exact zero hue is +0 and nonzero
-underflow retains the mathematical sign. Apply the same direct/identical versus
-mixed zero rules to L/C. Selected complete-row legality is a caller precondition, including when a shortcut applies.
+## Behavior
 
-## Demand, invalidation, resources and failures
+Each output color depends on its query value and the selected one or two stop rows; all stops, colors and p/q arrays are the dependency support. Generic unselected colors and denominators are numerically unused. C=0 never suppresses hue mathematics or the positive-denominator precondition for selected rational rows. Region and tile results equal the corresponding slice of the whole result.
 
-All profiles use the [fixed execution contract](CRV-06_color_ramp.md#fixed-execution-and-caller-preconditions). Each selected complete-color output tile has one CPU task. Its reads cover the corresponding query region and all stops/colors/p/q tiles, each closed on its own source grid. Runtime selection uses one exact-hit/clamp/singleton row or two enclosing rows. Generic unselected colors and denominators are numerically unused; upstream failures still propagate through declared tile dependencies.
+The `values` Result uses `photospider.tensor` v1/member `samples`, descriptor shape `sample_shape(input)+[3]`, and `atomic_trailing_axes=1`; it carries no color description or input batch-axis partition. Finite ordered stops, finite queries, selected complete-color validity, selected rational q>0, reject-domain membership and representable final output are unchecked caller preconditions. Malformed static parameters or descriptions fail with InvalidArgument; incompatible port schemas, shapes or dtypes use TypeMismatch.
 
-The `values` Result uses `photospider.tensor` v1/member `samples`, descriptor shape `sample_shape(input)+[C]`, and `atomic_trailing_axes=1`. It carries no color description or input batch-axis partition. The kernel writes only selected dense output tiles, borrowing affine source views and owning fixed arithmetic scratch. Empty emits no task or sample read. Successful call publication follows required task completion in retirement order, and output storage survives context teardown.
+## Acceptance
 
-Finite ordered stops, finite queries, selected complete-color model/association validity, selected rational q>0, reject-domain membership and representable final output are unchecked caller preconditions. Lookup costs O(P log K) for P selected query points, plus exact/certified arithmetic; the kernel searches source stops directly without an O(K) copy. Static schemas, parameters, resources and kernel signatures remain checked. Cancellation and capacity failures stop execution without approximate substitution.
+Expected values come from exact-rational interpolation for equal input/output units and exact pi arithmetic for unit conversion. Test every profile, destination dtype, unit pair and source float dtype. Include negative and multi-turn hue, huge finite values, cancellation, INT64_MIN, equivalent unreduced fractions and C=0. A rounded floating pi input is interpreted as its actual binary value, not exact pi.
 
-C=0 never suppresses hue mathematics or the positive-denominator precondition for
-selected rational rows. Certified pi conversion retains its fixed precision
-ceiling; a finite large angle does not create an unbounded precision cache.
+With stops=[0,1], pi-multiple colors=[[0.25,2,0],[0.75,4,4]], query=0.5 returns [[0.5,3,2]]. For hues 1.75 and 0.25 the midpoint is 1; for hues -3 and 5 it is 1. Rational hues 7/4 and 1/4 yield the same midpoint as those exact floating values. Equal endpoints remain constant; neither same direction modulo a turn nor C=0 changes the formula. A hit at hue=4 retains 4 in pi units. No hue_path parameter or normalization mode is accepted.
 
-Malformed static parameters or descriptions fail preparation with InvalidArgument; incompatible port schemas, shapes or dtypes use TypeMismatch. Numerical conditions are caller preconditions, including finite destination results. Operational resource, backend, cancellation, stale-plan and upstream failures preserve their status; a failed required task prevents successful call publication. Certified hue conversion retains its fixed precision ceiling.
-
-## Acceptance and public workflow obligation
-
-Use independent exact-rational interpolation for equal input/output units and
-certified pi enclosures for unit conversion. Test every profile, destination dtype,
-unit pair and source float dtype. Include negative and multi-turn hue, huge finite
-values, cancellation, INT64_MIN, equivalent unreduced fractions and C=0. A rounded
-floating pi input is interpreted as its actual binary value, not exact pi.
-
-With stops=[0,1], pi-multiple colors=[[0.25,2,0],[0.75,4,4]], query=0.5 returns
-[[0.5,3,2]]. For hues 1.75 and 0.25 the midpoint is 1; for hues -3 and 5 it is 1.
-Rational hues 7/4 and 1/4 yield the same midpoint as those exact floating values.
-Equal endpoints remain constant; neither same direction modulo a turn nor C=0
-changes the formula. A hit at hue=4 retains 4 in pi units. No hue_path parameter
-or normalization mode is accepted.
-
-Use independent exact-rational or certified-pi/transfer references on valid inputs. Check complete-color tile coverage, mixed source grids and dtypes, unused generic rows, arbitrary source strides, concurrent Runs, cancellation, bounded scratch, allocation-free invocation and retained output lifetime. Numerical precondition violations are not runtime-error acceptance cases.
+## References
 
 - [Radian entrypoint](CRV-06D1_color_ramp_cielch.md).
 - [Floating pi entrypoint](CRV-06D2_color_ramp_cielch_pi.md).
 - [Rational pi entrypoint](CRV-06D3_color_ramp_cielch_rational_pi.md).
-
-The maintainer also requested exact p/q*pi input counterparts in NUM-04. Their
-specifications are recorded in [the rational-pi contract](NUM-04_rational_pi_contract.md)
-and do not replace the existing floating pi-multiple operations.
-
+- The exact p/q*pi input counterparts in NUM-04 are specified in [the rational-pi contract](NUM-04_rational_pi_contract.md) and do not replace the floating pi-multiple operations.
 - [Ramp family](CRV-06_color_ramp.md).
 - [CIELAB counterpart](CRV-06C_color_ramp_cielab.md).
 - [Color-array description](../../02-format-color/op_specs/FMT-COLOR_color_array_contract.md).

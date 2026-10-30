@@ -75,7 +75,7 @@ FMT-14 A-D 与 FMT-15 A/B 提供六个固定 ABI 8 strict CPU key，接收一个
 
 Clip 与显示范围转换逐分量计算；OKLab 降色度、RGB 压缩、gamut mask 与 RGB 亮度映射读取该点的完整三颜色分量。源区域按输入网格取闭包，每个完整输出 tile 对应一个固定 task。auto/materialize 写入独立预分配 dense 输出，atomic_trailing_axes=0；forced view 静态拒绝。Mask 投影保留 batch/空间拓扑，rank-one 使用 keepdims。准备阶段检查完整输入/输出 schema、精确 read slots 与 scratch。算术状态位于已准入的固定 scratch；旁路、clip、mask 不需要算术 workspace。取消检查间隔至多 64 点、256 次输出写入，并进入昂贵的精确运算内部。Empty 保留静态校验且没有 payload task。
 
-Strict 实现使用精确有理公式及指定的阶段舍入。Float32 定向区间与矩阵候选只有在证明相同舍入位模式后才接受，否则回退精确运算。显示转换预编译精确仿射行。FMT-14B 保留固定 32/64 步 dyadic 搜索和已接受候选，不合并 RGB/XYZ/OKLab 阶段。不新增 accelerated key、近似 SIMD 契约或 GPU backend。[实现说明](../../built-in_ops/02-format-color/FMT-14-15_implementation.md)分别记录独立 oracle、公开工作流、算术耗时与 submit-through-join 耗时。
+Strict 实现使用精确有理公式及指定的阶段舍入。Float32 定向区间与矩阵候选只有在证明相同舍入位模式后才接受，否则回退精确运算。显示转换预编译精确仿射行。FMT-14B 保留固定 32/64 步 dyadic 搜索和已接受候选，不合并 RGB/XYZ/OKLab 阶段。不新增 accelerated key、近似 SIMD 契约或 GPU backend。
 
 ## 显式原生与配置化 view
 
@@ -89,4 +89,4 @@ FMT-12 A/B/C、FMT-13 A..F 和 FMT-18 A/B 提供十一个固定调用 ABI 8 CPU 
 
 每个 prepared kernel 拥有独立引擎、内存准入和 mutex；static operation state 中没有资源相关的隐式可变缓存。Empty/bypass-only 请求也执行完整资源构建验证。构建同步且不可取消，保留分配/工作量上限及首次失败锁存。像素执行每批至多 64 点，继续支持取消。现有准备阶段 ResourceAllocationScope 桥接将保留引擎计入执行预算；独立资源验证使用显式构建上限。内核及 ABI 冻结边界未改变。
 
-FMT-18B 构建独立源域 alarm pipeline，Gray 为 49、RGB 为 49³、CMYK 为 23⁴ 网格点，并在 score 有限的 unchecked 前提下按 score>0 输出精确 1，否则输出 +0；不通过显示报警色反推 mask。构建检查返回实际标签、路径、文件、插值与选中的 Look。操作键、构建身份、独立 oracle 和实测平台边界见[外部引擎实现与性能](../../built-in_ops/02-format-color/FMT-12-13-18_implementation.md)。
+FMT-18B 构建独立源域 alarm pipeline，Gray 为 49、RGB 为 49³、CMYK 为 23⁴ 网格点，并在 score 有限的 unchecked 前提下按 score>0 输出精确 1，否则输出 +0；不通过显示报警色反推 mask。构建检查返回实际标签、路径、文件、插值与选中的 Look。

@@ -10,47 +10,23 @@ clarification_status: current_active_member_coverage_complete
 
 # Color-model descriptions and conversion coverage
 
-This proposal fills the model-level gaps in the [format/color catalog](../representation.md).
-Its coverage direction is confirmed; it is not a completed member specification,
-new registry API. FMT-09..15 and FMT-18 have implemented active members,
-including external engines and explicit rendering families. Implementation
-status here refers to those enumerated members; the separately scoped future
-codec extensions are not implied. The separate NUM/CRV description migration
-is complete without adding numeric color-conversion members. See the
-[native mapping](../FMT-14-15_implementation.md) and
-[external-engine](../FMT-12-13-18_implementation.md) implementation records. The
-maintainer's same-size planar image and I/O codec boundary is recorded in
-[FMT codec boundary](FMT_codec_boundary.md).
+This document lists the color-model coverage of the [format/color catalog](../representation.md): which family covers each representation, the required description and the allowed compositions. Image/codec boundary: [FMT codec boundary](FMT_codec_boundary.md).
 
 ## Description and conversion responsibilities
 
-The catalog names RGB, gray, binary black/white, XYZ/xyY, CIELAB/CIELCh,
-OKLab/OKLCh, HSL/HSV, YCbCr, CMYK and ACES. Naming a model does not specify its
-conversion graph. NUM/CRV helpers now use TensorDescription logical tuples for
-nine ramp models; their sampled ports require a final color axis and their
-members define alpha arity. The generic codec also represents Gray, HSV and xyY,
-but that does not add corresponding numeric ramps or arbitrary source-to-target
-conversion. FMT-09/10/11 use the same description codec with actual tensor axes
-and explicit member implementations. The old ColorArray interface is removed.
+The catalog names RGB, gray, binary black/white, XYZ/xyY, CIELAB/CIELCh, OKLab/OKLCh, HSL/HSV, YCbCr, CMYK and ACES. Naming a model does not specify its conversion graph. NUM/CRV helpers use TensorDescription logical tuples for nine ramp models; their sampled ports require a final color axis and their members define alpha arity. The generic codec also represents Gray, HSV and xyY, but that does not add corresponding numeric ramps or arbitrary source-to-target conversion. FMT-09/10/11 use the same description codec with actual tensor axes.
 
 Complete coverage needs all three layers:
 
-1. A coherent description: components, units, reference, white, primaries,
-   transfer, encoding and applicable profile/resource identity.
-2. Explicit forward and reverse primitives where mathematically meaningful;
-   parameterized reconstruction where information has been lost.
-3. Documented compositions connecting the models, including every transfer,
-   white-adaptation, range and profile stage. No automatic routing or implicit
-   rendering is added by this proposal.
+1. A coherent description: components, units, reference, white, primaries, transfer, encoding and applicable profile/resource identity.
+2. Explicit forward and reverse primitives where mathematically meaningful; parameterized reconstruction where information has been lost.
+3. Documented compositions connecting the models, including every transfer, white-adaptation, range and profile stage. No automatic routing or implicit rendering is added by this proposal.
 
-The word "handling" does not require every filter, blend or adjustment to accept
-all models directly. Such an operator must declare its supported working model
-and interpretation; callers explicitly convert to and from that model. Raw
-component arithmetic remains possible under the shared metadata policy.
+The word "handling" does not require every filter, blend or adjustment to accept all models directly. Such an operator must declare its supported working model and interpretation; callers explicitly convert to and from that model. Raw component arithmetic remains possible under the shared metadata policy.
 
-## Confirmed coverage and remaining family boundaries
+## Coverage by representation
 
-| Representation | Proposed basis/pairs and allocation | Required description and remaining choices |
+| Representation | Basis/pairs and allocation | Required description and remaining choices |
 | --- | --- | --- |
 | RGB and RGB+alpha | FMT-09 linear/encoded transfer pairs; FMT-10 linear RGB <-> XYZ and explicitly selected RGB basis/white transforms. FMT-05 edits alpha separately. | Primaries, white, transfer, scene/display reference, units and numeric encoding. Named RGB presets need a fixed list/version; RGB alone is incomplete. Every admitted preset needs an explicit route to/from the hub. |
 | Gray | FMT-11 linear RGB or XYZ -> relative luminance Gray; Gray -> neutral XYZ/RGB under an explicit white. Q/R admit linear Y, encoded luma, normalized CIELAB l and OKLab L; paths through RGB remain explicit. FMT-09 owns applicable scalar transfer. | Distinguish linear Y, encoded Y', normalized l=L*/100, OKLab L and arbitrary scalar channels; metadata retains white, scale and reference. Neutral reconstruction cannot recover discarded chroma. Component extraction/relabeling in FMT-01/08 is not colorimetric gray conversion. |
@@ -66,73 +42,30 @@ component arithmetic remains possible under the shared metadata policy.
 | ACEScc and ACEScct | Named FMT-09 encoding/decoding members on the prescribed RGB basis, composed with FMT-10 as needed. | Pin formulas/version, piecewise domains and noninvertible branches. Supporting an AP1 primary preset alone does not support these encodings. |
 | ACES input/output rendering and transport | Configured FMT-13 processors or separately specified FMT-15 rendering workflows; FMT-06 plus I/O codec for explicitly admitted transport code/packing recipes such as ACESproxy. | A complete ACES workflow requires its version, input/output transforms and target conditions. An I/O file decoder is not automatically an ACES color input transform. Named encodings do not imply adoption of every ACES transform or transport format. |
 
-xyY was already identified as a catalog gap and remains in this proposal even
-though it is not repeated in the maintainer's latest model list. Its zero-Y,
-zero-denominator and inverse policies are fixed in FMT-11O/P.
+xyY zero-Y, zero-denominator and inverse policies are fixed in FMT-11O/P.
 
 ## Connecting the model graph
 
-A proposed explicit core is:
+The explicit core is:
 
 - encoded RGB <-> linear RGB <-> XYZ <-> CIELAB <-> CIELCh(ab);
 - reference XYZ <-> OKLab <-> OKLCh;
 - described RGB <-> HSL / HSV;
 - described RGB' <-> full-resolution YCbCr;
-- linear RGB/XYZ -> defined Gray -> Black/White, with explicit neutral/two-level
-  reconstruction in the reverse direction;
+- linear RGB/XYZ -> defined Gray -> Black/White, with explicit neutral/two-level reconstruction in the reverse direction;
 - CMYK <-> profile-directed PCS/RGB paths;
 - ACES named RGB bases and transfers reuse the corresponding RGB edges.
 
-For example, HSL -> CIELCh is a declared HSL-to-RGB stage, the RGB transfer
-inverse, an RGB-to-XYZ transform, any explicitly selected white adaptation,
-XYZ-to-Lab and Lab-to-LCh. CMYK -> OKLCh first requires a profile transform to an
-explicitly described intermediate. No all-pairs family, implicit choice of
-intermediate space, hidden gamut compression or unified automatic converter is
-required to provide coverage.
+For example, HSL -> CIELCh is a declared HSL-to-RGB stage, the RGB transfer inverse, an RGB-to-XYZ transform, any explicitly selected white adaptation, XYZ-to-Lab and Lab-to-LCh. CMYK -> OKLCh first requires a profile transform to an explicitly described intermediate. No all-pairs family, implicit choice of intermediate space, hidden gamut compression or unified automatic converter is required to provide coverage.
 
-Every edge must say whether it is a numerical inverse, a paired conversion with
-rounding loss, a many-to-one mapping, or a reconstruction requiring extra
-parameters. Unavailable inverse information must not be fabricated. Request
-support follows the actual component dependence; alpha remains straight and
-same-tensor, and unrelated alpha/AOV-only requests bypass color arithmetic.
+Every edge must say whether it is a numerical inverse, a paired conversion with rounding loss, a many-to-one mapping, or a reconstruction requiring extra parameters. Unavailable inverse information must not be fabricated. Request support follows the actual component dependence; alpha remains straight and same-tensor, and unrelated alpha/AOV-only requests bypass color arithmetic.
 
-## Runtime acceptance and separately scoped extensions
+## Acceptance and extensions
 
-- Native member allocation and Gray/HSB vocabulary are confirmed in
-  [FMT-11](FMT-11_model_conversion_contract.md). [FMT-12](FMT-12_icc_transform_contract.md) now fixes ICC v2/v4 admission,
-  Little CMS 2.19.1 CPU, ordinary/DeviceLink/chain members and optimized/reference
-  execution; concrete user rendering/transport resources remain explicit inputs, not guessed defaults. The
-  [relative-coordinate scale](FMT_relative_coordinate_scale.md) revision also
-  is implemented by NUM/CRV tuple consumers and FMT; see the
-  [migration record](../../01-numeric/NUM-CRV_color_migration.md).
-- [FMT-09 transfer](FMT-09_transfer_contract.md) is now clarified with A/B member
-  specs and ten named curves; [FMT-10 basis/adaptation](FMT-10_rgb_basis_contract.md)
-  is implemented with native A/B/C and composite D. The transfer members
-  are also implemented.
-  [FMT-11](FMT-11_model_conversion_contract.md) now specifies A-T and FMT-12
-  specifies the ICC engine contract. [FMT-13](FMT-13_ocio_transform_contract.md)
-  specifies OCIO v2.5.2 CPU A-F, with fixed resources/properties and an F32 engine
-  boundary. [FMT-14](FMT-14_gamut_mapping_contract.md) specifies native gamut mapping,
-  [FMT-15](FMT-15_tone_view_contract.md) tone/units and explicit view composition,
-  and [FMT-18](FMT-18_softproof_contract.md) ICC proofing/alarms. BT.2020 CL remains
-  a future member. All enumerated active conversion members are implemented;
-  their family documents record exact supported behavior and validation scope.
-- For every model, record forward/reverse caller premises, units/ranges,
-  singular cases, exact rounding or external-engine tolerance, explicit downstream
-  descriptions, complete retained tile support, cancellation/resources and actual
-  operational failure behavior.
-- Cover each admitted model with independently checked reference coordinates,
-  explicit composition workflows and applicable round-trip tests. Lossy Gray,
-  binary, gamut/tone and profile paths require loss/reconstruction assertions,
-  not bitwise round-trip promises. Swizzling or changing metadata is not a
-  conversion oracle.
+- Native member allocation and Gray/HSB vocabulary are in [FMT-11](FMT-11_model_conversion_contract.md). [FMT-12](FMT-12_icc_transform_contract.md) covers ICC v2/v4 transforms, [FMT-13](FMT-13_ocio_transform_contract.md) OCIO transforms, [FMT-14](FMT-14_gamut_mapping_contract.md) gamut mapping, [FMT-15](FMT-15_tone_view_contract.md) tone/units and explicit view composition, and [FMT-18](FMT-18_softproof_contract.md) ICC proofing/alarms. [FMT-09](FMT-09_transfer_contract.md) and [FMT-10](FMT-10_rgb_basis_contract.md) cover transfer and basis/adaptation. BT.2020 CL remains a future member.
+- For every model, forward/reverse caller premises, units/ranges, singular cases, exact rounding or external-engine tolerance, explicit downstream descriptions and component-dependent support are recorded in the member contracts.
+- Each admitted model is checked with independent reference coordinates, explicit composition workflows and applicable round-trip tests. Lossy Gray, binary, gamut/tone and profile paths require loss/reconstruction assertions, not bitwise round-trip promises. Swizzling or changing metadata is not a conversion oracle.
 
 ## Primary references and limits
 
-[W3C CSS Color 4 conversion material](https://www.w3.org/TR/css-color-4/#color-conversion-code)
-provides reference material for RGB, XYZ, Lab/LCh and OKLab/OKLCh conversions.
-Its CSS syntax, clipping, default white and rendering choices do not become
-Photospider defaults. [ACES encoding overview](https://docs.acescentral.com/encodings/overview/)
-distinguishes linear AP0/AP1 encodings, ACEScc/ACEScct transfer characteristics
-and transport encoding. These references identify definitions to pin during
-member clarification; the individual member contracts fix their adopted definitions and limits.
+[W3C CSS Color 4 conversion material](https://www.w3.org/TR/css-color-4/#color-conversion-code) provides reference material for RGB, XYZ, Lab/LCh and OKLab/OKLCh conversions. Its CSS syntax, clipping, default white and rendering choices do not become Photospider defaults. [ACES encoding overview](https://docs.acescentral.com/encodings/overview/) distinguishes linear AP0/AP1 encodings, ACEScc/ACEScct transfer characteristics and transport encoding. These references identify definitions to pin during member clarification; the individual member contracts fix their adopted definitions and limits.

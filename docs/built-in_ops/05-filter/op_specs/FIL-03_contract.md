@@ -17,7 +17,7 @@ research_sources:
 
 Box sum and box mean are separate operators; neither is a resize operation.
 
-Inherit [FILTER common contract](FILTER_common_contract.md), [NUM](../../01-numeric/op_specs/NUM_common_contract.md), and [FMT](../../02-format-color/op_specs/FMT_common_contract.md). All members in this family are implemented and registered as CPU operations through fixed invocation ABI 8 in `plugins/ops/05-filter/`. Specification acceptance remains Proposed and document maturity remains D1.
+Inherits the [FILTER common contract](FILTER_common_contract.md), [NUM](../../01-numeric/op_specs/NUM_common_contract.md) and [FMT](../../02-format-color/op_specs/FMT_common_contract.md).
 
 ## Members
 
@@ -26,29 +26,14 @@ Inherit [FILTER common contract](FILTER_common_contract.md), [NUM](../../01-nume
 | FIL-03A | [Rectangular sum](FIL-03A_box_sum.md) | primitive | E |
 | FIL-03B | [Rectangular mean](FIL-03B_box_mean.md) | primitive | E |
 
-Member suffixes identify distinct mathematical or interface objects, not interchangeable quality levels. Primitives may propose separately named strict and accelerated keys; authoring helpers only compose explicit stages; external engines require pinned resource dependencies.
+## Numeric semantics
 
-## Shared mathematics and profiles
+Numeric classes E, B and S, and NaN/Inf, signed-zero, overflow and underflow behavior, follow the [numeric reference](FILTER_numeric_reference.md) and the corresponding NUM operations. Positive-weight normalization, signed kernels, local regression and global inverse problems have distinct alpha semantics; see [color composition](FILTER_color_composition.md). Spatial extension, anchors and origins follow the [boundary contract](FILTER_boundary_contract.md); structured outputs follow the [collections contract](FILTER_collections_contract.md). Shapes depend only on descriptors.
 
-Each member file defines its complete formula. Members do not share implicit preprocessing. A parameter name is reusable only when its units, boundary, normalization, and rounding stages agree.
+## Behavior
 
-## Execution and numeric obligations
+Each member's declared support is normative. A halo does not make an arbitrarily cropped ROI an independent image boundary, and a whole-image dependency stays whole-image. Staged rounding, global connectivity, transforms and iterative state follow each member's definition.
 
-E means exact expression followed by one final RN_t; B means explicitly generated, fixed coefficients; S means declared intermediate rounding stages. See [numeric reference](FILTER_numeric_reference.md). FILTER has no blanket finite-only rule. Inherit each corresponding NUM operation's NaN/Inf, signed-zero, payload, overflow, rounding, and strict/accelerated rules. Ordinary floating-point overflow does not by itself become operation failure. Retain member-specific NUM finite-domain preconditions, exact discrete branches, copy behavior, and gradual underflow requirements.
-
-Positive-weight normalization, signed kernels, local regression, and global inverse problems have distinct alpha semantics; do not apply one generic alpha filter. See [color composition](FILTER_color_composition.md). Spatial extension, anchor, and origin follow [boundary contract](FILTER_boundary_contract.md); structured outputs follow [collections contract](FILTER_collections_contract.md). Shapes derive from descriptors; each member defines mathematical support and fixed compiled reads.
-
-## Demand and acceptance
-
-A declared support is normative. A halo does not make an arbitrarily cropped ROI an independent image boundary; paging does not remove a whole-image dependency. Preserve staged rounding, global connectivity, transforms, and iterative state as specified. Only selected computation and required algorithmic control contribute payload reads; no payload-validation phase is introduced.
-
-All members use the [acceptance protocol](FILTER_oracle_protocol.md). Mathematical reference self-checks are described in the [oracle README](../../../../oracle/ops/filter/README.md); they do not establish Photospider runtime implementation. D1/D2 indicate document maturity, not acceptance.
-
-## Sources and review
-
-Project choices for boundaries, ties, numeric domains, explicit parameters, public schemas, and proposed keys are defined by the member specifications. Algorithm sources do not define project defaults or grant third-party license.
-
-
-## Sources
+## References
 
 [OpenCV Image Filtering](../research-sources.md#s01).

@@ -17,44 +17,14 @@ clarification_status: complete
 
 # NUM-04U: tanpi_rational
 
-Numeric profile: strict retains the exact reference defined below. Floating
-arithmetic in accelerated profiles follows the shared
-[final FP32 four-ULP contract](NUM_accelerated_contract.md), including its
-range/fallback rules. Discrete results, copies, selected endpoints and special
-values remain exact.
+Numeric profile: strict is the exact reference defined below. Floating arithmetic in accelerated profiles follows the shared [final FP32 four-ULP contract](NUM_accelerated_contract.md). Discrete results, copies, selected endpoints and special values are exact.
 
-Compute tan(pi*p/q) with exact pi and the exact Int64 fraction p/q. Inherit the
-[rational pi contract](NUM-04_rational_pi_contract.md) in full: ordered numerator/
-denominator inputs, identical positive rank-1..8 shapes, q>0, unreduced fraction
-support, floating output dtype default Float64, fixed tile demand, integer range-safe reduction, operational errors, resources, numerical refinement and ownership.
-Output values preserves shape with no attached domain description. No implicit floating division
-or conversion of p/q defines this operation.
+Computes tan(pi*p/q) with exact pi and the exact Int64 fraction p/q. Inherits the [rational pi contract](NUM-04_rational_pi_contract.md) in full: ordered numerator/denominator inputs, identical positive rank-1..8 shapes, q>0, unreduced fractions, floating output dtype (default Float64), and the exact-reduction rules. The output `values` preserves shape and carries no domain description. No floating division or conversion of p/q defines this operation. Keys: `numeric.tanpi_rational_strict`, `numeric.tanpi_rational_accelerated_apple_silicon`, `numeric.tanpi_rational_accelerated_x86_64`.
 
-## Numeric behavior and acceptance
+## Mathematics
 
-Integer zeros use numerator sign; exact half-integer poles return canonical NaN successfully. Quarter angles are exactly +/-1.
+Integer zeros use the numerator's sign; exact half-integer poles return the canonical NaN successfully. Quarter angles are exactly +-1. Strict correctly rounds the entire mathematical function directly to the output dtype. Accelerated keeps the final four-ULP bound and the exact special-case rules of the shared contract. Reduced denominators 1, 2, 3, 4 and 6 use correctly rounded common-angle values in all three profiles. No NaN payload propagation applies to the two integer ports. Positive q is an unchecked caller precondition, including for a zero numerator.
 
-Strict correctly rounds the entire mathematical function directly to output dtype.
-Accelerated inherits the final four-ULP bound and exact special-case rules from
-the shared contract. Reduced denominators 1,2,3,4,6 use correctly rounded common-angle paths in all three profiles.
-No input NaN/payload propagation applies to the two integer ports. Positive q is an unchecked caller precondition, including for a zero numerator. Unsupported platforms and
-runtime resource/upstream/cancellation failures retain the shared Status contract.
+## Acceptance
 
-Conceptual public fixture: p=[0,1,1,3,1], q=[1,4,2,4,3] -> [+0,1,canonical_NaN,-1,RN_dtype(sqrt(3))].
-The RN references are exact for strict and the explicitly exact common-angle
-paths; other nonzero accelerated outputs use the stated allowance. Compare
-unreduced equivalent fractions and the shared large-integer parity/pole examples.
-Use independent exact reduction and directed function/algebraic-root rounding,
-not a floating quotient fed into the old tanpi helper.
-
-Provide a real public WorkflowDocument run with numerator/denominator bindings,
-static dtype and named values through the maintained public workflow. Verify actual
-fixed sparse reads, positive denominators, new bindings, budgets,
-cancellation, fallback behavior and result lifetime. The validation boundary is
-recorded below; local timing is recorded in the implementation notes. The existing floating tanpi specification retains its own input domain.
-
-## Maintained implementation and validation
-
-This operation is registered in `plugins/ops/01-numeric/numeric_unary.cpp` and
-exposed through `photospider/ops/numeric/unary.hpp`. It uses one fixed CPU invocation per selected output tile, validated input views and preallocated output/scratch. Its numerical path follows
-[the shared implementation notes](../math-implementation.md).
+Fixture: p=[0,1,1,3,1], q=[1,4,2,4,3] gives [+0,1,canonical_NaN,-1,RN_dtype(sqrt(3))]. The RN references are exact for strict and for the exact common-angle cases; other nonzero accelerated outputs use the four-ULP allowance. Compare unreduced equivalent fractions and the shared large-integer parity/pole examples against exact reduction with directed function or algebraic-root rounding, not a floating quotient fed into the floating tanpi operation.

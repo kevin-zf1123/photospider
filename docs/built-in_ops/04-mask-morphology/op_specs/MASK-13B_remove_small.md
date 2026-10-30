@@ -16,61 +16,26 @@ registered_operation_keys:
 
 # MASK-13B: Remove small foreground components
 
-Inherit the complete [family contract](MASK-13_cleanup_contract.md) and
-[MASK-common](MASK_common_contract.md). This member is registered as
-`mask.remove_small_strict` in the bundled strict CPU set through fixed invocation ABI 8.
-The Proposed specification status is separate from its implementation status.
+Inherits the [family contract](MASK-13_cleanup_contract.md) and [MASK-common](MASK_common_contract.md).
 
-## Ports, parameters and output inference
+## Interface
+
+Registered operation key: `mask.remove_small_strict`.
 
 input: Binary[H,W] -> values: same dtype/shape
 
-Required static parameters: foreground_connectivity 4|8; maximum_removed_area Int64>=0. Values and controls use the stated
-port order. Infer ordinary output dimensions from descriptors/statics only;
-Static Tensor capacities, payload counts and source-association rules, where relevant, are those of the family.
-No hidden default, conversion, color/alpha inference or optional port is added.
-The optional `max_work` Int64 operational guard follows MASK-common.
+Static parameters: foreground_connectivity 4|8; maximum_removed_area Int64>=0. Optional `max_work` as in MASK-common.
 
-## Mathematics and exact request behavior
+## Mathematics
 
 Remove components with area<=maximum_removed_area, using exact pixel counts; retain larger components.
 
-complete-input Binary input. Empty Q adds no runtime payload work; static schema checks still apply.
-The family defines mathematical Data/Control support, border extension and
-rounding stages. Lower the selected complete output tiles to fixed input-tile
-reads, using a finite conservative superset for runtime-dependent addressing.
-There is no payload Validation read set or runtime dependency discovery.
+complete-input Binary input.
 
-## Implementation, resource and failure obligations
-
-Implemented in [`cleanup.cpp`](../../../../plugins/ops/04-mask-morphology/cleanup.cpp).
-The family records the algorithm, admitted scratch and complete publication
-contract. Strict CPU is registered; no implicit GPU/third-party fallback is
-registered. Exact choices/copies stay exact; arithmetic uses the inherited
-rounding boundary and unchecked numerical premises. Account for output, scratch,
-exact state, retained source owners and all simultaneous intermediates. Poll
-inside long loops/refinement. Selected outputs of one call share its publication
-outcome; failure exposes no partial call Result. Already retired call exports
-remain valid. Preserve host upstream/cancellation/resource status and immutable
-owner lifetime.
-
-## Independent acceptance and conceptual workflow
+## Acceptance
 
 a two-pixel component survives maximum_removed_area=1 and disappears at2; equality is removed. A zero threshold is an identity on valid Binary input.
 
-Independent reference entry: `remove_small` in
-[`mask13/reference.py`](../../../../oracle/ops/mask_morphology/mask13/reference.py).
-Its small-image oracle and fixtures are not a production implementation and
-do not exercise kernel registration, resource accounting or compiled tile reads.
-Run the [suite commands](../../../../oracle/ops/mask_morphology/README.md),
-then add the relevant common fixed-tile support, valid special-value, static
-structural-parameter, dtype, correctly paired association, cancellation and
-owner-lifetime checks before implementation acceptance. Invalid payload or
-numerical-premise fixtures diagnose oracle requests only; they do not require
-production rejection.
+## References
 
-Conceptual DAG: explicit input preparation -> this member -> an explicit
-mask/measurement/image consumer appropriate to the listed output. Use the registered key in a `WorkflowDocument`, compile with `Compiler`,
-then prepare and submit through `ExecutionContext`. Read the declared output
-port from the retained Result after `RunHandle::join`. Sources and compatibility
-limits are recorded in the family and [research notes](../research-sources.md).
+Sources and compatibility limits are in the family contract and the [research notes](../research-sources.md).

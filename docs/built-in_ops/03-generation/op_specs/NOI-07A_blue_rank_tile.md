@@ -16,69 +16,28 @@ operation_keys:
 
 # NOI-07A: blue rank tile
 
-Inherit [NOI-07](NOI-07_blue_noise_contract.md), [GEN common](GEN_common_contract.md),
-and the applicable [random](NOI_random_contract.md) and
-[geometry](PTH_geometry_contract.md) contracts. A key includes algorithm version and profile; within one version/profile,
-output bits and discrete decisions are fixed.
+Inherits [NOI-07](NOI-07_blue_noise_contract.md) and [GEN common](GEN_common_contract.md).
 
-## Runtime implementation
+## Interface
 
-The registered CPU key `noise.rank_tile_v1_strict` implements generic resource
-lookup. Required parameters are height, width, `resource_sha256` (64 lowercase hex
-digits) and `resource_byte_length` (=8N). `resource_encoding` defaults to and
-only accepts `little_endian_int64`; shape comes from the rank input schema.
-Origins and offsets default to zero; dtype defaults to float64.
-`ps::generation::rank_resource_parameters(ResourceIdentity)` authors the descriptor.
-The caller binds it to the immutable input Result; payload identity and permutation
-are not scanned. Widened integer modulo and quotient/remainder rounding implement
-exact addressing and midpoint mapping. Reads cover only the demanded periodic support.
-`max_work` is an operational budget. No named blue-quality or GPU key is registered;
-no approved blue asset is bundled.
-
-## Interface and representation
+Operation keys: `noise.rank_tile_v1_strict`.
 
 rank[Th,Tw] Int64 and immutable resource descriptor; values[H,W].
 
-## Parameters and domain
+### Parameters and domain
 
 canvas,dtype; offset_x/y Int64 default0; N=Th*Tw<=2^40; no implicit random shift.
 
-## Mathematical specialization
+Required parameters: Int64 `height`, `width`; String `resource_sha256` (64 lowercase hex digits); Int64 `resource_byte_length` (equal to 8N). String `resource_encoding` defaults to and only accepts `little_endian_int64`. The tile shape comes from the rank input schema. Origins and offsets default to 0; `dtype` defaults to `float64`. The descriptor is authored by the public SDK helper `Result<Parameters> ps::generation::rank_resource_parameters(const ResourceIdentity& identity)` (declared in `photospider/ops/generation.hpp`) and bound by the caller to the immutable input Result. The payload permutation and content identity are not scanned.
 
-The rank payload is a permutation 0..N-1 as an unchecked caller premise. Euclidean-periodic global addressing yields r; return
-RN_T((r+1/2)/N), explicitly nextDown(1) if rounded1 and nextUp(0) if rounded0. This rank
-mapping is separate from periodic gradient coordinates. Generic lookup requires
-structure/content identity; named blue variants additionally require approved
-provenance/license/quality.
+## Mathematics
 
-## Dependencies, resources and failures
+The rank payload is a permutation 0..N-1 as an unchecked caller premise. Euclidean-periodic global addressing yields r; return RN_T((r+1/2)/N), explicitly nextDown(1) if rounded1 and nextUp(0) if rounded0. This rank mapping is separate from periodic gradient coordinates. Generic lookup requires structure/content identity; named blue variants additionally require approved provenance/license/quality.
 
-Execution support: **Regional**. Lower each selected complete output tile to
-fixed tasks with explicit query/sample and control-member tile reads. Close each
-read on its source grid; payload validity over the consumed support is a caller
-premise. Empty output selection performs static preparation without payload tasks.
-Shared computation uses explicit task dependencies and private intermediate
-Results under GEN-common.
+## Behavior
 
-Regional lookup without a permutation/content scan, O(area(Q)); charge immutable
-snapshots.
+Support class: Regional. Only the demanded periodic support of the rank tensor contributes. The permutation and content identity are unchecked caller premises.
 
-All output, scratch, indices, algorithmic work and retained owners are accounted. Poll
-cancellation in bounded loops. Preserve static structural failures and actual
-resource, cancellation, backend and upstream statuses. Member-specific no-solution,
-refinement or quality failures apply to valid inputs and the explicitly declared
-algorithm; numerical-premise violations have no prescribed runtime diagnostic.
-Never replace budget/cancellation failure with a lower-quality successful prefix. Views,
-lifetime and actual returned coverage inherit GEN-common.
+## Acceptance
 
-## Independent fixtures and acceptance
-
-Permutation, negative offsets, valid immutable content binding, midpoint grid and no blue-quality
-inference from synthetic fixtures.
-
-Check selected-tile/full-output equivalence, source-grid read closure, legal
-strides/offsets, separate/joint outputs, version/profile identity, low budgets, cancellation,
-associations and retained owners as applicable. The [oracle
-coverage](../oracle-coverage.md) describes the available finite reference subset; it is
-not runtime completion. No unverified GPU or third-party bit
-identity is implied by these requirements.
+Permutation, negative offsets, valid immutable content binding, midpoint grid and no blue-quality inference from synthetic fixtures.

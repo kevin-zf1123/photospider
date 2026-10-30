@@ -1,10 +1,10 @@
 # 内建图像算子需求与研究规格
 
-本文是内建算子规格与主题页的中文导航。当前已实现接口以公开头文件、[kernel 架构指南](../kernel-architecture/README.md)及[当前实现状态](00-foundation/current-state.md)为准；本目录中标为 Proposed 的内容是目标需求，不代表已注册能力。当前 package、OperationTraits、Result C ABI 和产物格式的独立版本见[版本契约](../development/Compiler-Version-Contract.md)。旧研究快照中的版本和实现状态仅描述其记录时点。
+本文是内建算子规格与主题页的中文导航。各类别主题页是算子入口目录，`op_specs/` 下的英文规格只定义数值与算法、输入输出和行为；实现位置、后端、资源与性能不在本目录记录，内核执行与资源规则见 [kernel 架构指南](../kernel-architecture/README.md)。package、OperationTraits、Result C ABI 和产物格式的版本见[版本契约](../development/Compiler-Version-Contract.md)。
 
 本目录面向 Photospider 算子实现者、workflow 作者和使用这些能力的图像应用。目标是覆盖 Photoshop、Lightroom、Camera Raw、DaVinci Resolve、Clip Studio Paint、Nuke、After Effects 中主要的图像处理与分析能力，并拆解为可组合、可验证的计算接口。
 
-本目录同时记录**已实现子集**与 **Proposed 扩展需求**。分类表保留稳定需求 ID 和研究参数，已实现状态由各页的实现入口明确标注；同名提议的扩展参数不自动成为当前接口。商业软件逐像素兼容仍须独立证据。既有英文 ADR 与 `docs/kernel-architecture/` 继续分别记录已接受决策与当前实现。
+规格状态（Proposed/Accepted）、成熟度（D1/D2/D3）与实现状态分别记录在每份规格的 frontmatter，主题页的逐成员入口列出注册 key 与实现状态。商业软件逐像素兼容须有独立证据。
 
 默认采用明确的数学与颜色科学语义。商业软件兼容模式只有在版本、工作空间、位深、alpha 和结果证据充分时建立。首期集中于确定性的静态图像计算；时域、跟踪、机器学习、深度合成纳入依赖规划。
 
@@ -12,14 +12,13 @@
 
 | 目录 / 文档 | 内容 |
 | --- | --- |
-| [文档组织与规格模板](00-foundation/spec-template.md) | 类别目录、英文契约、实现说明、示例的职责及每份规格的验收内容 |
+| [文档组织与规格模板](00-foundation/spec-template.md) | 主题页与英文规格的职责、规格包含的内容与验收模板 |
 | [编译阶段与产物 API](../kernel-architecture/Compiler-and-Execution.md#compiler-artifacts) | CFG/SSA、静态 Plan、`.psir`/`.psxp` 保存与加载及错误处理 |
 | [独立算子 oracle](../../oracle/ops/README.md) | 数值、生成、蒙版和滤镜参考程序及复现入口 |
 | [综合研究报告](00-foundation/research-report.md) | 主要结论、设计取舍、专项核验与实施建议 |
-| [候选依赖](00-foundation/dependencies.md) | 第三方库的职责、版本、许可标识和适配要求 |
-| [当前实现与差距](00-foundation/current-state.md) | ops 合并依据、默认节点、显式 factory 与剩余限制 |
+| [候选依赖](00-foundation/dependencies.md) | 第三方库的职责、版本、许可标识和适配边界 |
 | [公共数据与执行约定](00-foundation/contracts.md) | 数组、图像、颜色、alpha、单位、Region、确定性、错误 |
-| [数值基础](01-numeric/core.md) | 表达式、数组算术、统计、矩阵和工作流连接基础 |
+| [数值基础](01-numeric/core.md) | 表达式、序列、数组算术、比较、布局、归约、排序、扫描与矩阵 |
 | [曲线与 LUT 生成](01-numeric/curves.md) | 控制点、插值、采样、1D 与 3D LUT 的差别 |
 | [格式与颜色管理](02-format-color/representation.md) | 通道、alpha、存储、模型、ICC/OCIO/HDR |
 | [生成器](03-generation/generators.md) | 常量、坐标、渐变、噪声与测试图 |
@@ -37,7 +36,7 @@
 | [RAW 与摄影流程](11-raw-photo/pipeline.md) | 传感器校正、去马赛克、HDR/堆栈/全景 |
 | [时域、模型与特殊数据](12-temporal-ml/requirements.md) | 帧序列、光流、跟踪、推理、deep/AOV |
 | [软件覆盖矩阵](13-coverage/software-matrix.md) | 七款产品的功能族映射与证据范围 |
-| [执行路线](14-roadmap/implementation.md) | 前置契约、可执行阶段与验收关口 |
+| [待决范围](14-roadmap/implementation.md) | 仍需专用决策才能定义的算法范围 |
 | [工作流验收](14-roadmap/workflows.md) | 可检查的端到端使用链路 |
 | [来源与证据边界](15-references/sources.md) | 一手来源索引、私有材料与待验证问题 |
 
@@ -47,10 +46,10 @@
 2. 颜色模型、RGB 原色/白点、传递函数、场景/显示参照、存储类型、数值编码范围和 alpha 关联方式分别定义。一个“格式转换”菜单应组合多个基础算子。
 3. 滤镜的单通道数学核心可以复用到多通道；颜色图像包装层负责线性化、alpha 和颜色空间语义。有符号导数与复数频谱需要通用数据表示。
 4. 菜单功能可能是一个基础算子、一个复合 workflow、交互工具，或依赖模型/时域的数据系统。目录中的功能覆盖不能换算为相同数量的独立 C++ 算子。
-5. 已注册功能以当前实现页和 registry 为准；05-filter 的 44 族是拟议目标，旧内建滤镜已退役。
+5. 已注册 key 以各主题页的逐成员入口为准。
 
 ## 规格完整程度
 
-`D1` 表示给出可实现的数学核心、主要参数与验收；`D2` 表示功能族与算法选择已界定，落地前仍须补专用接口或数据表示；`D3` 表示覆盖与依赖规划。D1 也不等于当前 ABI 已能承载，前置条件见每篇和公共契约。未列入已实现入口的名称仍为提议名；默认 registry key 与需显式注册的 factory key 分别列于现状页。
+`D1` 表示给出可实现的数学核心、主要参数与验收；`D2` 表示功能族与算法选择已界定，仍须补专用接口或数据表示；`D3` 表示覆盖与依赖规划。D1 也不等于当前 ABI 已能承载，前置条件见每篇和公共契约。
 
-文档中的“建议默认值”属于研究设计。调用者须显式提交实现契约中的必填参数；仅声明为 optional 的参数使用节点规定的默认值。05-filter 的拟议参数尚不能用于当前 registry。
+文档中的“建议默认值”属于研究设计。调用者须显式提交规格中的必填参数；仅声明为 optional 的参数使用节点规定的默认值。

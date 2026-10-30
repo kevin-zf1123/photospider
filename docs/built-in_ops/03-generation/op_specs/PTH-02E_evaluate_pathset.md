@@ -12,58 +12,38 @@ clarification_status: resolved
 
 # PTH-02E: evaluate pathset
 
-Inherit [PTH-02](PTH-02_evaluation_contract.md), [GEN common](GEN_common_contract.md),
-and the applicable [random](NOI_random_contract.md) and
-[geometry](PTH_geometry_contract.md) contracts. A key includes algorithm version and profile; within one version/profile,
-output bits and discrete decisions are fixed.
+Inherits [PTH-02](PTH-02_evaluation_contract.md) and [GEN common](GEN_common_contract.md).
 
-## Runtime implementation
-
-The public `ps::generation::evaluate_pathset` helper in
-`photospider/ops/generation.hpp` implements this composition.
-
-## Interface and representation
+## Interface
 
 PathSet,segment_indices[N],t[N]; four evaluation outputs.
 
-## Parameters and domain
+### Parameters and domain
 
-Supported authorities/degrees inherit PTH-02A-D; Core IDs are verb rows (M invalid,Z
-closing edge), primitive IDs are reference rows.
+Supported authorities/degrees inherit PTH-02A-D; Core IDs are verb rows (M invalid,Z closing edge), primitive IDs are reference rows.
 
-## Mathematical specialization
+Public SDK helper, declared in `photospider/ops/generation.hpp`:
 
-Dispatch by the checked static schema, preserving original segment IDs and explicit rounding.
-Z runs from current point to M. A Primitive Close reference evaluates the line between its specified mathematical endpoints: P(t)=(1-t)*end+t*start, derivative=start-end. Evaluate those endpoints under their primitive mathematics and apply only the declared final rounding; no intermediate Float64 endpoint is invented. No implicit global-parameter segment selection.
+```cpp
+struct PathEvaluation final {
+  WorkflowNodeOutput position, derivative, tangent, tangent_valid;
+};
+Result<PathEvaluation> ps::generation::evaluate_pathset(
+    WorkflowDocument* document, const SchemaTemplate& schema,
+    WorkflowInput path, WorkflowInput indices, WorkflowInput t,
+    Parameters parameters = {}, Profile profile = Profile::Strict);
+```
 
-## Dependencies, resources and failures
+The helper dispatches statically on `schema` (`photospider.ops.path_core` or `photospider.ops.path_primitives`) to the matching PTH-02 member and returns its four outputs. Core segment IDs are evaluable verb rows; primitive IDs are reference rows. No global-parameter segment selection or intermediate endpoint rounding is introduced.
 
-Execution support: **Regional**. Lower each selected complete output tile to
-fixed tasks with explicit query/sample and control-member tile reads. Close each
-read on its source grid; payload validity over the consumed support is a caller
-premise. Empty output selection performs static preparation without payload tasks.
-Shared computation uses explicit task dependencies and private intermediate
-Results under GEN-common.
+## Mathematics
 
-Regional queries with valid path associations assumed; requested position alone
-need not compute tangent.
+Dispatch by the checked static schema, preserving original segment IDs and explicit rounding. Z runs from current point to M. A Primitive Close reference evaluates the line between its specified mathematical endpoints: P(t)=(1-t)*end+t*start, derivative=start-end. Evaluate those endpoints under their primitive mathematics and apply only the declared final rounding; no intermediate Float64 endpoint is invented. No implicit global-parameter segment selection.
 
-All output, scratch, indices, algorithmic work and retained owners are accounted. Poll
-cancellation in bounded loops. Preserve static structural failures and actual
-resource, cancellation, backend and upstream statuses. Member-specific no-solution,
-refinement or quality failures apply to valid inputs and the explicitly declared
-algorithm; numerical-premise violations have no prescribed runtime diagnostic.
-Never replace budget/cancellation failure with a lower-quality successful prefix. Views,
-lifetime and actual returned coverage inherit GEN-common.
+## Behavior
 
-## Independent fixtures and acceptance
+Support class: Regional. A requested position alone need not compute the tangent.
 
-Mixed L/Q/C/Z, queries selecting evaluable verb rows, separate/joint outputs, empty path with query
-NoSolution.
+## Acceptance
 
-Check selected-tile/full-output equivalence, source-grid read closure, legal
-strides/offsets, separate/joint outputs, version/profile identity, low budgets, cancellation,
-associations and retained owners as applicable. The [oracle
-coverage](../oracle-coverage.md) describes the available finite reference subset; it is
-not runtime completion. No unverified GPU or third-party bit
-identity is implied by these requirements.
+Mixed L/Q/C/Z, queries selecting evaluable verb rows, separate/joint outputs, empty path with query NoSolution.

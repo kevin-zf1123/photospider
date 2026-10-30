@@ -17,47 +17,24 @@ registered_operation_keys:
 
 # FMT-11N: NCL YCbCr to encoded RGB
 
-Inherit the complete [family contract](FMT-11_model_conversion_contract.md),
-[normative mathematics](FMT-11_model_math.md) and
-[relative-coordinate scale](FMT_relative_coordinate_scale.md). The specification remains Proposed; this member is registered as a CPU Result operation.
+Inherits the [family contract](FMT-11_model_conversion_contract.md), [normative mathematics](FMT-11_model_math.md) and [relative-coordinate scale](FMT_relative_coordinate_scale.md). This member is a CPU Result operation with strict, accelerated Apple Silicon and accelerated x86-64 profiles.
 
-## Interface and output inference
+## Interface
 
-One Result containing a single Float32 or Float64 tensor produces one `values` Result containing a single tensor.
-Source: native full-resolution Y′,Cb,Cr. Target: its described transfer-encoded RGB.
-Preserve shape, channel axis/count and slots; target roles follow the selected source role order.
-Unrelated groups, internal alpha and AOV samples pass through bit-for-bit.
-An explicit input_description selects the described path; otherwise use the
-family raw selector. The output carries no description.
-Member-specific statics: ncl_matrix from source; explicit in raw.
-All explicit-description, source-consistency, algorithm and layout fields inherit the
-family; no missing semantic interpretation is inferred from sample magnitudes.
+One Result containing a single Float32 or Float64 tensor produces one `values` Result containing a single tensor. Source: native full-resolution Y′,Cb,Cr. Target: its described transfer-encoded RGB. Shape, channel axis/count and slots are preserved; target roles follow the selected source role order. Unrelated groups, internal alpha and AOV samples pass through bit-for-bit. An explicit input_description selects the described path; otherwise the family raw selector applies. The output carries no description. Member-specific statics: ncl_matrix from source; explicit in raw. Explicit-description, source-consistency, algorithm and layout fields follow the family.
 
-## Mathematics, sample support and errors
+## Mathematics
 
 Use exact expanded inverse rows without separately rounded R/B intermediates. Restore encoded RGB; do not decode its transfer.
 
-Exact same-position support: R′ uses Y′,Cr; B′ uses Y′,Cb; G′ uses all three.
-Take the union over every sample of each complete retained output tile, then close on the source grid. Static structure and explicit-configuration checks apply even to Empty/bypass-only requests.
-No halo, hidden-color skip, alpha validation or full-image scan is introduced.
-Strict evaluates the complete specified formula with its stated copy/selection
-exceptions; accelerated numerical rules, raw specials and errors inherit the
-family/math contract. The normalized Lab lightness is l=L*/100 wherever relevant.
-Semantic sample validity, finite rounded results and nonsingular semantic formulas are caller preconditions over complete retained output tiles. Fixed execution does not validate these numerical premises; operational errors retain the kernel category.
+## Behavior
 
-## Storage, resources and implementation identity
+Sample support: R′ uses Y′,Cr; B′ uses Y′,Cb; G′ uses all three. Static structure and explicit-configuration checks apply even to Empty/bypass-only requests. There is no halo, hidden-color skip, alpha validation or full-image scan. Semantic sample validity, finite rounded results and nonsingular semantic formulas are caller preconditions. This member materializes transformed output and rejects forced view, even for a bypass-only request. Raw specials and errors follow the family and math contract.
 
-This is a registered native Result primitive. Internal helper reuse preserves its declared support, rounding and static checks.
-This member materializes transformed output and rejects forced view even for a bypass-only request.
-The implementation supports generic and spatial layouts. Complete output tiles determine source-grid closure and numerical preconditions. Pure copies/constants use zero scratch; arithmetic uses fixed declared scratch. Empty has no payload tasks, and successful calls publish in order.
-The implementation uses fixed invocation ABI 8 and the registered CPU profiles.
+## Acceptance
 
-## Independent acceptance and conceptual workflow
+Input (Y′,0,0) reconstructs equal RGB. NaN Cb is outside semantic G/B preconditions; a R-only tile does not consume it. Also cover mixed component requests, both dtypes and signed zeros; an oracle uses the actual stored floating inputs, not ideal decimal inputs.
 
-Input (Y′,0,0) reconstructs equal RGB. NaN Cb is outside semantic G/B preconditions; a complete retained R-only tile does not consume it.
+## Conceptual DAG
 
-Also apply common mixed-region/component, dtype/profile, signed-zero, explicit-configuration,
-resource/cancellation and owner-lifetime acceptance where relevant. An independent
-formula oracle must use actual stored floating inputs, not ideal decimal inputs.
-The conceptual workflow is `codec -> FMT-06 native decoding -> N -> explicit FMT-09 decode`. The installed public helper appends the native member key to a `WorkflowDocument`; Compiler and execution then evaluate the Result operation. Request selected color and bypass components separately to observe the declared support.
-Primary sources and their compatibility limits are linked in the math supplement.
+`codec -> FMT-06 native decoding -> N -> explicit FMT-09 decode`

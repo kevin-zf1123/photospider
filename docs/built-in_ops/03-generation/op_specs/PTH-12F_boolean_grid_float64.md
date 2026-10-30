@@ -10,32 +10,24 @@ operation_keys:
 
 # PTH-12F: Explicit-grid Boolean with Float64 output
 
-Inherits [PTH-12](PTH-12_boolean_offset_contract.md),
-[GEN-common](GEN_common_contract.md) and [PTH geometry](PTH_geometry_contract.md). This
-is a distinct registered versioned member. Same
-version/profile means bit-identical public output; no backend substitution changes that
-contract.
+Inherits [PTH-12](PTH-12_boolean_offset_contract.md), [GEN common](GEN_common_contract.md) and [PTH geometry](PTH_geometry_contract.md).
 
-Inputs and quantized Boolean semantics match PTH-12D. Outputs are `path`, a Float64 CoreVerbs
-PathSet and both quantization/publication diagnostics. Parameters include the same grid
-origin/scale and algorithm identity, plus a positive publication displacement budget and
-separate hard work/capacity limits.
+## Interface
 
-Execute the fixed grid algorithm, map grid coordinates to exact geometric coordinates
-using the declared grid origin/scale, then round once to Float64 and accumulate the
-publication displacement bound during construction using the same exact
-squared-error and RU64 rule as PTH-12E, measured in geometric pixel coordinates
-after applying origin/scale. Finite representability, the chosen
-publication budget, preserved incidence/topology and distinct required grid points
-remaining distinct in Float64 are unchecked caller preconditions. No output scan or
-publication gate checks them; report topology_status=0 (unverified). Do not claim
-original-input exactness. Canonical output must agree with an
-explicit PTH-12D result followed by exact `origin + spacing * integer` evaluation and one RN64 per coordinate. The same exact-cycle order, duplicate snapped vertices and degenerate contours are retained; no post-publication reclip or canonicalization changes them.
+Operation keys: `path.boolean_grid_float64_v1_strict`.
 
-Complete-input lowering uses fixed tasks, explicit private intermediate Results and
-fixed dependencies; a failed call exports no successful Result. Tests include large grid indices,
-non-power-of-two scale, valid topology-preserving publication, scale/origin identity,
-capacity exhaustion and cancellation. Invalid publication geometry has no promised
-runtime diagnostic. `path_boolean.cpp`, the grid codec and `generation::grid_polygon_schema` implement the frozen path. `pth12/grid.py::publish_grid` is its exact independent publication reference. The quantization stage equals PTH-12D; the publication stage is RU64 of the square root of the maximum exact squared coordinate displacement.
+Inputs and quantized Boolean semantics match PTH-12D. Outputs are `path`, a Float64 CoreVerbs PathSet, and a report with both the quantization and the publication diagnostics. Parameters are those of PTH-12D (grid origin and spacing, operation, fill rules, attribute policy, capacities) plus a positive publication displacement budget.
 
-The strict CPU implementation is registered. The acceptance list defines required behavior; finite validation does not establish every valid-input success domain or a GPU backend.
+## Mathematics
+
+Execute the PTH-12D grid algorithm, map grid coordinates to exact geometric coordinates `origin + spacing * integer`, then round once to Float64 per coordinate. The result equals an explicit PTH-12D result followed by that evaluation and one RN64 per coordinate. The exact-cycle order, duplicate snapped vertices and degenerate contours are retained; no post-publication reclipping or canonicalization changes them.
+
+The publication displacement bound is accumulated during construction with the exact squared-error and RU64 rule of PTH-12E, measured in geometric pixel coordinates after applying origin and spacing: the publication stage is RU64 of the square root of the maximum exact squared coordinate displacement. The quantization stage equals PTH-12D. Finite representability, the chosen publication budget, preserved incidence/topology and distinct required grid points remaining distinct in Float64 are unchecked caller preconditions; no output scan or publication gate checks them. The report has `topology_status=0` (unverified). Original-input exactness is not claimed.
+
+## Behavior
+
+Support class: complete input. A failed call exports no successful Result.
+
+## Acceptance
+
+Large grid indices, non-power-of-two spacing, valid topology-preserving publication, and scale/origin identity.

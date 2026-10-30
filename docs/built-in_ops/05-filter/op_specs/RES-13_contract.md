@@ -17,9 +17,9 @@ members:
 
 The non-flat morphological background model, background subtraction, and correction from measured flat fields are separate operations.
 
-This specification defines the target mathematics and interface contract only; it makes no claim about current implementation or registration. It inherits the [FILTER common contract](FILTER_common_contract.md), [NUM](../../01-numeric/op_specs/NUM_common_contract.md), and [FMT](../../02-format-color/op_specs/FMT_common_contract.md). No member is marked Accepted or production-implemented.
+It inherits the [FILTER common contract](FILTER_common_contract.md), [NUM](../../01-numeric/op_specs/NUM_common_contract.md), and [FMT](../../02-format-color/op_specs/FMT_common_contract.md).
 
-## Member classification
+## Members
 
 | ID | Function spec | Composition type | Numeric reference |
 | --- | --- | --- | --- |
@@ -27,29 +27,19 @@ This specification defines the target mathematics and interface contract only; i
 | RES-13B | [Explicit background subtraction](RES-13B_subtract_background.md) | primitive | E |
 | RES-13C | [Measured flat/dark correction](RES-13C_flat_field_correct.md) | primitive | E |
 
-Letter suffixes identify distinct mathematical or interface objects; they are not quality tiers that a backend may choose arbitrarily. Primitives may propose strict and accelerated profiles; helpers only orchestrate explicit stages.
+Letter suffixes identify distinct mathematical or interface objects, not quality tiers.
 
-## Shared mathematics, units, and profiles
-
-Each member file listed above defines its own formula. Members share no undeclared preprocessing; a parameter name may be reused only when its units, boundary, normalization, and RN stages agree.
-
-## Shared execution and numerical obligations
+## Numeric Requirements
 
 E denotes one final RN_t rounding of the exact expression; B denotes explicitly generated and fixed coefficients; S denotes declared staged rounding. See [numeric reference](FILTER_numeric_reference.md). Ordinary arithmetic propagates NaN, Inf, floating-point overflow, signed zero, payload, rounding, and precision according to the corresponding NUM operation. Callers guarantee the member's finite-parameter, control-model and numerical-domain premises; production execution does not validate those premises. Strict bits, final FP32-scaled four-ULP bounds, gradual underflow, copies, and exact discrete branches inherit NUM.
 
-Positive-weight normalized filters, signed kernels, local regression, and global inverse problems have different semantics and do not share one alpha-blur rule. See [color composition](FILTER_color_composition.md). Spatial extension/anchor/origin follow the [boundary contract](FILTER_boundary_contract.md); structured outputs follow the [collection contract](FILTER_collections_contract.md). Shapes depend only on descriptors; each member defines mathematical support and fixed compiled reads.
+Alpha semantics, spatial extension and structured outputs follow [color composition](FILTER_color_composition.md), the [boundary contract](FILTER_boundary_contract.md) and the [collection contract](FILTER_collections_contract.md).
 
-## Dependencies and acceptance
+## Behavior and Acceptance
 
-Each member’s support set is normative. A halo does not mean the operation can run independently on an arbitrary cropped ROI, and paging does not cancel a complete-input-image dependency. Staged rounding, global connectivity, transforms, and iterative state must follow each member’s definition. Outputs are independently requestable. Only selected computation and required algorithmic control contribute payload reads; no payload-validation phase is introduced.
-
-All members must follow the [acceptance protocol](FILTER_oracle_protocol.md). This round’s mathematical references and associated self-checks are documented in the [oracle instructions](../../../../oracle/ops/filter/README.md); no new Photospider runtime implementation was executed. D1/D2 describe draft maturity, not pass rates.
+Each member's support set is normative. A halo does not imply independent execution on an arbitrary cropped ROI. Staged rounding, global connectivity, transforms, and iterative state follow each member's definition. Outputs are independently requestable. Members are accepted against the [acceptance protocol](FILTER_oracle_protocol.md).
 
 
-For RES-13A background estimation and RES-13C flat-field correction, verify mathematical conformance separately from intended-use quality. Define use-case-specific scores with critical metrics passing their own thresholds; a weighted aggregate must not hide a failing metric. The metric formulas, datasets/reference pairs, scored regions, aggregation, and thresholds are implementation-time details and must be fixed before claiming quality acceptance. RES-13B arithmetic conformance is assessed against its exact formula; any composed background-correction use case also requires its own quality scores.
-
-## References and conformance notes
+## References
 
 [S24 · scikit-image rolling-ball example](../research-sources.md#s24)
-
-Boundary, tie-breaking, numeric domains, public schemas, and proposed keys follow the applicable contracts. Algorithm sources do not establish parameter defaults or grant third-party software licenses.

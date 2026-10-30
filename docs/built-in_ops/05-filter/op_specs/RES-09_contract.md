@@ -28,13 +28,17 @@ Image inputs use distinct static Int64 `y_axis` and `x_axis`; all other axes are
 | RES-09C | [Poisson model, asynchronous early stop](RES-09C_richardson_lucy_poisson_early_stop.md) | primitive | F |
 | RES-09D | [Stabilized model, asynchronous early stop](RES-09D_richardson_lucy_stabilized_early_stop.md) | primitive | F |
 
-## Ports and forward model
+## Interface
+
+### Ports and forward model
 
 Inputs are observation `y`, PSF `K`, initial estimate `x0`, background `b`, and mask `m`; outputs are `estimate` and UInt8 `unobserved`. Image-like inputs have the same H/W. Explicit scalar broadcasting for background and mask is allowed only on declared axes. Require nonnegative PSF taps and positive native sum; normalize the PSF in the input dtype before defining the finite convolution matrix `A`. Boundary is explicitly selected from `constant0` or `wrap`; kernel anchor is mandatory. The true `Aᵀ` is obtained by scattering every tap over the actual input/output domain. Reversing the PSF under the same boundary rule is not generally the correct adjoint. Let native sensitivity `s=Aᵀm`. `unobserved[i]=1` iff no selected observation is connected to i by a positive coefficient of the finite native operator. Determine that structural support from coefficients and mask, not from whether a rounded sum underflows to zero. Callers guarantee representable positive sensitivity for structurally observed samples.
 
 Poisson-model values have their stated nonnegative domain when finite. NaN/Inf arithmetic propagates through native operations; do not impose a blanket all-data-finite scan. The stated nonnegative numerical/model domains are unchecked caller premises. Mask values are in `[0,1]`. Bypass/unrequested inputs are not read and create no numerical-validation demand; static shape, schema and parameter-type construction remains independent of those payloads.
 
-## Recurrence
+## Mathematics
+
+### Recurrence
 
 Initialize from `x0` converted to the main input dtype `t`. For each complete synchronous iteration, use the family’s finite forward operator and true transpose:
 
@@ -47,23 +51,19 @@ Compute and reuse `s=Aᵀm` in native input precision; use the same normalized c
 
 Fixed-step members require explicit `max_iterations>=0`; zero steps returns `initial` by bit-copy for an estimate-only request. An unobserved-only request still consumes PSF and mask. Do not silently early-stop. RES-09B requires explicit finite `epsilon>0` in observation units; RES-09A fixes epsilon at zero and has no hidden floor control. All other caller parameters, including boundary and anchor, are explicit and have no constructor defaults.
 
-## Demand, resources and errors
+## Behavior
 
-The estimate uses fixed reads covering its complete plane and PSF. An unobserved-only selected computation does not require observation, background or initial-estimate arithmetic. A zero-step estimate-only path preserves initial bits through explicit COPY when materialized. Static shape/schema and parameter-type preparation remain, while numerical model and association premises introduce no payload reads. Selected outputs describe one coherent algorithmic state with independent tile allocations, and operational failure/publication follow their call.
-
-The direct reference is `O(max_iterations*P*C*A)` and retains `A`, `Aᵀ` support/plan and `s`; FFT replacement must preserve the exact finite operator and declared stages, not switch to circular convolution. Charge all operator plans, state buffers and work. Resource exhaustion is an explicit failure. No implicit spill, reduced precision, fallback algorithm or partial output. Cancellation and ownership follow shared FILTER contracts.
+The estimate reads its complete plane and the PSF. An unobserved-only selected computation does not require observation, background or initial-estimate arithmetic. A zero-step estimate-only path preserves initial bits. Selected outputs describe one coherent algorithmic state. FFT evaluation, where used, must preserve the exact finite operator and declared stages rather than switching to circular convolution.
 
 ## Acceptance
 
-Verify the finite operator dot-product identity within dtype-aware reduction error `<Ax,z>=<x,Aᵀz>`, delta PSF with zero background and unit mask, both one-step formulas, all-zero mask copying the estimate with `unobserved=1`, non-normalized boundary sensitivity, zero-prediction/positive-observation error, masked nonfinite observation not read, and independent output requests. Early-stop predicates, scheduling, owner pinning, race handling and cleanup follow [FILTER iterative contract](FILTER_iterative_contract.md).
+Verify the finite operator dot-product identity within dtype-aware reduction error `<Ax,z>=<x,Aᵀz>`, delta PSF with zero background and unit mask, both one-step formulas, all-zero mask copying the estimate with `unobserved=1`, non-normalized boundary sensitivity, zero-prediction/positive-observation error, and masked nonfinite observation not read. Early-stop predicates follow the [FILTER iterative contract](FILTER_iterative_contract.md).
+
+## Exceptional ratio branch
+
+Under the caller-supplied control/model premises, a zero mask excludes observation arithmetic.
+For a positive mask, a NaN observation or prediction propagates to a NaN ratio; it is neither the finite y=0 branch nor the finite y>0 no-solution branch. No NaN payload priority is promised. Valid finite zero denominators retain the explicit zero/positive observation rules above.
 
 ## References
 
 [S22 · scikit-image restoration](../research-sources.md#s22).
-
-### Exceptional ratio branch
-
-Under the caller-supplied control/model premises, a zero mask excludes observation arithmetic.
-For a positive mask, a NaN observation or prediction propagates to a NaN ratio; it is neither the finite y=0 branch nor the finite y>0 no-solution branch. No NaN payload priority is promised. Valid finite zero denominators retain the explicit zero/positive
-observation rules above. Scalar fixtures are provided by `special.rl_ratio`;
-complete exceptional solver trajectories remain outside the finite-rational oracle.

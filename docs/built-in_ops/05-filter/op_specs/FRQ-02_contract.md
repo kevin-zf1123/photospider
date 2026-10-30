@@ -29,77 +29,34 @@ Inherits [FILTER shared contract](FILTER_common_contract.md), [NUM](../../01-num
 | FRQ-02B | [Hermitian half-spectrum to real field](FRQ-02B_irfft2.md) | primitive | F |
 | FRQ-02C | [Explicit Hermitian-symmetry projection](FRQ-02C_project_hermitian.md) | primitive | E |
 
-Suffix letters identify distinct mathematical or interface objects, not quality tiers that a backend may select freely. A primitive may propose separately named strict and accelerated variants. A helper only orchestrates explicit stages. An external engine requires fixed resources and an approved executable configuration.
+Suffix letters identify distinct mathematical or interface objects, not quality tiers.
 
-## Runtime integration and remaining acceptance
+## Interface
 
-`frequency.rfft2` and `frequency.irfft2` use the ordinary floating-point CPU
-transform in `frequency_transform.cpp`. They inherit the F-profile arithmetic,
-dimension-derived scratch, prepared plan cache and ABI9 resource accounting in
-[FRQ-01](FRQ-01_contract.md#runtime-integration-and-remaining-acceptance).
-`project_hermitian` remains an E-profile operation in `frequency_local.cpp`, with
-its strict and target-gated accelerated keys and exact conjugate construction.
-The SDK is `photospider/ops/frequency.hpp`.
+`frequency.rfft2` and `frequency.irfft2` use the F-profile arithmetic of [FRQ-01](FRQ-01_contract.md#interface) and its static grid parameters. `project_hermitian` is an E-profile operation with strict and accelerated keys. The SDK is `photospider/ops/frequency.hpp`.
 
-The real transforms require `packing=r2c_x`, `index_order=unshifted`, and explicit
-original spatial width. For even W, forward computation packs adjacent real
-samples as even+i*odd, performs length-W/2 row FFTs, and recombines their paired
-coefficients using length-W roots. It then transforms H-element columns of the
-compact H*(W/2+1) plane. For odd W, forward computation uses a full complex plane
-with zero imaginary input. Both paths emit columns 0 through floor(W/2).
+The real transforms require `packing=r2c_x`, `index_order=unshifted`, and an explicit original spatial width W. Both forward and inverse transforms emit or consume columns 0 through floor(W/2).
 
-DC and even-width Nyquist boundary columns use the smaller y index of each
-conjugate pair as their common representative. The opposite imaginary value is
-its negation, and self-conjugate imaginary intersections are structural +0.
-No enclosure or numerical validation is needed for this packing.
+## Mathematics
 
-For a single-column working plane with a contiguous scalar output row stride,
-output materialization canonicalizes native packets using each row's global
-index, including independently requested tiles. It reads the smaller conjugate
-row, negates the opposite imaginary component and sets self-conjugate imaginary
-components to +0 before scaling. This path retains the individual-component
-bound of 64 declared units per sample. Other layouts retain the row path.
+DC and even-width Nyquist boundary columns use the smaller y index of each conjugate pair as their common representative. The opposite imaginary value is its negation, and self-conjugate imaginary intersections are structural +0. No numerical validation is applied to this packing.
 
-The long contiguous x86 input-packing path is shared with the complex family. Compact forward input packs W/2 real pairs in disjoint sample chunks and constructs its extra zero after joining; compact inverse input loads all W/2+1 supplied complex samples. A noncompact odd-width inverse retains the conjugate-completion traversal. Width one needs no completion samples. The exact admission, participant limits and layout fallback are specified in the [complex transform contract](FRQ-01_contract.md).
-
-For even W, inverse computation transforms the compact columns first, recombines
-the half spectrum into doubled packed row coefficients, performs length-W/2
-inverse row FFTs, and unpacks real and imaginary components into adjacent samples.
-The factor of two preserves normalization by the original H*W. For odd W, it
-loads the half spectrum once, completes missing columns in scratch using
-`F[y,x]=conj(F[(-y)%H,W-x])`, and emits the real component of the full inverse FFT.
-Both paths support independently edited interior coefficients under the caller's
-boundary conjugacy premise. Neither path validates or repairs boundary pairs.
-`backward` and `ortho` scaling always use the explicit original H and W.
-Packing, recombination and data scaling use native Float32 for Float32 inputs
-and Float64 for Float64 inputs. Compact pitches such as 513 and 2049 retain
-their extra boundary column; column batches handle that remainder explicitly.
-
-Packing, recombination and output materialization use the automatic or explicitly capped FRQ thread policy. Eligible contiguous x86 input is partitioned into sample chunks; the other traversals partition independent rows. Each phase completes before a dependent phase begins. The cancellation, work admission, scratch ownership and automatic thread selection are shared with FRQ-01.
-
-## Shared Mathematics, Units, and Profiles
-
-Each member formula is defined in its linked specification. Members do not share undeclared implicit preprocessing. Parameters with the same name are reusable only when their units, boundary behavior, normalization, and RN stages match.
-
+For odd W, the inverse completes missing columns using `F[y,x]=conj(F[(-y)%H,W-x])` and emits the real component of the full inverse DFT. Independently edited interior coefficients are supported under the caller's boundary conjugacy premise; boundary pairs are neither validated nor repaired. `backward` and `ortho` scaling always use the explicit original H and W. Float32 inputs use native binary32 arithmetic and Float64 inputs binary64.
 
 ## FrequencyGrid/v1 logical schema
 
 The proposed FrequencyGrid/v1 SDK/workflow representation pairs real and imaginary coefficient Results with explicit static transform configuration: original spatial shape, transformed axes, sampling spacing, coordinate origin/unit, normalization, index order and packing. Shapes and the directory are available before coefficient computation. Real and imaginary tensors have compatible schemas, while each materialized tile owns a distinct allocation. A selected transform coefficient plane has its specified whole-plane mathematical dependency unless locality is explicitly guaranteed. Edited coefficients may come from any conforming producer; numerical and payload association premises are caller obligations. Results carry no implicit frequency-grid metadata or numerical validity certificate.
 
-## Shared Execution and Numeric Requirements
+## Numeric Requirements
 
-FRQ-02A/B use ordinary floating-point F semantics, including intermediate rounding and overflow as specified by FRQ-01. FRQ-02C retains E semantics: exact-expression output rounding, NUM exceptional-value rules and its named accelerated bounds. Resource, shape, fixed-read and publication obligations apply to all three members.
+FRQ-02A/B use ordinary floating-point F semantics, including intermediate rounding and overflow as specified by [FRQ-01](FRQ-01_contract.md#shared-mathematics-units-and-profiles). FRQ-02C retains E semantics: exact-expression output rounding, NUM exceptional-value rules and its named accelerated bounds.
 
-Positive-weight normalized filters, signed kernels, local regression, and global inverse problems have different alpha semantics and must not share one generic blur rule. See [color composition](FILTER_color_composition.md). Spatial extension, anchors, and origins follow the [boundary contract](FILTER_boundary_contract.md). Structured outputs follow the [collection contract](FILTER_collections_contract.md). Shapes depend only on descriptors; each member defines mathematical support and fixed compiled reads.
+Alpha semantics, spatial extension and structured outputs follow [color composition](FILTER_color_composition.md), the [boundary contract](FILTER_boundary_contract.md) and the [collection contract](FILTER_collections_contract.md).
 
-## Dependencies and Acceptance
+## Behavior and Acceptance
 
-Each member’s support set is normative. Having a halo does not permit independent execution on an arbitrary cropped ROI; paging does not eliminate a complete-input dependency. Staged rounding, global connectivity, transforms, and iterative state follow the member definition. Outputs are independently requestable. Only selected computation and required algorithmic control contribute payload reads; no payload-validation phase is introduced.
+Each member's support set is normative. Transform coefficient planes have a whole-plane dependency. Outputs are independently requestable. Members are accepted against the [acceptance protocol](FILTER_oracle_protocol.md).
 
-All members must meet the [acceptance protocol](FILTER_oracle_protocol.md). Mathematical references and their self-tests are documented in the [oracle README](../../../../oracle/ops/filter/README.md). D1/D2 describe specification maturity, not acceptance status.
-
-## Sources and Review
+## References
 
 [S10 · FFTW: real-data array format](../research-sources.md#s10)
-
-Project boundary behavior, tie-breaking, numeric domains, parameters, public schemas, and proposed operation keys are defined by these specifications. Algorithm sources do not determine parameter defaults or grant rights to third-party software.

@@ -43,9 +43,7 @@ read needed color and alpha but do not publish an unrequested alpha plane. Unsel
 AOV/emission channels are bit copies, not coverage weighted. The caller's downstream description refers to the output's own slots.
 
 This E formula is distinct from the explicit staged FMT associate -> field filter
--> unassociate chain, which has additional rounding boundaries. Box/Gaussian kernel
-producers can feed the fused primitive; their coefficient representation remains
-explicit and does not imply equivalence to a separately baked separable filter.
+-> unassociate chain, which has additional rounding boundaries. Box/Gaussian kernels can feed the fused primitive; their coefficient representation remains explicit and does not imply equivalence to a separately baked separable filter.
 
 ## Restoration and other filters
 
@@ -73,6 +71,6 @@ upstream errors of other consumers.
 Required fixtures include (C,A)=(8,0),(2,1) with equal weights yielding (2,1/2),
 finite all-transparent windows yielding +0, zero-alpha NaN/Inf contamination,
 first-NaN payload priority, alpha underflow, alpha-only independence and unselected
-AOV NaNs. Temporary public-path acceptance checks static description identity, group selection, output ownership and fixed tile support using valid alpha/kernel payloads. Production invocation adds no alpha scan or output certification. Conceptual workflows include FMT decode -> select group
+AOV NaNs. Conceptual workflows include FMT decode -> select group
 -> fused blur -> FMT encode, and model conversion -> extract luminance -> restoration
 -> replace -> inverse model. These do not establish commercial preset equivalence.

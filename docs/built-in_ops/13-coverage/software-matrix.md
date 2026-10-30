@@ -43,9 +43,9 @@
 | Deep/AOV/ID | Nuke/OpenEXR/Cryptomatte | 语义数据与专用merge/extract | [auxiliary](../12-temporal-ml/requirements.md) |
 | 分割/深度/增强/生成 | 各产品模型工具 | 固定model与显式pre/post，独立训练 | [ML](../12-temporal-ml/requirements.md) |
 
-## 当前覆盖差距的判断
+## 覆盖范围
 
-2026-09-13 本地实现已覆盖 typed 数值/颜色、通道、曲线/LUT、基础 mask/滤镜、精确 STMap、命名多输出，以及受预算分页统计、FFT、连通域和 Layer 链。PathSet 等结构化表示也已交付。当前缺口集中在路径光栅、EDT/Canny、更多重采样和颜色管理、专业恢复/RAW/时域/Deep/ML 的专用节点。具体默认注册、factory 与表示边界见[当前实现](../00-foundation/current-state.md)和[路线](../14-roadmap/implementation.md)。
+各类别已注册成员见对应主题页的逐成员入口；时域、Deep 与 ML 仍处于覆盖与依赖规划阶段，路线见[执行路线](../14-roadmap/implementation.md)。
 
 “数学等价”“视觉相近”“操作参数相近”“逐像素一致”分开验收。菜单名称和宣传例图最多支持功能存在，不证明默认空间、核、clipping、alpha或线程顺序。兼容需要指定版本、输入profile/位深、设置、导出数据与容差。
 

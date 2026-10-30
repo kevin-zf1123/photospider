@@ -59,5 +59,4 @@ ik_llama.cpp `dad2cb3e55138cbdd7df988c66c0c3c54f6d34ad`, implemented in
 source-download prerequisite. The comparison backends remain removed. Float64
 exp and NUM-01 expression exp use SLEEF binary64 enclosures with final-result
 certification; the Float32 IQK certificate does not justify narrowing their
-binary64 inputs. The [exp implementation and measured scope](../docs/built-in_ops/01-numeric/exp-performance.md)
-include the rational error certificate, fallback domain and reproduction.
+binary64 inputs.

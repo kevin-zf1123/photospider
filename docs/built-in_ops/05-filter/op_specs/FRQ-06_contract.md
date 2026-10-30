@@ -25,47 +25,22 @@ Inherits [FILTER common contract](FILTER_common_contract.md), [NUM](../../01-num
 | --- | --- | --- | --- |
 | FRQ-06A | [Pointwise Complex-Frequency Multiplication](FRQ-06A_frequency_multiply.md) | primitive | E |
 
-Letter suffixes identify distinct mathematical or interface objects, not quality tiers that a backend may choose arbitrarily. Primitives may propose separately named strict and accelerated variants. Helpers only orchestrate explicit stages. An external engine requires fixed resources and approval before it can have an executable configuration.
+Suffix letters identify distinct mathematical or interface objects, not quality tiers.
 
-## Runtime integration and remaining acceptance
+## Interface
 
-FRQ-06A is registered by `register_frequency` in
-`plugins/ops/05-filter/frequency_operations.cpp`, with exact/certified arithmetic
-in `frequency_local.cpp`. CPU strict and target-gated Apple Silicon/x86-64 keys
-exist; no GPU backend. Only local Apple CPU execution is measured.
-The SDK `photospider/ops/frequency.hpp` provides transactional composition.
+FRQ-06A has strict and accelerated CPU keys. Direct nodes take the [FRQ-01 explicit grid encoding](FRQ-01_contract.md#interface) for F, a required canonical sorted `broadcast_axes` String (empty means none), and `response_unit=dimensionless`. H has the F dtype or Float64; its two components have matching dtype. Shape, packing and index-order compatibility is structural; sampling-unit and numerical association remain caller premises. Optional Int64 `max_work` limits each invocation. The SDK in `photospider/ops/frequency.hpp` checks both supplied static grids before appending the node.
 
-Direct nodes take the [FRQ-01 explicit grid encoding](FRQ-01_contract.md#runtime-integration-and-remaining-acceptance)
-for F, a required canonical sorted `broadcast_axes` String (empty means none),
-and `response_unit=dimensionless`. H has the F dtype or Float64; its two
-components have matching dtype. Shape/packing/index-order compatibility is
-structural; sampling-unit/numerical association remains a caller premise.
-SDK composition checks both supplied static grids before appending the node.
-
-Typed CPU9 implements the [FRQ-01 cumulative-budget contract](FRQ-01_contract.md#runtime-integration-and-remaining-acceptance),
-including arithmetic/limb work and refinement attempts across tiles and nodes.
-Optional Int64 `max_work` remains per invocation, separate from the Run ledger.
-Old FRQ ABI8 Plans require recompilation. Platform evidence remains limited to
-the locally executed Apple configurations.
-
-## Shared Mathematics, Units, and Profiles
-
-Each member formula is defined in its linked specification. Members do not share undeclared implicit preprocessing. Parameters with the same name are reusable only when their units, boundary behavior, normalization, and RN stages match.
-
-## Shared Execution and Numeric Requirements
+## Numeric Requirements
 
 E denotes an exact expression rounded once to RN_t; B denotes explicitly generated and fixed coefficients; S denotes explicit staged rounding. See [numeric reference](FILTER_numeric_reference.md). NUM defines NaN/Inf and floating-point overflow behavior; this family adds no category-wide finite-only rule. Strict bits, final FP32-scaled four-ULP bounds, gradual underflow, copy behavior, and exact discrete branches inherit NUM.
 
-Positive-weight normalized filters, signed kernels, local regression, and global inverse problems have different semantics; do not apply one alpha-blurring rule to all of them. See [color composition](FILTER_color_composition.md). Spatial extension, anchor, and origin follow the [boundary contract](FILTER_boundary_contract.md); structured outputs follow the [collection contract](FILTER_collections_contract.md). Shapes depend only on descriptors; each member defines mathematical support and fixed compiled reads.
+Alpha semantics, spatial extension and structured outputs follow [color composition](FILTER_color_composition.md), the [boundary contract](FILTER_boundary_contract.md) and the [collection contract](FILTER_collections_contract.md).
 
-## Dependencies and Acceptance
+## Behavior and Acceptance
 
-The member support set is normative. Having a halo does not mean that an arbitrarily cropped ROI can run independently; paged access does not remove a whole-image dependency. Follow each member definition for staged rounding, global connectivity, transforms, and iterative state. Only selected computation and required algorithmic control contribute payload reads; no payload-validation phase is introduced.
+The member support set is normative. Having a halo does not mean that an arbitrarily cropped ROI can run independently. Members are accepted against the [acceptance protocol](FILTER_oracle_protocol.md).
 
-All members must follow the [common acceptance protocol](FILTER_oracle_protocol.md). See the [oracle usage guide](../../../../oracle/ops/filter/README.md) for mathematical references and associated self-tests. D1/D2 indicate draft maturity, not acceptance rates.
-
-## Sources and Review
+## References
 
 [S09 · FFTW: DFT definition](../research-sources.md#s09)
-
-Project boundary behavior, tie-breaking, numeric domains, parameters, public schemas, and proposed operation keys are defined by these specifications. Algorithm sources do not determine parameter defaults or grant rights to third-party software.
