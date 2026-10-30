@@ -94,10 +94,10 @@ final-value NUM error bounds and strict fallback. GPU support is not implicit.
 Charge outputs, kernels, scratch, iterative states, arbitrary-precision limbs,
 retained ancestors, collection owners and comparison-resource snapshots to root
 capacity/work/stage budgets. Mathematical operation counts exclude neither limb
-cost nor refinement work from actual accounting. CPU callbacks poll cancellation
+cost nor refinement work from actual accounting. FIL and FRQ CPU callbacks poll cancellation
 every 1024 scalar work units or sooner, including refinement and long solves.
 FRQ-01/02 may prepay deterministic transform lines, root construction, input/output blocks and column gather/scatter blocks as defined in [FRQ-01](FRQ-01_contract.md#runtime-integration-and-remaining-acceptance); independent cancellation checks inside each block retain this interval.
-RES-01B may prepay the deterministic selected pointwise region at a bound of six scalar work units per sample; it checks cancellation independently before spans of at most 128 samples and at completion. RES-01A keeps incremental accounting for data-dependent selection.
+RES CPU execution follows the [algorithmic-block rules below](#res-work-admission-and-cancellation).
 A GPU profile must declare a finite work bound per nonpreemptive native submission,
 check cancellation before submission and after completion, and drain submitted
 work before releasing any referenced owner. It must report measured cancellation
@@ -108,6 +108,14 @@ retention and cooperative termination follow [iteration](FILTER_iterative_contra
 
 Fixed-step E/B/S strict profiles preserve reproducible state trajectories. Their accelerated profiles retain exact discrete decisions and NUM final-value bounds. Native RES fixed-step profiles retain their specified recurrence and dtype-aware numerical acceptance. Independent
 asynchronous early-stop invocations may select different returned rounds; the frozen executor retains no cross-Run result cache. Operator-defined stopping and explicit state follow the iteration contract.
+
+### RES work admission and cancellation
+
+RES-01..14 separate work admission from cancellation polling. Deterministic computation may admit a conservative finite work bound before executing a block, stage or invocation; data-dependent selection, refinement and iteration retain incremental admission or a conservative bound covering all executed work. Node and Run limits, stage charges and terminal failure propagation keep their existing scopes. Work units measure the declared algorithmic cost independently of the number of cancellation callbacks.
+
+RES CPU callbacks check cancellation at admission and at bounded algorithmic checkpoints during computation. Each implementation documents its block sizes in samples, taps, candidates or transform/codelet dimensions, including SIMD width and bounded scalar tails. Fixed-size scalar or SIMD codelets may finish between checks; generic loops over image sizes, radii, candidate counts or iterations must contain recurring checks with a documented finite block bound. These algorithmic block bounds replace the category-wide 1024-scalar-unit polling interval for RES. Block sizing balances throughput and cancellation responsiveness; measured cancellation latency is recorded separately from the work bound.
+
+For RES-01B, the deterministic selected pointwise region may be prepaid at six scalar work units per sample, with cancellation checks before spans of at most 128 samples and at completion. RES-01A keeps incremental accounting and checkpoints within data-dependent selection. RES-02 prepays its declared invocation bound and polls independently within gather, patch, weight and output blocks as specified by its [family contract](RES-02_contract.md#resources-and-runtime). A RES helper that calls an existing FIL/FRQ operation preserves that operation's own accounting and checkpoint contract. All RES execution retains the existing cancellation status, suppression of successful publication for a cancelled call, and drain-before-release ownership rules.
 
 ### Shared executor ownership
 

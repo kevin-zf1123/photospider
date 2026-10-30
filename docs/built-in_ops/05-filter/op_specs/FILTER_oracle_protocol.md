@@ -66,7 +66,9 @@ must work with zero refinement stages.
 
 RES01–12 use [RES_native_contract](RES_native_contract.md). H06 checks native dtype-aware error, floating environment and explicit structural/copy behavior; it does not require whole-expression bits or NUM NaN payload priority. H07 is inapplicable because no strict/accelerated quality split is specified. H08 charges native buffers, work and algorithm stages rather than arbitrary-precision limbs. All other applicable runtime, support and ownership requirements remain.
 
-RES01A covers exact rank selection of native residual/deviation samples, odd/even counts, ties, sparse masks with excluded poison, arbitrary spatial axes and independent planes, insufficient selected samples, and the Float64 scale conversion. RES01B covers input precision, native parameter conversion, FMA variance, square root of that native variance, clamps and each output subset. Benchmark fixtures must not turn valid no-solution shapes into numeric speedup entries. RES02–12 remain subject to their member-specific algorithm/profile gates and are not declared implemented by this migration.
+RES01A covers exact rank selection of native residual/deviation samples, odd/even counts, ties, sparse masks with excluded poison, arbitrary spatial axes and independent planes, insufficient selected samples, and the Float64 scale conversion. RES01B covers input precision, native parameter conversion, FMA variance, square root of that native variance, clamps and each output subset. Benchmark fixtures must not turn valid no-solution shapes into numeric speedup entries.
+
+RES02A/B acceptance covers native Float32/Float64 stages, independent direct-patch and directed-MPFR references, G=1..4, arbitrary spatial axes and independent planes, reflected full-image support, selected ROI/tile closure, s=0 raw copy with no guide/sigma demand, work/stage/capacity limits, cancellation and owner release. Numerical error measurements must state their fixture scope and conditioning assumptions. RES03–12 remain subject to their member-specific algorithm/profile gates.
 
 ## Native algorithms and third-party comparison
 
@@ -107,6 +109,8 @@ mandatory manual-review gate or universal cross-effect score is implied.
 | H13 | Actual BM3D/CBM3D/SMAA comparisons with pinned configurations |
 | H14 | Same-semantics benchmarks with temporary peaks and numerical-refinement costs |
 | H15 | Asynchronous stopping state retention, triggers, races and safe cleanup |
+
+For RES-01..14, H08 applies the [RES work-admission and cancellation rules](FILTER_common_contract.md#res-work-admission-and-cancellation). Verify work/stage rejection independently from cancellation checkpoints. Check the documented bounds for fixed codelets, generic inner loops and scalar/SIMD tails; trigger cancellation during representative long-running blocks, verify terminal cancellation and draining, and record latency with the backend, dtype and workload. The checkpoint criterion is the member's bounded algorithmic blocks rather than a uniform 1024-scalar-operation interval. This requirement applies independently of the member's numerical profile or implementation status.
 
 These are acceptance requirements, not completed runtime tests. Mathematical oracle
 success does not establish registration, backend availability, performance or quality.

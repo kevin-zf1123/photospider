@@ -46,7 +46,11 @@ FRQ-01A/B、FRQ-02A/B 的数学参考仍保留精确/定向舍入求值；生产
 
 RES01～12 采用原生 fp32/fp64；原有 Fraction/MPFR 结果保留为数学参考，不再作为整个算子的逐位 golden，也不要求 NUM 的 fp32 四 ULP。RES01 的 `noise_mad(...,dtype=...)` 按输入 dtype 显式舍入残差、中位数中点及偏差，再用独立认证的 Float64 常数归一化；`calibrated_variance` 先生成原生 FMA 方差，再对该已舍入方差开方。原表达式参考以 `noise_mad_exact_reference`、`calibrated_variance_exact_reference` 保留。
 
-RES02～12 的旧 oracle 仍用于数学/算法不变量比较；它们不是新 native 状态轨迹的逐位实现，尤其是 diffusion baked64、RL sensitivity 和 blind PSF rational state。后续实现须增加独立的 dtype-aware 验证。均值域 Anscombe 逆仍有正读噪声根求解覆盖缺口；本轮取消正确舍入认证门槛，不代表已补齐该缺口。
+RES02 的 `res02/restoration.py` 保留三种独立参考：`nlm_native` 按直接 candidate/patch/component 循环，用精确有理数对每个有限基础运算进行 dtype 舍入，并用 MPFR 独立认证原生 exp；`nlm` 对完整数学加权比值进行 MPFR 定向区间最终舍入认证；`nlm_enclosure(...,precision=256)` 返回完整数学结果的 binary64 向外端点。相同 exact exponent 分组具有共同精确均值时先作有理化简，精确 halfway 不依赖猜测；其余精度预算未闭合的情形仍为 Inconclusive。对照生产实现时应先将参数转为工作 dtype，再传入高精度参考。算术输出按数值和分类比较，不承诺所有零符号或 NaN payload；s=0 单独保留 copy 位模式。
+
+RES02 通用 runner 保留两个解析 constant-guide 用例。生产实现的数值、SIMD/标量极值及公开运行时检查遵循 [RES 验收要求](../../../docs/built-in_ops/05-filter/op_specs/FILTER_oracle_protocol.md#native-res-acceptance)。临时生产适配器不保存在 oracle 中，Python 参考本身不模拟 Plan、Region、资源、取消或 owner。
+
+RES03～12 的旧 oracle 仍用于数学/算法不变量比较；它们不是新 native 状态轨迹的逐位实现，尤其是 diffusion baked64、RL sensitivity 和 blind PSF rational state。后续实现须增加独立的 dtype-aware 验证。均值域 Anscombe 逆仍有正读噪声根求解覆盖缺口；取消正确舍入认证门槛，不代表已补齐该缺口。
 
 ## 覆盖边界
 

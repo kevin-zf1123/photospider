@@ -5,7 +5,7 @@ kind: primitive
 category: 05-filter
 status: Proposed
 document_maturity: D2_draft
-implementation_status: not_implemented
+implementation_status: implemented
 parent_id: RES-02
 function: nlm_plain
 proposed_operation_keys:
@@ -22,13 +22,13 @@ Inherits the [RES-02 family contract](RES-02_contract.md), [FILTER common contra
 
 ## Ports, Shape, and Semantics
 
-`input,guide` → `output` with the input shape. `noise_sigma` is a spatially invariant Float64 scalar; the model assumes equal noise sigma across all scaled guide components.
+`input,guide` → `output` with the input shape, layout and batch metadata. This member has no noise-sigma port. Both inputs have the same Float32/Float64 dtype and compatible logical sample shapes, as specified by the [family public API](RES-02_contract.md#cpu-implementation-and-public-api).
 
 Ports carry Results with fixed Tensor member schemas. Unless the member defines an explicit color interpretation, samples are raw numerical values; channel count does not imply RGB or alpha. Color interpretation is explicit configuration. Positive extents, axes and explicit broadcasting are checked during static construction. Materialized output tiles have independent allocations. FilterBands and FrequencyGrid are proposed SDK/workflow representations under the collection contract; lowering records each selected output's fixed reads and writes.
 
 ## Static Parameters and Valid Domains
 
-Require patch_radius≥0, search_radius≥0, and h>0. Specify G, metric_scale, and axes explicitly. `noise_sigma`≥0 is used only by member B.
+Require patch_radius≥0, search_radius≥0, and h>0. Supply `guide_components` (G), `metric_scale`, `y_axis`, `x_axis` and `component_axis` explicitly. Parameter types, shape constraints and the optional resource ceiling are listed in the [family public API](RES-02_contract.md#cpu-implementation-and-public-api).
 
 Use native IEEE fp32/fp64 arithmetic under [RES native floating-point contract](RES_native_contract.md). No cross-backend NaN payload or exact-expression rounding is promised. Callers guarantee the member's finite-parameter, control-model and numerical-domain premises; production execution does not validate those premises. Copy/bypass behavior and unconsumed data follow the dependency contract. Supply every parameter explicitly; constructors provide no defaults, except for constants fixed by a mathematical profile. Interpret real parameters as their stored Float64 values, not as infinitely precise decimal text.
 
@@ -48,7 +48,7 @@ Boundary coordinates use the complete logical image; ROI and tile edges are not 
 
 ## Algorithm, Resources, and Execution
 
-Direct cost is O(PC*search_area*patch_area*G). Sliding-window or integral patch SSD may reuse data while retaining the native algorithm and measured error; similar-block regrouping is a separate member.
+The CPU implementation reuses symmetric candidate-pair distances and computes nonnegative separable patch sums in the working dtype. Per displacement, SSD generation is O(PG), patch summation is O(P(2r+1)), and weight/application work is O(P), with explicit halo work for each selected output tile. It does not use subtractive sliding sums or an integral SSD image. Native AVX2/FMA, NEON and scalar paths share the same candidate set and support. Scratch, work admission and cancellation are defined in the [family implementation section](RES-02_contract.md#resources-and-runtime).
 
 In complexity expressions, P=HW, C is the number of independent planes, A is the number of taps, and T is the number of steps. The shared protocol defines work, memory, and stage admission; cancellation; failure status; and owner lifetime. A failed call publishes no successful Result export; previously retired call exports remain valid, and final RET results require successful Run completion. Do not spill automatically, silently reduce precision, or call a retired implementation as a fallback.
 
@@ -61,13 +61,13 @@ The reference evaluates the mathematical formula on small inputs. Existing Exact
 `res02.restoration.nlm(image, guide, *, patch_radius=1, search_radius=1, h_parameter=1, metric_scale=None, noise_sigma=None, dtype='float64')` → [Source file](../../../../oracle/ops/filter/res02/restoration.py).
 
 
-These are standalone oracle helper signatures, not operator constructors; their Python convenience defaults do not define operation parameter defaults.
+The same module also provides `nlm_native` (independent direct-patch staged native arithmetic) and `nlm_enclosure` (outward bounds on the full high-precision mathematical output). The mathematical `nlm` certifies final rounding using directed MPFR and exactly simplifies equal-mean exponent groups. Unresolved non-rational midpoint cases remain Inconclusive. These are standalone oracle helpers, not operator constructors; their Python convenience defaults do not define operation parameter defaults.
 
 The oracle README (../../../../oracle/ops/filter/README.md) documents reference scope. Runtime acceptance under the [runtime acceptance protocol](FILTER_oracle_protocol.md) must cover parameter boundaries, full rank/batch coverage, metadata, compiled ROI/tile behavior, budgets, cancellation, and ownership.
 
 ## Backend and Registration Gates
 
-The proposed native keys remain unregistered until implementation and runtime acceptance are complete. Native numerical validation follows [RES native floating-point contract](RES_native_contract.md); no NUM four-ULP fallback is required.
+The CPU key is registered through `register_restoration_nlm`. Both dtypes have native AVX2/FMA, NEON and scalar implementations. GPU execution is not provided by this member. Native numerical validation follows [RES native floating-point contract](RES_native_contract.md); no NUM four-ULP fallback is required.
 
 Float64 paths retain native Float64 inputs, arithmetic, outputs and exponent range; no Float32 conversion or NUM strict fallback is introduced.
 
