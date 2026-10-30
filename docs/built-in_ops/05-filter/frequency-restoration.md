@@ -55,6 +55,18 @@ FRQ 的进程级工作池与 Context 的执行 coordinator 分别持有线程。
 | FRQ-09 | [DCT I–IV](op_specs/FRQ-09_contract.md) | [FRQ-09A](op_specs/FRQ-09A_dct2.md)、[FRQ-09B](op_specs/FRQ-09B_idct2.md) |
 | FRQ-10 | [具名小波分析/重建](op_specs/FRQ-10_contract.md) | [FRQ-10A](op_specs/FRQ-10A_decompose_haar_mean_lifting_v1.md)、[FRQ-10B](op_specs/FRQ-10B_inverse_haar_mean_lifting_v1.md)、[FRQ-10C](op_specs/FRQ-10C_decompose_cdf53_float_lifting_v1.md)、[FRQ-10D](op_specs/FRQ-10D_inverse_cdf53_float_lifting_v1.md)、[FRQ-10E](op_specs/FRQ-10E_decompose_stationary_haar_mean_v1.md)、[FRQ-10F](op_specs/FRQ-10F_inverse_stationary_haar_mean_v1.md) |
 
+## RES01 原生实现
+
+已注册 `restoration.noise_mad_highpass` 和 `restoration.calibrated_noise_variance`，规格仍为 Proposed。MAD 在输入 dtype 中生成有效 2×2 高通残差、计算中位数和绝对偏差，再将尺度输出为 Float64；非空间维按原顺序保留，末尾增加长度 1。四个 mask 值全部为 1 的 patch 才读取图像值，1×N/N×1 没有有效 patch，按样本不足返回 InvalidDomain。
+
+校准方差采用原生 `fma(gain,max(mean-offset,0),read_sigma²)`，sigma 对该原生方差开方。variance-only、sigma-only、联合输出分别分派，联合路径复用同一个寄存器结果。`below_offset=error` 表示调用方保证输入不低于 offset，不增加 payload 扫描。
+
+MAD 的采样区间只缩小精确秩查询：计数验证两侧秩，失败时回退完整选择。AVX2/NEON 向量化残差、偏差及候选压缩；候选缓冲交替复用，残差在偏差阶段原地覆盖。排序/选择内部和每个有界扫描段均检查取消及节点工作量。使用现有 generation ABI8，不修改冻结内核或新增跨调用数据缓存。
+
+M5 Clang O2/O3、Intel Clang 与 icpx 的 O2/O3 六组完整数值矩阵均通过：每组 182 个有效项对 OpenCV/MATLAB 全部达到 1.5×，超过 2× 的覆盖率分别为 96.7%–99.5% 和 96.2%–100%。MAD 的 1×65536 两个 dtype 按有效 patch 不足验证，不列加速比。Intel 复用缓冲采用经实测的非临时存储；公开调用考虑新结果页首次写入，将启用门槛提高至每输出 32 MiB。小尺寸 Workflow 的 submit/join 开销仍单独披露，不将数值矩阵宣称为端到端加速保证。
+
+编译器、基线、热点、精度边界及完整性能矩阵见 [RES01 性能记录](res01-performance.md)。数值内核、MATLAB 公共 API 及 Photospider 公开调用开销分别记录。
+
 ## 14 个恢复族 / 41 个成员
 
 | 族 ID | 族契约 | 成员 |
@@ -76,7 +88,7 @@ FRQ 的进程级工作池与 Context 的执行 coordinator 分别持有线程。
 
 RES-11A 现命名为低对比区域平滑，RES-11B 为成对块边界平滑；两者保留原窗口、阈值、mask、strength 混合/配对校正公式。它们不自动识别色带、块网格或真实边缘。RES-12B 命名为 Gaussian low-pass workflow helper，去网屏是用途示例，频率尺度由调用者指定。恢复用途的数学公式合规与逐用途质量评分分开验收；评分指标和阈值在实现时确定。
 
-FRQ-07～10 使用各族规格明确规定的 F / `native_float_v1` 契约：普通浮点单遍计算，不要求正确舍入、固定 ULP 上界或跨算法逐位一致；Float64 始终保持 binary64。数学公式、边界、anchor、输出原点、全局分块网格、独立编辑的小波系数及资源与取消语义继续有效。RES-08 尚未实现，其 E-strict 目标未因此改变；直接复合普通 FFT、逐点运算和 IFFT 不建立 RES-08 的严格认证。
+FRQ-07～10 使用各族规格明确规定的 F / `native_float_v1` 契约：普通浮点单遍计算，不要求正确舍入、固定 ULP 上界或跨算法逐位一致；Float64 始终保持 binary64。数学公式、边界、anchor、输出原点、全局分块网格、独立编辑的小波系数及资源与取消语义继续有效。RES-01～12 也已统一改为 [RES 原生浮点契约](op_specs/RES_native_contract.md)：RES 自有计算及迭代状态使用输入 fp32/fp64，不再要求 NUM 的 fp32 四 ULP 或整体单次精确舍入。RES-08 使用原生 FFT/逐点求解/IFFT，RES-10 使用原生 PSF simplex 状态；有限 A/Aᵀ、结构不可观测区域、投影算法、mask、copy 和阶段语义仍须保持。RES-13/14 不在本轮变更范围。引用已有 FIL/FRQ 的 helper 保留被调用成员的接口及系数契约。
 
 ## 关键选择
 

@@ -27,17 +27,10 @@ Result ownership or the compiler. See [oracle coverage](../oracle-coverage.md) a
 
 ## Mathematical acceptance
 
-Use direct rational-to-binary32/64 rounding, including double-rounding counterexamples.
-Use directed MPFR for transcendental expressions; recognize exact algebraic zero
-instead of clipping small residuals. DFT/DCT cyclotomic reduction and independent
-finite-matrix Wiener/Tikhonov references provide structurally separate checks.
-RL tests construct A and its true transpose and verify the adjoint identity.
-Validate every declared S rounding boundary, Float32 iterative trajectories, rational
-PSF feasibility and direct output rounding. Anscombe mean-domain inverses require
-strict certificates before registration; current diagnostic roots are insufficient.
+For E/B/S members, use direct rational-to-binary32/64 rounding and directed MPFR where specified. Keep independent finite-matrix and transform references. For native RES01–12, those references supply ideal mathematical comparisons, while dtype-aware native tests check the implemented stages and invariants. RL tests construct the finite A and its true transpose. Blind PSF tests compare the sorted-threshold projection and native feasibility error. Mean-domain Anscombe inverses require documented truncation/root tolerances and independent range tests; final correct-rounding certification is no longer a native registration gate.
 
 Fixtures cover both dtypes, signed zeros, subnormal/normal boundaries, halfway cases,
-overflow to infinity, NaN sign/payload/priority, infinity arithmetic, selected and
+overflow to infinity, exceptional arithmetic (payload/priority only where explicitly required), selected and
 excluded poison values, odd/even shapes, large kernels, singleton axes, nonzero
 origins and identity branches. Deterministic fixtures record input/expected bits.
 Partial finite-domain references explicitly report unsupported cases as Inconclusive,
@@ -68,6 +61,12 @@ For these four members H06 uses the F error criteria and floating environment;
 H07 is inapplicable because there is no named accelerated profile. All resource,
 shape, publication and fixed-read requirements still apply. Cold and warm runs
 must work with zero refinement stages.
+
+## Native RES acceptance
+
+RES01–12 use [RES_native_contract](RES_native_contract.md). H06 checks native dtype-aware error, floating environment and explicit structural/copy behavior; it does not require whole-expression bits or NUM NaN payload priority. H07 is inapplicable because no strict/accelerated quality split is specified. H08 charges native buffers, work and algorithm stages rather than arbitrary-precision limbs. All other applicable runtime, support and ownership requirements remain.
+
+RES01A covers exact rank selection of native residual/deviation samples, odd/even counts, ties, sparse masks with excluded poison, arbitrary spatial axes and independent planes, insufficient selected samples, and the Float64 scale conversion. RES01B covers input precision, native parameter conversion, FMA variance, square root of that native variance, clamps and each output subset. Benchmark fixtures must not turn valid no-solution shapes into numeric speedup entries. RES02–12 remain subject to their member-specific algorithm/profile gates and are not declared implemented by this migration.
 
 ## Native algorithms and third-party comparison
 

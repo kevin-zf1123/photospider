@@ -9,7 +9,7 @@ implementation_status: not_implemented
 parent_id: RES-12
 function: gaussian_lowpass
 proposed_operation_keys: []
-numeric_reference: B+E
+numeric_reference: F
 oracle_scope: composed_math_references
 ---
 
@@ -17,7 +17,7 @@ oracle_scope: composed_math_references
 
 Explicit low-pass baseline for screen-pattern suppression.
 
-Inherits the [RES-12 family contract](RES-12_contract.md), [FILTER common contract](FILTER_common_contract.md), [NUM numerical/precision contract](../../01-numeric/op_specs/NUM_common_contract.md), and [FMT metadata/straight-color semantics](../../02-format-color/op_specs/FMT_common_contract.md). The family and member formulas together form the complete draft; this member cannot override RN, underflow, or accelerated error baselines.
+Inherits the [RES-12 family contract](RES-12_contract.md), [FILTER common contract](FILTER_common_contract.md), [RES native floating-point contract](RES_native_contract.md), and [FMT metadata/straight-color semantics](../../02-format-color/op_specs/FMT_common_contract.md). The family and member formulas together form the complete draft; native arithmetic follows RES_native_contract without NUM exact-expression or four-ULP requirements.
 
 ## Ports, shapes, and semantics
 
@@ -29,15 +29,15 @@ Ports carry Results with fixed Tensor member schemas. Unless the member defines 
 
 All FIL-04B parameters are explicit. No default resizing or automatic frequency estimation is used; axes are explicit.
 
-Inherit NaN, Inf, overflow, signed-zero, payload, rounding, and precision semantics from the corresponding NUM operation. Callers guarantee the member's finite-parameter, control-model and numerical-domain premises; production execution does not validate those premises. Copy/bypass and unconsumed data follow their dependency contracts. Every parameter must be supplied explicitly; constructors provide no defaults, except constants fixed by a named mathematical profile. Real parameters denote their stored Float64 values; decimal text is not treated as an exact real.
+Use native IEEE arithmetic under RES_native_contract; no NUM whole-expression rounding or NaN payload priority is required. Callers guarantee the member's finite-parameter, control-model and numerical-domain premises; production execution does not validate those premises. Copy/bypass and unconsumed data follow their dependency contracts. Every parameter must be supplied explicitly; constructors provide no defaults, except constants fixed by a named mathematical profile. Real parameters denote their stored Float64 values; decimal text is not treated as an exact real.
 
 ## Mathematical reference and rounding boundaries
 
-Numeric classification: **B+E**. See [FILTER_numeric_reference](FILTER_numeric_reference.md) for the meanings of E/B/S.
+Numeric classification: **F**, native fp32/fp64 under [RES_native_contract](RES_native_contract.md).
 
-Reuse the gaussian_baked64_v1 low-pass filter as a named authoring preset, not as a new mathematical primitive. For downsampling, connect an explicit sampling node from the geometry category; this filter alone does not recover detail hidden by the screen pattern.
+Reuse the gaussian_baked64_v1 low-pass filter as a named authoring preset, not as a new mathematical primitive. This delegation preserves the existing FIL coefficient profile and interface accuracy; it does not impose NUM strict-expression or four-ULP requirements on new RES-native kernels, and does not silently redefine FIL arithmetic. For downsampling, connect an explicit sampling node from the geometry category; this filter alone does not recover detail hidden by the screen pattern.
 
-When a formula calls another member, preserve the RN stages produced by that call as specified here or by the family contract. Internal temporary operations must not add undeclared rounding. Signed zero, numerical-domain premises and explicit valid-input no-solution outcomes, gradual underflow, and output range follow the common contract and NUM.
+Preserve the declared algorithmic stages, masks, support, copy branches and iteration order. Within a stage, native arithmetic, FMA, vectorization and reduction regrouping are permitted under [RES native floating-point contract](RES_native_contract.md). An explicitly called member keeps its own interface contract.
 
 ## Fixed reads, algorithmic control and schemas
 
@@ -49,7 +49,7 @@ Boundary coordinates use the complete logical image; ROI and tile edges are not 
 
 As specified by FIL04B; select quality parameters to match the screen-pattern period to the sampling grid.
 
-Here P=HW, C is the number of independent planes, A is the tap count, and T is the iteration count. Arbitrary-precision limb complexity is additional and is not a measured benchmark. Shared contracts govern work/memory/stage admission, cancellation, failure status, and owner lifetime; a failed call publishes no successful Result export, while previously retired call exports remain valid and final RET results require successful Run completion. Do not spill automatically, silently reduce precision, or fall back to retired implementations.
+Here P=HW, C is the number of independent planes, A is the tap count, and T is the iteration count. Shared contracts govern work/memory/stage admission, cancellation, failure status, and owner lifetime; a failed call publishes no successful Result export, while previously retired call exports remain valid and final RET results require successful Run completion. Do not spill automatically, silently reduce precision, or fall back to retired implementations.
 
 ## Oracle, fixtures, and acceptance
 
@@ -68,11 +68,11 @@ See the [oracle README](../../../../oracle/ops/filter/README.md) for reproductio
 
 This file does not propose a native arithmetic key ready for registration. The authoring helper must explicitly connect finalized members. Any external engine must first pass resource, licensing, actual-golden, and numerical-configuration gates.
 
-Float64 acceleration retains Float64 inputs, outputs, and exponent range; it does not first convert to Float32. Values outside the Float32-scale range use strict NUM fallback. No kernel, CPU/ISA performance, or differential acceptance runs for this package have been performed.
+Float64 paths retain native Float64 inputs, arithmetic, outputs and exponent range; no Float32 conversion or NUM strict fallback is introduced.
 
 ## Conceptual DAG (not an existing API)
 
-`static parameters + schemas → compile fixed reads/tasks → prepare → unchecked arithmetic with declared RN stages → complete tiles → ordered call retirement`
+`static parameters + schemas → compile fixed reads/tasks → prepare → native arithmetic with declared algorithmic stages → complete tiles → ordered call retirement`
 
 This sketch introduces no implicit color conversion, hidden alpha premultiplication, automatic spectral correction, or zero-filling of missing data. complete-input behavior and multi-stage buffers are governed by this member and its family contract.
 

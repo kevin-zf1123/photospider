@@ -8,12 +8,14 @@ implementation_status: not_implemented
 parent_id: RES-05
 function: tv_rof_anisotropic_early_stop
 proposed_operation_keys:
-- restoration.tv_rof_anisotropic_early_stop_strict
-numeric_reference: S; asynchronous stopping profile
+- restoration.tv_rof_anisotropic_early_stop
+numeric_reference: F
 oracle_scope: mathematical_reference
 ---
 
 # RES-05D: Anisotropic ROF total-variation denoising with asynchronous early stopping
+
+This family uses [RES native floating-point contract](RES_native_contract.md).
 
 This is an independent early-stopping profile. It does not add a stop-mode switch to the fixed-step member. Inherit the full input/output, shape, boundary, recurrence, numeric and resource contract from [RES-05](RES-05_contract.md) and the corresponding fixed-step member [RES-05B_tv_rof_anisotropic.md](RES-05B_tv_rof_anisotropic.md). All parameters, including `y_axis`, `x_axis`, `max_iterations`, check interval, `atol`, `rtol` and algorithm controls, are explicit required inputs; factories supply no defaults.
 
@@ -25,7 +27,7 @@ The iterative state follows the main input dtype `t`; publish the final output d
 
 ## Stopping criterion
 
-Use the per-plane primal–dual gap criterion `(P(u)-D(p_hat))/N <= atol + rtol*max(abs(P(u))/N, abs(D(p_hat))/N)`, with N pixels and a dual verification state that is explicitly made feasible. `atol` is in average-objective units and `rtol` is dimensionless. Apply NUM-compatible exact discrete comparisons; NaN/Inf is not convergence evidence. The check does not claim perceptual quality.
+Use the per-plane primal–dual gap criterion `(P(u)-D(p_hat))/N <= atol + rtol*max(abs(P(u))/N, abs(D(p_hat))/N)`, with N pixels and a dual verification state that is explicitly made feasible. `atol` is in average-objective units and `rtol` is dimensionless. Apply comparisons of the computed native values; NaN/Inf is not convergence evidence. The check does not claim perceptual quality.
 
 ## Asynchronous lifecycle
 
@@ -33,7 +35,7 @@ Use [FILTER iterative contract](FILTER_iterative_contract.md) for check scheduli
 
 ## Errors and resource limits
 
-Parameter/control-model domains remain member-specific. Ordinary numeric propagation follows the corresponding NUM operation; a non-finite value needed by a stopping check makes that check inconclusive and it does not request convergence. Static structural and parameter-type errors retain pre-execution diagnostics. Numerical/model premises are caller obligations; resource exhaustion, cancellation, backend/upstream failures and explicit valid-input no-solution outcomes retain their defined operational behavior. Charge retained check states and concurrent work to the execution budget. Do not silently change algorithm, precision, or iteration limit.
+Parameter/control-model domains remain member-specific. Ordinary numeric propagation follows native arithmetic; a non-finite value needed by a stopping check makes that check inconclusive and it does not request convergence. Static structural and parameter-type errors retain pre-execution diagnostics. Numerical/model premises are caller obligations; resource exhaustion, cancellation, backend/upstream failures and explicit valid-input no-solution outcomes retain their defined operational behavior. Charge retained check states and concurrent work to the execution budget. Do not silently change algorithm, precision, or iteration limit.
 
 ## Acceptance
 

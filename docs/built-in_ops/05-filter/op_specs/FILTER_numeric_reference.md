@@ -12,6 +12,8 @@ implementation_status: partially_implemented
 
 ## Exact expressions, baked constants and staged states
 
+The E/B/S definitions below apply to members declaring those classes. RES-01 through RES-12 instead use [RES native class F](RES_native_contract.md); their formulas no longer require NUM strict rounding or four-ULP accelerated fallback.
+
 RN_t(x) rounds an exact finite real directly to Float32 or Float64, nearest,
 ties-to-even, with gradual underflow. Finite stored floating values are exact binary
 rationals. Unmarked arithmetic denotes mathematical evaluation, not host instructions.
@@ -23,19 +25,8 @@ rationals. Unmarked arithmetic denotes mathematical evaluation, not host instruc
   Gaussian g[j]=RN64(exp(-j²/(2*sigma²))) uses symmetric absolute indices. sigma=0
   requires radius=0 and coefficient 1; positive sigma permits radius=0. A separately
   stored 2D outer product adds rounding and is not the same filter.
-* **S:** public intermediates, pyramid levels and declared iterative stages round at
-  their specified boundaries and become exact inputs to the next stage. TV u/p/ubar,
-  diffusion and RL images, and blind image/gradient stages use the main image dtype
-  t. Blind PSF simplex state is exact rational. Explicit baked64 coefficients retain
-  RN64. Iteration order/ROI/thread count cannot move these rounding boundaries.
-
-* **F:** FRQ-01A/B and FRQ-02A/B approximate their mathematical DFT using
-  ordinary floating-point FFT arithmetic. Twiddles, intermediate operations and
-  normalization round at machine precision. The implementation uses binary64
-  working values and converts to the input dtype at output. No correctly rounded
-  final output, certified per-component error bound, cross-platform bit identity
-  or exact fallback is required. The [F acceptance criteria](FILTER_oracle_protocol.md#ordinary-floating-point-transform-acceptance)
-  compare measured error against mathematical references.
+* **S:** public intermediates and declared stages round at specified boundaries and become inputs to the next stage. This exact-stage classification remains available to non-RES members. RES05/06/09/10 instead retain algorithmic iteration boundaries with native input-dtype state under class F.
+* **F:** ordinary native floating-point computation. FRQ-01A/B and FRQ-02A/B use native fp32/fp64 FFT arithmetic; twiddles, intermediates and normalization round at the working precision. RES-01 through RES-12 use the [RES native contract](RES_native_contract.md), including its explicit helper and Float64 scalar exceptions. No correctly rounded whole-expression output, NUM FP32-scaled four-ULP bound, cross-platform bit identity or exact production fallback is required. See the transform and RES acceptance sections of [FILTER_oracle_protocol](FILTER_oracle_protocol.md).
 
 Finite E intermediates cannot fail or become infinity merely because host arithmetic
 overflows. A finite exact value rounded beyond the destination range produces signed
@@ -44,11 +35,11 @@ Convex-combination bounds do not justify clipping signed kernels or restoration.
 
 ## Exceptional values and operand order
 
-For F transforms, ordinary executed arithmetic determines exceptional propagation,
+For F members, ordinary executed arithmetic determines exceptional propagation,
 NaN payloads and zero signs. Intermediate overflow may produce Inf/NaN despite a
-finite exact DFT. RFFT retains its explicitly constructed boundary conjugates
+finite mathematical result. RFFT retains its explicitly constructed boundary conjugates
 and structural imaginary zeros. The following exact-expression ordering and
-special-value rules apply to E/B/S members, not the four F transforms.
+special-value rules apply to E/B/S members, not class F members.
 
 Inherit [NUM binary](../../01-numeric/op_specs/NUM-05_binary_contract.md),
 [NUM reductions](../../01-numeric/op_specs/NUM-11_reduction_contract.md),
@@ -89,8 +80,7 @@ is added to enforce those premises.
 
 ## Accelerated acceptance
 
-The four F transforms have one ordinary CPU mode and use their own numerical
-acceptance criteria. This section governs named accelerated E/B/S profiles.
+F members have native CPU execution and use their own numerical acceptance criteria. This section governs named accelerated E/B/S profiles.
 
 Apply [NUM acceleration](../../01-numeric/op_specs/NUM_accelerated_contract.md) to
 final outputs. Float32 uses at most four ordered finite IEEE steps. For Float64

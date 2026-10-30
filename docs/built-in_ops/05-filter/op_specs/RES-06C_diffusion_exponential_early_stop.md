@@ -8,24 +8,26 @@ implementation_status: not_implemented
 parent_id: RES-06
 function: diffusion_exponential_early_stop
 proposed_operation_keys:
-- restoration.diffusion_exponential_early_stop_strict
-numeric_reference: S; asynchronous stopping profile
+- restoration.diffusion_exponential_early_stop
+numeric_reference: F
 oracle_scope: mathematical_reference
 ---
 
 # RES-06C: Exponential edge-preserving diffusion with asynchronous early stopping
 
+This family uses [RES native floating-point contract](RES_native_contract.md).
+
 This is an independent early-stopping profile. It does not add a stop-mode switch to the fixed-step member. Inherit the full input/output, shape, boundary, recurrence, numeric and resource contract from [RES-06](RES-06_contract.md) and the corresponding fixed-step member [RES-06A_diffusion_exponential.md](RES-06A_diffusion_exponential.md). Every algorithm control, `y_axis`, `x_axis`, `max_iterations`, `rate_tolerance`, and check interval is mandatory; constructors have no defaults.
 
 ## Recurrence and state
 
-Use RES-06A’s synchronous explicit diffusion recurrence, no-flux boundary and its exponential conductance `c_ij=RN64(exp(-(d_ij/kappa)^2))`; preserve the ordinary state in the main input dtype.
+Use RES-06A’s synchronous explicit diffusion recurrence, no-flux boundary and its exponential conductance `c_ij=exp(-(d_ij/kappa)^2) in the input dtype`; preserve the ordinary state in the main input dtype.
 
 The recurrence state follows main input dtype `t`, and the final result is rounded directly to `t` with RN_t. Fixed-step profiles never stop early; this member has a distinct explicit `max_iterations` bound.
 
 ## Stopping criterion
 
-At a check, use the current complete state and the baked conductances to compute the discrete diffusion rate `F_i(u)=sum_j c_ij*(u_j-u_i)/spacing_ij^2`. Stop when `max_i abs(F_i(u)) <= rate_tolerance`. `rate_tolerance` is an explicitly supplied finite nonnegative value measured in value-units per diffusion-time. Compute the stated flux expression directly; do not substitute a rounded state delta divided by `dt`. The criterion measures this discrete model’s rate, not denoising quality. Conductance underflow to zero can affect the stable state.
+At a check, use the current complete state and native-precision conductances evaluated from that same state to compute the discrete diffusion rate `F_i(u)=sum_j c_ij*(u_j-u_i)/spacing_ij^2`. Stop when `max_i abs(F_i(u)) <= rate_tolerance`. `rate_tolerance` is an explicitly supplied finite nonnegative value measured in value-units per diffusion-time. Compute the stated flux expression directly; do not substitute a rounded state delta divided by `dt`. The criterion measures this discrete model’s rate, not denoising quality. Conductance underflow to zero can affect the stable state.
 
 ## Asynchronous lifecycle
 
@@ -33,7 +35,7 @@ Use the shared [FILTER iterative contract](FILTER_iterative_contract.md) for sch
 
 ## Errors and resource limits
 
-Parameter/control-model domains remain member-specific. Ordinary numeric propagation follows the corresponding NUM operation; a non-finite value needed by a stopping check makes that check inconclusive and it does not request convergence. Static structural and parameter-type errors retain pre-execution diagnostics. Numerical/model premises are caller obligations; resource exhaustion, cancellation, backend/upstream failures and explicit valid-input no-solution outcomes retain their defined operational behavior. Charge retained check states and concurrent work to the execution budget. Do not silently change algorithm, precision, or iteration limit.
+Parameter/control-model domains remain member-specific. Ordinary numeric propagation follows native arithmetic; a non-finite value needed by a stopping check makes that check inconclusive and it does not request convergence. Static structural and parameter-type errors retain pre-execution diagnostics. Numerical/model premises are caller obligations; resource exhaustion, cancellation, backend/upstream failures and explicit valid-input no-solution outcomes retain their defined operational behavior. Charge retained check states and concurrent work to the execution budget. Do not silently change algorithm, precision, or iteration limit.
 
 ## Acceptance
 

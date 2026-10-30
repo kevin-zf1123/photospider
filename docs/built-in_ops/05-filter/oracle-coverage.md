@@ -1,5 +1,7 @@
 # Filter oracle coverage
 
+RES01–12 now use native class F. Existing rational/directed entries below describe mathematical oracle evidence, not whole-expression bitwise native acceptance. RES01's entry points explicitly model native stages; its former formulas remain named exact-reference helpers. RES02–12 references remain ideal/staged diagnostics until their native implementations and dtype-aware acceptance are supplied.
+
 The [oracle README](../../../oracle/ops/filter/README.md) describes reproducible commands
 and optional dependencies. [tests.py](../../../oracle/ops/filter/tests.py) dispatches the
 executable assertions and [shared acceptance](op_specs/FILTER_oracle_protocol.md)
@@ -113,10 +115,10 @@ is used as third-party golden output.
 | [RES-06D](op_specs/RES-06D_diffusion_reciprocal_early_stop.md) | Not covered in core suite | None | Predicate and asynchronous runtime not implemented in the oracle; fixed-step recurrence fixtures do not validate this profile. |
 | [RES-07A](op_specs/RES-07A_anscombe_forward.md) | DirectedMPFR | `anscombe_forward_zero` | Finite small-array fixtures; no full nonfinite, tensor/Region, resource or runtime coverage. |
 | [RES-07B](op_specs/RES-07B_anscombe_inverse_algebraic.md) | ExactRational | `anscombe_algebraic` | Finite small-array fixtures; no full nonfinite, tensor/Region, resource or runtime coverage. |
-| [RES-07C](op_specs/RES-07C_anscombe_inverse_mean.md) | Not covered in core suite | None | High-precision diagnostic only (optional mpmath); no strict tail/integration/root certificate. |
+| [RES-07C](op_specs/RES-07C_anscombe_inverse_mean.md) | Not covered in core suite | None | High-precision diagnostic only (optional mpmath); native truncation/root accuracy coverage is incomplete; no production implementation. |
 | [RES-07D](op_specs/RES-07D_generalized_anscombe_forward.md) | DirectedMPFR | `generalized_forward_negative_observation` | Finite small-array fixtures; no full nonfinite, tensor/Region, resource or runtime coverage. |
 | [RES-07E](op_specs/RES-07E_generalized_anscombe_inverse_algebraic.md) | ExactRational | `generalized_algebraic_returns_offset` | Finite small-array fixtures; no full nonfinite, tensor/Region, resource or runtime coverage. |
-| [RES-07F](op_specs/RES-07F_generalized_anscombe_inverse_mean.md) | Not covered in core suite | None | High-precision diagnostic only (optional mpmath); no strict tail/integration/root certificate. |
+| [RES-07F](op_specs/RES-07F_generalized_anscombe_inverse_mean.md) | Not covered in core suite | None | High-precision diagnostic only (optional mpmath); native truncation/root accuracy coverage is incomplete; no production implementation. |
 | [RES-08A](op_specs/RES-08A_wiener_nsr.md) | ContractFixture, ExactRational | `wiener_delta`, `wiener_singular_minimum_norm`, `wiener_singular_error` | Finite small-array fixtures; no full nonfinite, tensor/Region, resource or runtime coverage. |
 | [RES-08B](op_specs/RES-08B_tikhonov_periodic.md) | ExactRational | `tikhonov_gradient_constant` | Finite small-array fixtures; no full nonfinite, tensor/Region, resource or runtime coverage. |
 | [RES-09A](op_specs/RES-09A_richardson_lucy_poisson.md) | ContractFixture, ExactRational, ExactRationalStaged, ExactSpecial | `rl_nan_zero_prediction_float32`, `rl_nan_zero_prediction_float64`, `rl_delta_one_step`; additional cases in tests.py | Finite staged solver/adjoint; exceptional ratio scalar only, not full exceptional trajectory. |

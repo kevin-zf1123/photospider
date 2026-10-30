@@ -22,7 +22,7 @@ specification acceptance and maturity separately from runtime availability.
 
 Member rules refine family rules and this category contract. FRQ-01A/B and
 FRQ-02A/B use the explicit ordinary floating-point F exception in
-[FRQ-01](FRQ-01_contract.md#shared-mathematics-units-and-profiles). Other members do not override
+[FRQ-01](FRQ-01_contract.md#shared-mathematics-units-and-profiles). RES-01 through RES-12 use the scoped [RES native F contract](RES_native_contract.md). Other members do not override
 the rounding/accuracy baseline in [NUM](../../01-numeric/op_specs/NUM_common_contract.md)
 and [NUM acceleration](../../01-numeric/op_specs/NUM_accelerated_contract.md), or
 straight color and storage in [FMT](../../02-format-color/op_specs/FMT_common_contract.md),
@@ -63,7 +63,7 @@ are Int64; real static parameters are finite Float64 stored values unless the
 member explicitly specifies a different parameter domain.
 
 [Numeric reference](FILTER_numeric_reference.md) defines exact expressions, baked
-constants, staged state and the F transform exception. Outside that exception,
+constants, staged state and the F native arithmetic exceptions. Outside that exception,
 NaN/Inf, payload, signed zero, floating overflow and
 underflow follow corresponding NUM operations. There is no category-wide finite
 sample requirement and no category-wide floating-overflow failure. Parameter, mask, PSF, geometry and model domains are member-defined caller premises. Nonfinite arithmetic follows the member's F or NUM behavior and does not suppress required upstream failures.
@@ -87,7 +87,7 @@ Requests normalize to complete retained tiles on each Result's own grid. Every m
 Mathematically valid sizes, radii, levels and iteration counts are governed by
 inherited representability limits, necessary profile constraints and execution
 budgets. Do not impose arbitrary fixed capability caps. An oracle's tiny-image
-work cap is not a runtime input limit. Except for the four F-profile transforms, CPU strict reference is the baseline;
+work cap is not a runtime input limit. For E/B/S members, CPU strict reference is the baseline;
 Apple Silicon and x86_64 acceleration require named capabilities, actual ISA checks,
 final-value NUM error bounds and strict fallback. GPU support is not implicit.
 
@@ -97,6 +97,7 @@ capacity/work/stage budgets. Mathematical operation counts exclude neither limb
 cost nor refinement work from actual accounting. CPU callbacks poll cancellation
 every 1024 scalar work units or sooner, including refinement and long solves.
 FRQ-01/02 may prepay deterministic transform lines, root construction, input/output blocks and column gather/scatter blocks as defined in [FRQ-01](FRQ-01_contract.md#runtime-integration-and-remaining-acceptance); independent cancellation checks inside each block retain this interval.
+RES-01B may prepay the deterministic selected pointwise region at a bound of six scalar work units per sample; it checks cancellation independently before spans of at most 128 samples and at completion. RES-01A keeps incremental accounting for data-dependent selection.
 A GPU profile must declare a finite work bound per nonpreemptive native submission,
 check cancellation before submission and after completion, and drain submitted
 work before releasing any referenced owner. It must report measured cancellation
@@ -105,8 +106,7 @@ and successful result publication; it does not imply device preemption. Resource
 does not lower precision, change algorithms or spill to disk. Early-stop state
 retention and cooperative termination follow [iteration](FILTER_iterative_contract.md).
 
-Fixed-step strict profiles preserve reproducible state trajectories. Accelerated
-profiles retain exact discrete decisions and NUM final-value bounds. Independent
+Fixed-step E/B/S strict profiles preserve reproducible state trajectories. Their accelerated profiles retain exact discrete decisions and NUM final-value bounds. Native RES fixed-step profiles retain their specified recurrence and dtype-aware numerical acceptance. Independent
 asynchronous early-stop invocations may select different returned rounds; the frozen executor retains no cross-Run result cache. Operator-defined stopping and explicit state follow the iteration contract.
 
 ### Shared executor ownership
@@ -131,9 +131,7 @@ The resource model's exclusions remain in force; managed capacity is not RSS.
 Host mapping and first-touch policy, effective CPU lane counts and omitted
 intermediate exports without an observer are shared executor behavior. They do
 not change the member's mathematics, complete-write obligation or scratch size
-for one invocation. The four currently implemented F-profile transforms have
-their explicit exception; other strict members retain their own whole-expression
-rounding obligation. A composition of ordinary FFT outputs does not establish
+for one invocation. The F-profile transforms and RES01–12 have their scoped native arithmetic exceptions; E/B/S members retain their own whole-expression rounding obligation. A composition of ordinary FFT outputs does not establish
 an E-strict result.
 
 ## Errors and acceptance

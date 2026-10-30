@@ -17,18 +17,18 @@ members:
 
 The objective, boundary, solver and stopping rule jointly define each profile. A library “weight” is not interchangeable with this contract’s lambda.
 
-Inherit the [FILTER common contract](FILTER_common_contract.md), [NUM](../../01-numeric/op_specs/NUM_common_contract.md), and [FMT](../../02-format-color/op_specs/FMT_common_contract.md). These are proposed target contracts; they do not assert implementation or registration. Image fields bind distinct static Int64 `y_axis` and `x_axis` values as defined by the FILTER common contract; all remaining axes are independent batch/channel planes.
+Inherit the [FILTER common contract](FILTER_common_contract.md), [RES native floating-point contract](RES_native_contract.md), and [FMT](../../02-format-color/op_specs/FMT_common_contract.md). These are proposed target contracts; they do not assert implementation or registration. Image fields bind distinct static Int64 `y_axis` and `x_axis` values as defined by the FILTER common contract; all remaining axes are independent batch/channel planes.
 
 ## Members
 
 | ID | Specification | Type | Numeric profile |
 | --- | --- | --- | --- |
-| RES-05A | [Isotropic ROF, fixed steps](RES-05A_tv_rof_isotropic.md) | primitive | S |
-| RES-05B | [Anisotropic ROF, fixed steps](RES-05B_tv_rof_anisotropic.md) | primitive | S |
-| RES-05C | [Isotropic ROF, asynchronous early stop](RES-05C_tv_rof_isotropic_early_stop.md) | primitive | S |
-| RES-05D | [Anisotropic ROF, asynchronous early stop](RES-05D_tv_rof_anisotropic_early_stop.md) | primitive | S |
+| RES-05A | [Isotropic ROF, fixed steps](RES-05A_tv_rof_isotropic.md) | primitive | F |
+| RES-05B | [Anisotropic ROF, fixed steps](RES-05B_tv_rof_anisotropic.md) | primitive | F |
+| RES-05C | [Isotropic ROF, asynchronous early stop](RES-05C_tv_rof_isotropic_early_stop.md) | primitive | F |
+| RES-05D | [Anisotropic ROF, asynchronous early stop](RES-05D_tv_rof_anisotropic_early_stop.md) | primitive | F |
 
-The suffix identifies a distinct mathematical/interface object, not a backend-selected quality tier. Primitive profiles may have separately named strict and accelerated implementations; helpers only compose explicit stages.
+The suffix identifies a distinct mathematical/interface object, not a backend-selected quality tier. Primitive profiles use native fp32/fp64 arithmetic; helpers compose explicit algorithmic stages.
 
 ## Shared objective and fixed-step recurrence
 
@@ -38,7 +38,7 @@ Initialize `u_0=f`, `ubar_0=f`, and `p_0=(0,0)`. A complete Jacobi iteration is 
 
 ## Numeric and execution obligations
 
-Ordinary arithmetic follows the corresponding NUM operation for NaN, Inf, floating overflow, signed zero, payload, rounding and precision. Callers guarantee the member's finite-parameter, control-model and numerical-domain premises; production execution does not validate those premises. Exact bits, gradual underflow, copy rules and discrete branches follow NUM; accelerated error budgets are not accumulated per tap, axis, stage or iteration.
+Ordinary arithmetic and stored state follow [RES native floating-point contract](RES_native_contract.md). Caller domain premises remain unchecked. Copy rules, support and discrete decisions remain normative, evaluated on native working values.
 
 The member’s support is normative. A halo does not imply independent evaluation on arbitrary clipped ROIs, and paging does not make a global dependency cancellable. Preserve the declared round stages, global dependencies and iterative state. Independently requested outputs must not cause hidden reads of unrequested payloads.
 

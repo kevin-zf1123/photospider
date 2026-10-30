@@ -9,10 +9,8 @@ implementation_status: not_implemented
 parent_id: RES-11
 function: pairwise_block_boundary_smoothing
 proposed_operation_keys:
-- restoration.pairwise_block_boundary_smoothing_strict
-- restoration.pairwise_block_boundary_smoothing_accelerated_apple_silicon
-- restoration.pairwise_block_boundary_smoothing_accelerated_x86_64
-numeric_reference: S
+- restoration.pairwise_block_boundary_smoothing
+numeric_reference: F
 oracle_scope: mathematical_reference
 ---
 
@@ -20,7 +18,7 @@ oracle_scope: mathematical_reference
 
 Pairwise smoothing across known block boundaries.
 
-Inherits the [RES-11 family contract](RES-11_contract.md), [FILTER common contract](FILTER_common_contract.md), [NUM numerical/precision contract](../../01-numeric/op_specs/NUM_common_contract.md), and [FMT metadata/straight-color semantics](../../02-format-color/op_specs/FMT_common_contract.md). The family and member formulas together form the complete draft; this member cannot override RN, underflow, or accelerated error baselines.
+Inherits the [RES-11 family contract](RES-11_contract.md), [FILTER common contract](FILTER_common_contract.md), [RES native floating-point contract](RES_native_contract.md), and [FMT metadata/straight-color semantics](../../02-format-color/op_specs/FMT_common_contract.md). The family and member formulas together form the complete draft; native arithmetic follows RES_native_contract without NUM exact-expression or four-ULP requirements.
 
 ## Ports, shapes, and semantics
 
@@ -32,15 +30,15 @@ Ports carry Results with fixed Tensor member schemas. Unless the member defines 
 
 block_width and block_height ≥ 2; integer origin_x and origin_y; threshold τ > 0; strength ∈ [0, 1/2] (0.25 is illustrative, not a default); axes; fixed execution order: horizontal x pass, then vertical y pass.
 
-Inherit NaN, Inf, overflow, signed-zero, payload, rounding, and precision semantics from the corresponding NUM operation. Callers guarantee the member's finite-parameter, control-model and numerical-domain premises; production execution does not validate those premises. Copy/bypass and unconsumed data follow their dependency contracts. Every parameter must be supplied explicitly; constructors provide no defaults, except constants fixed by a named mathematical profile. Real parameters denote their stored Float64 values; decimal text is not treated as an exact real.
+Use native IEEE arithmetic under RES_native_contract; no NUM whole-expression rounding or NaN payload priority is required. Callers guarantee the member's finite-parameter, control-model and numerical-domain premises; production execution does not validate those premises. Copy/bypass and unconsumed data follow their dependency contracts. Every parameter must be supplied explicitly; constructors provide no defaults, except constants fixed by a named mathematical profile. Real parameters denote their stored Float64 values; decimal text is not treated as an exact real.
 
 ## Mathematical reference and rounding boundaries
 
-Numeric classification: **S**. See [FILTER_numeric_reference](FILTER_numeric_reference.md) for the meanings of E/B/S.
+Numeric classification: **F**, native fp32/fp64 under [RES_native_contract](RES_native_contract.md).
 
-For each adjacent pair (l,r) on a block boundary, provided both lie inside the image, if abs(r-l) ≤ τ then set delta = strength*min(Ml,Mr)*(r-l), evaluated exactly, and produce l+=RN_t(l+delta), r-=RN_t(r-delta); otherwise copy both values. Pairs within a pass do not overlap because each block dimension is at least 2. The second, y pass reads the rounded output of the x pass. All other samples are bitwise copies. If min(Ml,Mr)=0 or strength=0, copy both values without computing the difference. A zero mask at either endpoint suppresses the whole pair, preserving every unmasked sample bit-for-bit.
+For each adjacent pair (l,r) on a block boundary, provided both lie inside the image, if abs(r-l) ≤ τ then set delta = strength*min(Ml,Mr)*(r-l), evaluated in native precision, and produce l+=RN_t(l+delta), r-=RN_t(r-delta); otherwise copy both values. Pairs within a pass do not overlap because each block dimension is at least 2. The second, y pass reads the rounded output of the x pass. All other samples are bitwise copies. If min(Ml,Mr)=0 or strength=0, copy both values without computing the difference. A zero mask at either endpoint suppresses the whole pair, preserving every unmasked sample bit-for-bit.
 
-When a formula calls another member, preserve the RN stages produced by that call as specified here or by the family contract. Internal temporary operations must not add undeclared rounding. Signed zero, numerical-domain premises and explicit valid-input no-solution outcomes, gradual underflow, and output range follow the common contract and NUM.
+Preserve the declared algorithmic stages, masks, support, copy branches and iteration order. Within a stage, native arithmetic, FMA, vectorization and reduction regrouping are permitted under [RES native floating-point contract](RES_native_contract.md). An explicitly called member keeps its own interface contract.
 
 ## Fixed reads, algorithmic control and schemas
 
@@ -52,13 +50,13 @@ Boundary coordinates use the complete logical image; ROI and tile edges are not 
 
 O(PC), with two S stages and synchronized pair updates. No automatic texture-based block detection is introduced.
 
-Here P=HW, C is the number of independent planes, A is the tap count, and T is the iteration count. Arbitrary-precision limb complexity is additional and is not a measured benchmark. Shared contracts govern work/memory/stage admission, cancellation, failure status, and owner lifetime; a failed call publishes no successful Result export, while previously retired call exports remain valid and final RET results require successful Run completion. Do not spill automatically, silently reduce precision, or fall back to retired implementations.
+Here P=HW, C is the number of independent planes, A is the tap count, and T is the iteration count. Shared contracts govern work/memory/stage admission, cancellation, failure status, and owner lifetime; a failed call publishes no successful Result export, while previously retired call exports remain valid and final RET results require successful Run completion. Do not spill automatically, silently reduce precision, or fall back to retired implementations.
 
 ## Oracle, fixtures, and acceptance
 
 For the two-pixel input [0,1], block_width=2, origin_x=1, strength=0.25, and τ=1, the output is [0.25,0.75]. Equality at τ activates correction; a zero mask preserves both samples; shifting the block origin changes which edge is selected.
 
-The reference function evaluates the numerical formula on small inputs; it is neither a production kernel nor a complete port-schema/preflight simulator. ExactRational rounds rational expressions directly to IEEE format. For transcendental functions, only a DirectedMPFR result whose interval endpoints round to the same value is a strict golden. If rounding cannot be determined, report Inconclusive rather than substituting an approximation.
+The reference evaluates the mathematical formula on small inputs. Existing ExactRational/DirectedMPFR fixtures remain ideal mathematical references, not bitwise goldens for native execution. Acceptance compares native results using dtype-aware absolute/relative error and algorithm invariants under [RES native floating-point contract](RES_native_contract.md); it separately verifies runtime schemas, support and ownership.
 
 `res11.restoration.pairwise_block_boundary_smoothing(image, mask, *, block_height=8, block_width=8, origin_y=0, origin_x=0, threshold=1, strength=Fraction(1, 4), dtype='float64')` → [source](../../../../oracle/ops/filter/res11/restoration.py).
 
@@ -68,13 +66,13 @@ See the [oracle README](../../../../oracle/ops/filter/README.md) for reproductio
 
 ## Backend and registration gates
 
-The keys above are naming proposals only; neither strict nor either CPU accelerated profile is registered or implemented. Accelerated profiles must satisfy NUM final-output bounds of four ULP at FP32 scale and provide strict fallback. The error allowance does not accumulate per tap, axis, stage, or iteration. Thresholds, ordering, boundaries, copies, and output support requiring exact selection cannot change through approximation.
+The proposed native key is unregistered and unimplemented. Accuracy follows RES_native_contract; no NUM strict fallback is required.
 
-Float64 acceleration retains Float64 inputs, outputs, and exponent range; it does not first convert to Float32. Values outside the Float32-scale range use strict NUM fallback. No kernel, CPU/ISA performance, or differential acceptance runs for this package have been performed.
+Float64 paths retain native Float64 inputs, arithmetic, outputs and exponent range; no Float32 conversion or NUM strict fallback is introduced.
 
 ## Conceptual DAG (not an existing API)
 
-`static parameters + schemas → compile fixed reads/tasks → prepare → unchecked arithmetic with declared RN stages → complete tiles → ordered call retirement`
+`static parameters + schemas → compile fixed reads/tasks → prepare → native arithmetic with declared algorithmic stages → complete tiles → ordered call retirement`
 
 This sketch introduces no implicit color conversion, hidden alpha premultiplication, automatic spectral correction, or zero-filling of missing data. complete-input behavior and multi-stage buffers are governed by this member and its family contract.
 

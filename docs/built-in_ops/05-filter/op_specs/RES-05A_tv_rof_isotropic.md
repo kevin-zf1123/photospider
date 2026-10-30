@@ -8,16 +8,14 @@ implementation_status: not_implemented
 parent_id: RES-05
 function: tv_rof_isotropic
 proposed_operation_keys:
-- restoration.tv_rof_isotropic_strict
-- restoration.tv_rof_isotropic_accelerated_apple_silicon
-- restoration.tv_rof_isotropic_accelerated_x86_64
-numeric_reference: S
+- restoration.tv_rof_isotropic
+numeric_reference: F
 oracle_scope: mathematical_reference
 ---
 
 # RES-05A: Isotropic ROF denoising, fixed steps
 
-Inherit the [RES-05 family contract](RES-05_contract.md), [FILTER common contract](FILTER_common_contract.md), [NUM](../../01-numeric/op_specs/NUM_common_contract.md), and [FMT](../../02-format-color/op_specs/FMT_common_contract.md). This is a raw numerical-field operation: it processes each plane independently and does not infer RGB, vector or alpha semantics from channel count or attached color metadata.
+Inherit the [RES-05 family contract](RES-05_contract.md), [FILTER common contract](FILTER_common_contract.md), [RES native floating-point contract](RES_native_contract.md), and [FMT](../../02-format-color/op_specs/FMT_common_contract.md). This is a raw numerical-field operation: it processes each plane independently and does not infer RGB, vector or alpha semantics from channel count or attached color metadata.
 
 ## Ports and shape
 
@@ -31,7 +29,7 @@ Inherit the [RES-05 family contract](RES-05_contract.md), [FILTER common contrac
 
 For each plane minimize `0.5*Σ(u-f)^2 + lambda*Σ phi(K_y u,K_x u)`, with `phi(a,b)=sqrt(a^2+b^2)`. Initialize `u=f`, `ubar=f`, and `p=(0,0)`. At each complete synchronous Jacobi step:
 
-1. `p_hat = p + sigma*K*ubar`, with the declared RN_t stage for each component.
+1. `p_hat = p + sigma*K*ubar`, with the declared native state-store stage for each component.
 2. `p_new = RN_t(p_hat/max(1,sqrt(p_hat_x^2+p_hat_y^2)/lambda))`.
 3. `u_new = RN_t((u - tau*K^T*p_new + tau*f)/(1+tau))`.
 4. `ubar_new = RN_t(u_new + theta*(u_new-u))`.
@@ -46,8 +44,8 @@ Work is `O(max_iterations*P*C)`, with dual planes and two generations each of `u
 
 ## Acceptance and oracle
 
-Check the zero-lambda and zero-step bit-copy branches, constant preservation, a hand-computed 2×2 one-step result, and the exact adjoint identity `<Ku,p>=<u,K^T p>`. Isotropic TV does not claim rotational invariance under grid rotation. Do not require the objective to decrease monotonically at every Chambolle–Pock step.
+Check the zero-lambda and zero-step bit-copy branches, constant preservation, a hand-computed 2×2 one-step result, and the bilinear identity `<Ku,p>=<u,K^T p>` within native-precision roundoff. The finite-grid adjoint must be the exact algebraic transpose, including boundary contributions; separately rounded inner products need not be bitwise equal. Account for accumulation length and absolute term magnitudes when checking cancellation-prone dot products. Isotropic TV does not claim rotational invariance under grid rotation. Do not require the objective to decrease monotonically at every Chambolle–Pock step.
 
 The oracle function is `res05.restoration.tv_cp(image, *, lam, iterations=100, tau=0.24, sigma=0.24, theta=1, dx=1, dy=1, isotropic=True, dtype="float64")` in [res05/restoration.py](../../../../oracle/ops/filter/res05/restoration.py). Its `iterations` argument corresponds to the proposed public `max_iterations` parameter. The `tv_one_step_True` fixture covers the reference formula using `ExactRationalStaged`; it does not establish runtime support or the full parameter, metadata, ROI, budget or cancellation contract. See the [oracle README](../../../../oracle/ops/filter/README.md).
 
-The proposed strict and CPU accelerated keys are not registered or implemented. Accelerated variants must meet NUM’s final FP32-scaled four-ULP bound and use strict fallback where required. Float64 paths retain Float64 input/output and exponent domain; Float32 out-of-range cases follow NUM fallback. No kernel/CPU/ISA performance or differential conformance is claimed here.
+The proposed native keys are not registered or implemented. Native fp32/fp64 acceptance follows [RES native floating-point contract](RES_native_contract.md). No implementation or performance evidence is asserted.

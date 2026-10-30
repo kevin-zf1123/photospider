@@ -8,12 +8,14 @@ implementation_status: not_implemented
 parent_id: RES-05
 function: tv_rof_isotropic_early_stop
 proposed_operation_keys:
-- restoration.tv_rof_isotropic_early_stop_strict
-numeric_reference: S; asynchronous stopping profile
+- restoration.tv_rof_isotropic_early_stop
+numeric_reference: F
 oracle_scope: mathematical_reference
 ---
 
 # RES-05C: Isotropic ROF total-variation denoising with asynchronous early stopping
+
+This family uses [RES native floating-point contract](RES_native_contract.md).
 
 This is an independent early-stopping profile. It does not add a stop-mode switch to the fixed-step member. Inherit the full input/output, shape, boundary, recurrence, numeric and resource contract from [RES-05](RES-05_contract.md) and the corresponding fixed-step member [RES-05A_tv_rof_isotropic.md](RES-05A_tv_rof_isotropic.md). All parameters, including `y_axis`, `x_axis`, `max_iterations`, check interval, `atol`, `rtol` and algorithm controls, are explicit required inputs; factories supply no defaults.
 
@@ -25,7 +27,7 @@ The iterative state follows the main input dtype `t`; publish the final output d
 
 ## Stopping criterion
 
-Use the per-plane primal–dual gap predicate and exact feasible-dual construction specified in [FILTER iterative contract](FILTER_iterative_contract.md). Required `atol` is in average-objective units and `rtol` is dimensionless. Both are finite and nonnegative. The check uses the same coherent round’s primal and dual state, does not alter solver state, and uses NUM-compatible exact comparisons; NaN/Inf cannot establish convergence.
+Use the per-plane primal–dual gap predicate and native feasible-dual construction specified in [FILTER iterative contract](FILTER_iterative_contract.md). Required `atol` is in average-objective units and `rtol` is dimensionless. Both are finite and nonnegative. The check uses the same coherent round’s primal and dual state, does not alter solver state, and uses comparisons of the computed native values; NaN/Inf cannot establish convergence.
 
 ## Asynchronous lifecycle
 
@@ -33,7 +35,7 @@ Use [FILTER iterative contract](FILTER_iterative_contract.md) for check scheduli
 
 ## Errors and resource limits
 
-Parameter/control-model domains remain member-specific. Ordinary numeric propagation follows the corresponding NUM operation; a non-finite value needed by a stopping check makes that check inconclusive and it does not request convergence. Static structural and parameter-type errors retain pre-execution diagnostics. Numerical/model premises are caller obligations; resource exhaustion, cancellation, backend/upstream failures and explicit valid-input no-solution outcomes retain their defined operational behavior. Charge retained check states and concurrent work to the execution budget. Do not silently change algorithm, precision, or iteration limit.
+Parameter/control-model domains remain member-specific. Ordinary numeric propagation follows native arithmetic; a non-finite value needed by a stopping check makes that check inconclusive and it does not request convergence. Static structural and parameter-type errors retain pre-execution diagnostics. Numerical/model premises are caller obligations; resource exhaustion, cancellation, backend/upstream failures and explicit valid-input no-solution outcomes retain their defined operational behavior. Charge retained check states and concurrent work to the execution budget. Do not silently change algorithm, precision, or iteration limit.
 
 ## Acceptance
 

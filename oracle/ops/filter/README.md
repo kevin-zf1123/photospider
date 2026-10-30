@@ -42,6 +42,12 @@ RES-07C/F 的均值域逆只提供诊断参考，不能当 strict golden。
 
 FRQ-01A/B、FRQ-02A/B 的数学参考仍保留精确/定向舍入求值；生产普通浮点 FFT 以这些结果测量误差，不再要求逐位一致。实际验收采用 [F 变换误差条件](../../../docs/built-in_ops/05-filter/op_specs/FILTER_oracle_protocol.md#ordinary-floating-point-transform-acceptance)。FRQ-02C 的严格投影参考不变。
 
+## RES 原生精度迁移
+
+RES01～12 采用原生 fp32/fp64；原有 Fraction/MPFR 结果保留为数学参考，不再作为整个算子的逐位 golden，也不要求 NUM 的 fp32 四 ULP。RES01 的 `noise_mad(...,dtype=...)` 按输入 dtype 显式舍入残差、中位数中点及偏差，再用独立认证的 Float64 常数归一化；`calibrated_variance` 先生成原生 FMA 方差，再对该已舍入方差开方。原表达式参考以 `noise_mad_exact_reference`、`calibrated_variance_exact_reference` 保留。
+
+RES02～12 的旧 oracle 仍用于数学/算法不变量比较；它们不是新 native 状态轨迹的逐位实现，尤其是 diffusion baked64、RL sensitivity 和 blind PSF rational state。后续实现须增加独立的 dtype-aware 验证。均值域 Anscombe 逆仍有正读噪声根求解覆盖缺口；本轮取消正确舍入认证门槛，不代表已补齐该缺口。
+
 ## 覆盖边界
 
 内部 Python 数学函数的便捷默认参数不代表公开 authoring 构造器默认值；规格要求的

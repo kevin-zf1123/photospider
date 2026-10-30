@@ -16,7 +16,7 @@ members:
 
 Explicit notch editing and low-pass screen-pattern suppression are separate workflows; automatic recognition of unknown patterns is not delegated to the implementation.
 
-This specification defines the target mathematics and interface contract only; it makes no claim about current implementation or registration. It inherits the [FILTER common contract](FILTER_common_contract.md), [NUM](../../01-numeric/op_specs/NUM_common_contract.md), and [FMT](../../02-format-color/op_specs/FMT_common_contract.md). No member is marked Accepted or production-implemented.
+This specification defines the target mathematics and interface contract only; it makes no claim about current implementation or registration. It inherits the [FILTER common contract](FILTER_common_contract.md), [RES native floating-point contract](RES_native_contract.md), and [FMT](../../02-format-color/op_specs/FMT_common_contract.md). No member is marked Accepted or production-implemented.
 
 ## Member classification
 
@@ -25,7 +25,7 @@ This specification defines the target mathematics and interface contract only; i
 | RES-12A | [Explicit paired-notch periodic-interference suppression](RES-12A_paired_notch_denoise.md) | authoring_helper | S |
 | RES-12B | [Gaussian low-pass filter (workflow helper)](RES-12B_gaussian_lowpass.md) | authoring_helper | B+E |
 
-Letter suffixes identify distinct mathematical or interface objects; they are not quality tiers that a backend may choose arbitrarily. Primitives may propose strict and accelerated profiles; helpers only orchestrate explicit stages.
+Letter suffixes identify distinct mathematical or interface objects; they are not quality tiers that a backend may choose arbitrarily. Primitives use native fp32/fp64 arithmetic; helpers orchestrate explicit algorithmic stages.
 
 ## Shared mathematics, units, and profiles
 
@@ -33,7 +33,7 @@ Each member file listed above defines its own formula. Members share no undeclar
 
 ## Shared execution and numerical obligations
 
-E denotes one final RN_t rounding of the exact expression; B denotes explicitly generated and fixed coefficients; S denotes declared staged rounding. See [numeric reference](FILTER_numeric_reference.md). Ordinary arithmetic propagates NaN, Inf, floating-point overflow, signed zero, payload, rounding, and precision according to the corresponding NUM operation. Callers guarantee the member's finite-parameter, control-model and numerical-domain premises; production execution does not validate those premises. Strict bits, final FP32-scaled four-ULP bounds, gradual underflow, copies, and exact discrete branches inherit NUM.
+All members use native class F under [RES_native_contract](RES_native_contract.md). Shape, support, copies and declared algorithmic stages remain normative. Numerical/model premises are caller obligations, without a production validation scan or NUM four-ULP fallback.
 
 Positive-weight normalized filters, signed kernels, local regression, and global inverse problems have different semantics and do not share one alpha-blur rule. See [color composition](FILTER_color_composition.md). Spatial extension/anchor/origin follow the [boundary contract](FILTER_boundary_contract.md); structured outputs follow the [collection contract](FILTER_collections_contract.md). Shapes depend only on descriptors; each member defines mathematical support and fixed compiled reads.
 

@@ -20,28 +20,28 @@ members:
 
 Forward transforms, algebraic inverses, and mean-domain bias-aware inverses are separate members. Inverting an arbitrary denoiser output is not claimed to be statistically unbiased.
 
-This specification defines the intended mathematics and interface contract only; it makes no claim about current implementation or registration. It inherits the [FILTER common contract](FILTER_common_contract.md), [NUM](../../01-numeric/op_specs/NUM_common_contract.md), and [FMT](../../02-format-color/op_specs/FMT_common_contract.md). No member has been marked Accepted or as a production implementation.
+This specification defines the intended mathematics and interface contract only; it makes no claim about current implementation or registration. It inherits the [FILTER common contract](FILTER_common_contract.md), [RES native floating-point contract](RES_native_contract.md), and [FMT](../../02-format-color/op_specs/FMT_common_contract.md). No member has been marked Accepted or as a production implementation.
 
 ## Members
 
 | ID | Function Spec | Kind | Numeric Reference |
 | --- | --- | --- | --- |
-| RES-07A | [Anscombe forward transform](RES-07A_anscombe_forward.md) | primitive | E |
-| RES-07B | [Algebraic Anscombe inverse](RES-07B_anscombe_inverse_algebraic.md) | primitive | E |
-| RES-07C | [Poisson mean-domain inverse](RES-07C_anscombe_inverse_mean.md) | primitive | E |
-| RES-07D | [Generalized Anscombe forward transform](RES-07D_generalized_anscombe_forward.md) | primitive | E |
-| RES-07E | [Generalized algebraic inverse](RES-07E_generalized_anscombe_inverse_algebraic.md) | primitive | E |
-| RES-07F | [Poisson–Gaussian mean-domain inverse](RES-07F_generalized_anscombe_inverse_mean.md) | primitive | E |
+| RES-07A | [Anscombe forward transform](RES-07A_anscombe_forward.md) | primitive | F |
+| RES-07B | [Algebraic Anscombe inverse](RES-07B_anscombe_inverse_algebraic.md) | primitive | F |
+| RES-07C | [Poisson mean-domain inverse](RES-07C_anscombe_inverse_mean.md) | primitive | F |
+| RES-07D | [Generalized Anscombe forward transform](RES-07D_generalized_anscombe_forward.md) | primitive | F |
+| RES-07E | [Generalized algebraic inverse](RES-07E_generalized_anscombe_inverse_algebraic.md) | primitive | F |
+| RES-07F | [Poisson–Gaussian mean-domain inverse](RES-07F_generalized_anscombe_inverse_mean.md) | primitive | F |
 
-Suffix letters denote distinct mathematical/interface objects, not quality tiers that a backend may choose arbitrarily. A primitive may propose strict and accelerated profiles; a helper only orchestrates explicit stages.
+Suffix letters denote distinct mathematical/interface objects, not quality tiers that a backend may choose arbitrarily. Each primitive uses one native fp32/fp64 key; a helper orchestrates explicit algorithmic stages.
 
 ### Observation Units
 Poisson count P has mean λ≥0. Anscombe input is a count, allowing finite noninteger nonnegative measurements. Generalized observations follow y=aP+b+N(0,s²), where a>0 is gain, b is offset, and s≥0 is read_sigma; the stabilized output is dimensionless. The generalized forward transform explicitly applies max(.,0) to a negative radicand and does not reject a Gaussian noisy observation merely because it may be negative.
-A mean-domain inverse assumes z estimates E[stabilizer(Y)|λ]; it is not an exact inverse of a single stabilized observation. For Poisson data, m(λ)=Σ_(k≥0) e^-λ λ^k/k! * 2sqrt(k+3/8). For the generalized transform, let ρ=s/a and define mρ(λ)=Σ Poisson(k;λ) ∫ φ(t)*2sqrt(max(k+3/8+ρ²+ρt,0))dt. Solve for λ≥0; return λ=0 when z≤mρ(0), and the unique monotone root when z>mρ(0) (s=0 reduces to the Poisson case). RES-07C and RES-07F may be registered only after strict validation of probability/integral tail bounds, root brackets, and final correct rounding. High-precision agreement alone is insufficient. Resource exhaustion must fail explicitly; do not fall back to an algebraic inverse.
+A mean-domain inverse assumes z estimates E[stabilizer(Y)|λ]; it is not an exact inverse of a single stabilized observation. For Poisson data, m(λ)=Σ_(k≥0) e^-λ λ^k/k! * 2sqrt(k+3/8). For the generalized transform, let ρ=s/a and define mρ(λ)=Σ Poisson(k;λ) ∫ φ(t)*2sqrt(max(k+3/8+ρ²+ρt,0))dt. Solve for λ≥0; return λ=0 when z≤mρ(0), and the unique monotone root when z>mρ(0) (s=0 reduces to the Poisson case). RES-07C and RES-07F require documented probability/integral truncation and root tolerances, monotone branch handling, and independent high-precision error tests over their supported range. Native fp32/fp64 accuracy is required; exact final rounding and arbitrary-precision production certification are not registration gates. Resource exhaustion must fail explicitly; do not fall back to an algebraic inverse.
 
 ## Shared Execution and Numeric Obligations
 
-E denotes evaluation of the exact expression followed by one final RN_t; B denotes explicitly generated, fixed coefficients; S denotes explicitly staged rounding. See the [numeric reference](FILTER_numeric_reference.md). Ordinary arithmetic propagates NaN, Inf, floating-point overflow, signed zero, payload, rounding, and precision according to the corresponding NUM operation. Callers guarantee the member's finite-parameter, control-model and numerical-domain premises; production execution does not validate those premises. Strict bits, final FP32-scaled four-ULP bounds, gradual underflow, copy behavior, and exact discrete branches inherit NUM.
+All members use numeric class F under [RES native floating-point contract](RES_native_contract.md). The input dtype selects native fp32 or fp64 arithmetic and stored state. Caller domain premises remain unchecked; shape, support, copy branches and algorithmic stages remain normative. There is no strict/accelerated quality split or NUM four-ULP fallback.
 
 Positive-weight normalization, signed kernels, local regression, and global inverse problems have different semantics and must not be treated as one alpha-blurring operation. See [color composition](FILTER_color_composition.md). Spatial extension, anchors, and origins follow the [boundary contract](FILTER_boundary_contract.md); structured outputs follow the [collection contract](FILTER_collections_contract.md). Shape depends only on descriptors; each member defines mathematical support and fixed compiled reads.
 

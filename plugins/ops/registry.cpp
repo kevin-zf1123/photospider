@@ -14,6 +14,7 @@ Status register_builtin_operations(OperationRegistry* registry) {
   }
   for (const auto function : {register_filters,
                               register_frequency,
+                              register_restoration,
                               register_mask_color,
                               register_mask_statistics,
                               register_mask_pointwise,

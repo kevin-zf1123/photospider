@@ -16,42 +16,32 @@ members:
 
 Wiener NSR and Tikhonov use different parameters; the initial contract defines periodic boundaries only.
 
-This specification defines the intended mathematics and interface contract only; it makes no claim about current implementation or registration. It inherits the [FILTER common contract](FILTER_common_contract.md), [NUM](../../01-numeric/op_specs/NUM_common_contract.md), and [FMT](../../02-format-color/op_specs/FMT_common_contract.md). No member has been marked Accepted or as a production implementation.
+This specification defines the intended mathematics and interface contract only; it makes no claim about current implementation or registration. It inherits the [FILTER common contract](FILTER_common_contract.md), [RES native floating-point contract](RES_native_contract.md), and [FMT](../../02-format-color/op_specs/FMT_common_contract.md). No member has been marked Accepted or as a production implementation.
 
 ## Members
 
 | ID | Function Spec | Kind | Numeric Reference |
 | --- | --- | --- | --- |
-| RES-08A | [Scalar-NSR Wiener restoration](RES-08A_wiener_nsr.md) | primitive | E |
-| RES-08B | [Periodic Tikhonov restoration](RES-08B_tikhonov_periodic.md) | primitive | E |
+| RES-08A | [Scalar-NSR Wiener restoration](RES-08A_wiener_nsr.md) | primitive | F |
+| RES-08B | [Periodic Tikhonov restoration](RES-08B_tikhonov_periodic.md) | primitive | F |
 
-Suffix letters denote distinct mathematical/interface objects, not quality tiers that a backend may choose arbitrarily. A primitive may propose strict and accelerated profiles; a helper only orchestrates explicit stages.
+Suffix letters denote distinct mathematical/interface objects, not quality tiers that a backend may choose arbitrarily. Each primitive uses one native fp32/fp64 key; a helper orchestrates explicit algorithmic stages.
 
-### Exact Operator
-Observation y is a signed numerical field; nonfinite arithmetic follows NUM. The Float64 PSF is nonnegative with exact sum>0; it may exceed the image size and is folded periodically. Specify the anchor. Normalize the PSF by its exact sum. A is the resulting finite periodic convolution matrix, and H its exact DFT frequency response (do not first RN it into a spectral tensor). The DFT/IFFT, complex products, and denominator in the restoration formula form one E mathematical expression, with one final RN_t per pixel. An explicitly composed chain of ordinary F-profile FRQ transforms and rounded pointwise operations is a separate experimental workflow; it does not establish this member’s E-strict result.
-If a frequency denominator is exactly zero, apply the explicitly supplied `singular=zero|error` policy. The zero policy sets that frequency estimate to complex +0, an explicit minimum-energy fill for missing frequencies; it does not claim to recover information. Nonnegative lambda/nsr are caller premises with no production domain-validation pass. Self-conjugate frequencies ensure a real result. Do not clip the output or apply automatic gamma/tone mapping. The initial profile does not accept reflected PSF boundaries; a nonperiodic inverse problem requires a separate key and matched A/AT definitions.
+### Native periodic operator
+
+Observation y is a signed numerical field. Convert PSF taps to the input dtype, normalize by a native positive sum, fold periodically at the explicit anchor, and form the native FFT response H. The mathematical operator A is the finite periodic convolution with those coefficients. Evaluate the DFT, complex products, denominator and inverse DFT in native input precision. Preserve FRQ transform normalization and boundary conjugacy. Report conditioning-sensitive error; near-singular amplification is not a reason to claim exact recovery.
+
+If the computed native frequency denominator is zero, apply explicit `singular=zero|error`. Zero sets the estimate to complex +0, a minimum-energy fill for the missing frequency. Error reports the defined valid-input no-solution outcome. Nonnegative lambda/nsr and positive PSF mass are unchecked caller premises. Do not clip output or apply gamma/tone mapping. A nonperiodic inverse problem requires a separately specified matched A/AT model.
 
 ## Shared Execution and Numeric Obligations
 
-E denotes evaluation of the exact expression followed by one final RN_t; B denotes explicitly generated, fixed coefficients; S denotes explicitly staged rounding. See the [numeric reference](FILTER_numeric_reference.md). Ordinary arithmetic propagates NaN, Inf, floating-point overflow, signed zero, payload, rounding, and precision according to the corresponding NUM operation. Callers guarantee the member's finite-parameter, control-model and numerical-domain premises; production execution does not validate those premises. Strict bits, final FP32-scaled four-ULP bounds, gradual underflow, copy behavior, and exact discrete branches inherit NUM.
+All members use numeric class F under [RES native floating-point contract](RES_native_contract.md). The input dtype selects native fp32 or fp64 arithmetic and stored state. Caller domain premises remain unchecked; shape, support, copy branches and algorithmic stages remain normative. There is no strict/accelerated quality split or NUM four-ULP fallback.
 
 Positive-weight normalization, signed kernels, local regression, and global inverse problems have different semantics and must not be treated as one alpha-blurring operation. See [color composition](FILTER_color_composition.md). Spatial extension, anchors, and origins follow the [boundary contract](FILTER_boundary_contract.md); structured outputs follow the [collection contract](FILTER_collections_contract.md). Shape depends only on descriptors; each member defines mathematical support and fixed compiled reads.
 
-### Accelerated evaluation and ownership
+### Native evaluation and ownership
 
-A strict FFT-based candidate needs certification and a conforming fallback for
-the entire restoration expression and its final RN_t. Exact PSF normalization,
-denominator formation and singular-frequency decisions remain part of that
-target; certifying an individual FFT alone is insufficient. A separately named
-accelerated profile retains the NUM final-value bound and exact discrete
-branches. Neither profile automatically inherits the transforms' F exception.
-
-Spectra, PSF/solver tables, workspace and certification/fallback state covered by
-the resource model must be reserved and charged to their documented owners.
-Exhausted capacity/work or cancellation cannot turn an uncertified candidate into
-a successful result. All accepted internal work drains before invocation
-completion. Retained immutable Results or PreparedPlans may outlive the Context;
-they do not extend the lifetime of borrowed invocation storage.
+Native FFT execution follows class F. No exact-restoration-expression certification or NUM fallback is required. Spectra, normalized PSF, solver tables and workspace must be reserved and charged to their documented owners. Exhausted capacity/work or cancellation fails the invocation. All accepted internal work drains before completion. Retained immutable Results or PreparedPlans may outlive Context without extending borrowed invocation storage.
 
 ## Dependencies and Acceptance
 
