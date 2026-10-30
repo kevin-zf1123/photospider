@@ -24,7 +24,7 @@ FRQ-07～10 和 RES-01～12 使用原生 fp32/fp64 浮点契约（数值类别 F
 - Wiener 使用噪声信号比 NSR，Tikhonov 使用正则项，两者不同；Richardson–Lucy 使用有限算子 A 的真实转置 Aᵀ 与 sensitivity。
 - Anscombe 的代数逆与均值域逆是不同成员。
 - RES-11A 是低对比区域平滑，RES-11B 是成对块边界平滑，二者不自动识别色带、块网格或真实边缘；RES-12B 是 Gaussian 低通 helper，频率尺度由调用者指定。
-- BM3D/CBM3D 为原生实现定义，第三方对照实现与版本尚未指定。
+- BM3D/CBM3D 使用固定 `haar_opponent_v1` profile：两阶段正交 Haar 滤波与 Kaiser 加权重建；CBM3D 使用固定 opponent 坐标，在第一坐标上匹配，三个坐标分别滤波。参数、边界及平局规则见 [RES-04 族契约](op_specs/RES-04_contract.md)。
 
 ## 10 个频域族 / 26 个成员
 
@@ -103,8 +103,8 @@ FRQ-07～10 和 RES-01～12 使用原生 fp32/fp64 浮点契约（数值类别 F
 | [RES-02B — nlm_noise_corrected](op_specs/RES-02B_nlm_noise_corrected.md) | primitive / D2_draft | `restoration.nlm_noise_corrected` | 已实现 |
 | [RES-03A — threshold_wavelet_details](op_specs/RES-03A_threshold_wavelet_details.md) | primitive / D2_draft | `restoration.threshold_wavelet_details` | 已实现 |
 | [RES-03B — cycle_spin_wavelet_denoise](op_specs/RES-03B_cycle_spin_wavelet_denoise.md) | authoring_helper / D2_draft | — | 已实现 |
-| [RES-04A — bm3d_native](op_specs/RES-04A_bm3d_native.md) | primitive / D2_draft | — | 未实现 |
-| [RES-04B — cbm3d_native](op_specs/RES-04B_cbm3d_native.md) | primitive / D2_draft | — | 未实现 |
+| [RES-04A — bm3d_native](op_specs/RES-04A_bm3d_native.md) | primitive / D2_draft | `restoration.bm3d_native` | 已实现 |
+| [RES-04B — cbm3d_native](op_specs/RES-04B_cbm3d_native.md) | primitive / D2_draft | `restoration.cbm3d_native` | 已实现 |
 | [RES-05A — Isotropic ROF denoising, fixed steps](op_specs/RES-05A_tv_rof_isotropic.md) | primitive | `restoration.tv_rof_isotropic` | 未实现 |
 | [RES-05B — Anisotropic ROF denoising, fixed steps](op_specs/RES-05B_tv_rof_anisotropic.md) | primitive | `restoration.tv_rof_anisotropic` | 未实现 |
 | [RES-05C — Isotropic ROF total-variation denoising with asynchronous early stopping](op_specs/RES-05C_tv_rof_isotropic_early_stop.md) | primitive | `restoration.tv_rof_isotropic_early_stop` | 未实现 |

@@ -8,6 +8,7 @@ Status register_frequency(OperationRegistry* registry);
 Status register_restoration(OperationRegistry* registry);
 Status register_restoration_nlm(OperationRegistry* registry);
 Status register_restoration_wavelet(OperationRegistry* registry);
+Status register_restoration_bm3d(OperationRegistry* registry);
 Status register_mask_color(OperationRegistry* registry);
 Status register_mask_statistics(OperationRegistry* registry);
 Status register_mask_pointwise(OperationRegistry* registry);
