@@ -7,7 +7,7 @@ kind: primitive
 category: 07-grade
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented
 clarification_status: complete
 execution: tile
 proposed_operation_keys:
@@ -26,9 +26,17 @@ Csel is the number of selected slots. Suggested rows [1,0]. Gains and offsets ma
 
 Port ordering, tensor members, calculation dtype, channel selection, static parameter types and unchecked premises follow the common contract. Output shape and dtype are those in the signature.
 
+### Current parameters
+
+The current operation key and selector parameter types are specified in the [family parameter profile](GRD-02_offset_gain_contract.md#current-parameters). Controls are read from the current dynamic input on each invocation; the prepared operation retains no numeric controls payload.
+
 ## Mathematics
 
 `y=x*gain+offset`. A row [1,0] copies its source. Signed/HDR values remain unclipped.
+
+### Current native algorithm/profile
+
+The implementation evaluates `fma(gain, Float64(x), offset)` in binary64 and converts once to the image element type. Native FMA follows the common floating profile; no clipping, saturation or range normalization is introduced. Identity rows `[1,0]` and unselected components copy the original element bytes independently. Contiguous spans use binary64 NEON or runtime-admitted AVX2/FMA; other layouts use bounded gathering or scalar evaluation of the same formula.
 
 ## Behavior
 

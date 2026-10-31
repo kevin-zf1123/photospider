@@ -13,6 +13,7 @@ Status register_builtin_operations(OperationRegistry* registry) {
     return diagnostics;
   }
   for (const auto function : {register_grade_exposure,
+                              register_grade_affine,
                               register_filters,
                               register_frequency,
                               register_restoration,
