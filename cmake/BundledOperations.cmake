@@ -49,6 +49,7 @@ set(PHOTOSPIDER_OPERATION_SOURCES
   plugins/ops/07-grade/exposure.cpp
   plugins/ops/07-grade/affine.cpp
   plugins/ops/07-grade/contrast.cpp
+  plugins/ops/07-grade/levels.cpp
   plugins/ops/05-filter/restoration_noise.cpp
   plugins/ops/05-filter/restoration_nlm.cpp
   plugins/ops/05-filter/restoration_wavelet.cpp

@@ -7,7 +7,7 @@ kind: primitive
 category: 07-grade
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented
 clarification_status: complete
 execution: tile
 proposed_operation_keys:
@@ -25,6 +25,10 @@ Inherits the [family contract](GRD-04_levels_contract.md) and [GRD common contra
 The domains and suggested controls are those of [GRD-04A](GRD-04A_levels_bounded.md).
 
 Port ordering, tensor members, calculation dtype, channel selection, static parameter types and unchecked premises follow the common contract. Output shape and dtype are those in the signature.
+
+## Current parameters
+
+The operation uses the [current family selector and native computation profiles](GRD-04_levels_contract.md#current-parameters), including ordered `components:String` and required dynamic `Float64[Csel,5]` controls.
 
 ## Mathematics
 
