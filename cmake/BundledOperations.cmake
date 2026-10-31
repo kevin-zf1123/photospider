@@ -46,6 +46,7 @@ if(NOT PHOTOSPIDER_FMT10_SIMD)
 endif()
 
 set(PHOTOSPIDER_OPERATION_SOURCES
+  plugins/ops/07-grade/exposure.cpp
   plugins/ops/05-filter/restoration_noise.cpp
   plugins/ops/05-filter/restoration_nlm.cpp
   plugins/ops/05-filter/restoration_wavelet.cpp

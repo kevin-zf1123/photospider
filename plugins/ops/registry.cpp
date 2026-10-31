@@ -12,7 +12,8 @@ Status register_builtin_operations(OperationRegistry* registry) {
   if (!diagnostics.ok()) {
     return diagnostics;
   }
-  for (const auto function : {register_filters,
+  for (const auto function : {register_grade_exposure,
+                              register_filters,
                               register_frequency,
                               register_restoration,
                               register_restoration_nlm,

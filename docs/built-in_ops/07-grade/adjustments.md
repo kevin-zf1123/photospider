@@ -52,8 +52,8 @@
 
 | 成员 | 类别 / 执行 / 成熟度 | 提议注册 key | 实现状态 |
 | --- | --- | --- | --- |
-| [GRD-01A Uniform linear exposure](op_specs/GRD-01A_exposure.md) | primitive / tile / D1_draft | `grade.exposure` | not_implemented |
-| [GRD-01B Exposure from a spatial EV field](op_specs/GRD-01B_exposure_field.md) | primitive / tile / D1_draft | `grade.exposure_field` | not_implemented |
+| [GRD-01A Uniform linear exposure](op_specs/GRD-01A_exposure.md) | primitive / tile / D1_draft | `grade.exposure` | implemented |
+| [GRD-01B Exposure from a spatial EV field](op_specs/GRD-01B_exposure_field.md) | primitive / tile / D1_draft | `grade.exposure_field` | implemented |
 | [GRD-02A Per-component affine adjustment](op_specs/GRD-02A_offset_gain.md) | primitive / tile / D1_draft | `grade.offset_gain` | not_implemented |
 | [GRD-02B Lift, gamma and gain](op_specs/GRD-02B_lift_gamma_gain.md) | primitive / tile / D1_draft | `grade.lift_gamma_gain` | not_implemented |
 | [GRD-03A Linear contrast around a pivot](op_specs/GRD-03A_contrast_linear.md) | primitive / tile / D1_draft | `grade.contrast_linear` | not_implemented |
