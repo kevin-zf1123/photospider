@@ -5,6 +5,7 @@
 namespace ps::plugin_internal {
 Status register_grade_exposure(OperationRegistry* registry);
 Status register_grade_affine(OperationRegistry* registry);
+Status register_grade_contrast(OperationRegistry* registry);
 Status register_filters(OperationRegistry* registry);
 Status register_frequency(OperationRegistry* registry);
 Status register_restoration(OperationRegistry* registry);

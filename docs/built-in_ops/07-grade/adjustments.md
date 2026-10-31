@@ -56,8 +56,8 @@
 | [GRD-01B Exposure from a spatial EV field](op_specs/GRD-01B_exposure_field.md) | primitive / tile / D1_draft | `grade.exposure_field` | implemented |
 | [GRD-02A Per-component affine adjustment](op_specs/GRD-02A_offset_gain.md) | primitive / tile / D1_draft | `grade.offset_gain` | implemented |
 | [GRD-02B Lift, gamma and gain](op_specs/GRD-02B_lift_gamma_gain.md) | primitive / tile / D1_draft | `grade.lift_gamma_gain` | implemented |
-| [GRD-03A Linear contrast around a pivot](op_specs/GRD-03A_contrast_linear.md) | primitive / tile / D1_draft | `grade.contrast_linear` | not_implemented |
-| [GRD-03B Contrast on the exposure axis](op_specs/GRD-03B_contrast_log2.md) | primitive / tile / D1_draft | `grade.contrast_log2` | not_implemented |
+| [GRD-03A Linear contrast around a pivot](op_specs/GRD-03A_contrast_linear.md) | primitive / tile / D1_draft | `grade.contrast_linear` | implemented |
+| [GRD-03B Contrast on the exposure axis](op_specs/GRD-03B_contrast_log2.md) | primitive / tile / D1_draft | `grade.contrast_log2` | implemented |
 | [GRD-04A Bounded levels](op_specs/GRD-04A_levels_bounded.md) | primitive / tile / D1_draft | `grade.levels_bounded` | not_implemented |
 | [GRD-04B Signed levels](op_specs/GRD-04B_levels_signed.md) | primitive / tile / D1_draft | `grade.levels_signed` | not_implemented |
 | [GRD-05A Component curves with linear interpolation](op_specs/GRD-05A_curves_linear.md) | primitive / tile / D1_draft | `grade.curves_linear` | not_implemented |

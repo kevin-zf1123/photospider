@@ -7,7 +7,7 @@ kind: primitive
 category: 07-grade
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented
 clarification_status: complete
 execution: tile
 proposed_operation_keys:
@@ -26,9 +26,17 @@ contrast>=0; suggested [1,0.18]. Pivot uses the source coordinate unit.
 
 Port ordering, tensor members, calculation dtype, channel selection, static parameter types and unchecked premises follow the common contract. Output shape and dtype are those in the signature.
 
+### Current parameters
+
+The operation key and current selector encoding follow the [family parameter profile](GRD-03_contrast_contract.md#current-parameters). The image and control tensors are required dynamic inputs.
+
 ## Mathematics
 
 `y=pivot+(x-pivot)*contrast`. contrast=1 copies x; contrast=0 selects the pivot. Results are unclipped.
+
+### Current native algorithm/profile
+
+Selected values are evaluated as `fma(contrast, Float64(x)-pivot, pivot)` and converted once to T. `contrast=1` and unselected components copy original bytes; `contrast=0` selects the binary64 pivot before the final conversion. This is an unclipped native binary64 algorithm under the common floating acceptance profile. Fused arithmetic is permitted; it does not impose strict whole-expression rounding.
 
 ## Behavior
 

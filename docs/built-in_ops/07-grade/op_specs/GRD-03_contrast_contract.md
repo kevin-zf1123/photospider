@@ -5,7 +5,7 @@ kind: shared_operator_contract
 category: 07-grade
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented
 clarification_status: complete
 ---
 
@@ -19,6 +19,19 @@ Inherit [GRD common](GRD_common_contract.md) for port representation, native flo
 | --- | --- | --- |
 | [GRD-03A](GRD-03A_contrast_linear.md) | Linear contrast around a pivot | `grade.contrast_linear` |
 | [GRD-03B](GRD-03B_contrast_log2.md) | Contrast on the exposure axis | `grade.contrast_log2` |
+
+## Current parameters
+
+Both operation keys use the existing scalar-parameter ABI. The current selector profile represents the common contract's ordered component array as `components:String`, containing unique, comma-separated canonical nonnegative decimal indices such as `"2,0,1"`. The order determines the row order in the required dynamic `Float64[Csel,2]` controls tensor. No image/control broadcasting or implicit control defaults are supplied.
+
+| Static parameter | Type | Meaning |
+| --- | --- | --- |
+| `axis` | Int64 | Required with raw selectors; zero-based component axis within the tensor cell, excluding explicit batch axes. |
+| `components` | String | Required with `axis`; ordered selected component indices in the encoding above. |
+| `input_description` | String | Optional FMT tensor-description encoding; resolves component selection instead of raw `axis` and `components`. |
+| `group` | String | Optional named color group, only with `input_description`. |
+
+Raw selectors make the input coordinate meaning a caller assertion. A supplied description for `grade.contrast_log2` declares linear RGB or Gray with `gray_kind=linear_y`. Control rows contain `[contrast,pivot]`, use binary64, and are read from the current dynamic input each invocation. The native computation profile and continuous tolerances are inherited unchanged from the common contract.
 
 ## Shared mathematics and behavior
 

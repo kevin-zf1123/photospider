@@ -14,6 +14,7 @@ Status register_builtin_operations(OperationRegistry* registry) {
   }
   for (const auto function : {register_grade_exposure,
                               register_grade_affine,
+                              register_grade_contrast,
                               register_filters,
                               register_frequency,
                               register_restoration,
