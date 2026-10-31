@@ -21,11 +21,15 @@ Inherit the [baking template contract](CRV-04_bake_lut1d.md) in full for authori
 
 ## Interface and expansion
 
-Dynamic inputs are start, end, followed by the named coefficient inputs in the expression contract. Input shapes/dtypes and constraints follow the [source specification](NUM-01_sample_expression.md); start/end are independent Float32/Float64 [1] scalars. Authoring requires expression and count, with count in [1,1048576]. dtype defaults to float64; profile is strict/apple_silicon/x86_64, default strict. The constructor derives canonical coefficient_names from the expression under NUM-01's rules, rather than requiring the caller to repeat the identifiers. The expanded node receives all required expression, coefficient_names, count and dtype parameters explicitly. For example, expression="a*x+b" derives the ordered coefficient names a,b and matching edges.
+Dynamic inputs are start, end, followed by the named coefficient inputs in the expression contract. Input shapes/dtypes and constraints follow the [source specification](NUM-01_sample_expression.md); start/end are independent Float32/Float64 [1] scalars. Authoring requires expression and count, with count in [1,1048576]. dtype defaults to float64; profile is strict/apple_silicon/x86_64/fast, default strict. The constructor derives canonical coefficient_names from the expression under NUM-01's rules, rather than requiring the caller to repeat the identifiers. The expanded node receives all required expression, coefficient_names, count and dtype parameters explicitly. For example, expression="a*x+b" derives the ordered coefficient names a,b and matching edges.
 
 The expansion is one numeric.sample_expression node with the selected profile suffix, with the dynamic inputs connected in its documented port order and its explicit static parameters. That node's values and axis are exported directly. No adapter or additional sampling node is inserted.
 
 Each exported shape/dtype is inferred by its expanded source. This single-function template returns values[count] without a component axis. Axis is always Float64 [3]. For count=1 it is [start,start,0] and no end payload is evaluated. The source's remaining domain, finite-value, precision and query-support restrictions are not normalized or weakened.
+
+## Native fast numerical profile
+
+`CpuNumericProfile::Fast` selects this template's fast node expansion and native coordinate/source formulas in the [family profile](CRV-04_bake_lut1d.md#native-fast-numerical-profile). The constructor remains a graph helper and adds no runtime bake key.
 
 ## Acceptance
 

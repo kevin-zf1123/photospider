@@ -29,6 +29,10 @@ The hard comparison `x >= threshold` selects exact typed 1, otherwise +0. The fi
 
 Only the selected Gray is consumed; all other channels bypass. The operation materializes output and rejects forced view. Empty demand emits no payload. Integer packing stays in codecs.
 
+## Native fast numerical profile
+
+The authoring parameter `profile="fast"` appends the registered operation `mask.threshold_channel_fast`. It uses the ordered native `x >= threshold` predicate, with an upward-rounded Float32 comparison bound when necessary. The [family fast profile](FMT-11_model_conversion_contract.md#native-fast-numerical-profile) defines arithmetic and algorithm selection.
+
 ## Acceptance
 
 Gray l=[0.25,0.5,0.75], threshold=0.5 yields [0,1,1]. Semantic NaN is outside the caller precondition. Also cover both dtypes, signed zeros and threshold neighbors.

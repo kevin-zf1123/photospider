@@ -6,6 +6,7 @@ function: linspace
 operation_family: numeric.linspace
 proposed_operation_keys:
   - numeric.linspace_strict
+  - numeric.linspace_fast
   - numeric.linspace_accelerated_apple_silicon
   - numeric.linspace_accelerated_x86_64
 category: 01-numeric
@@ -54,6 +55,12 @@ Equal endpoints and duplicate rounded samples are valid; consumers that require 
 Finite active floating inputs and finite rounded selected floating outputs are unchecked caller preconditions; a selected axis requires a finite rounded step, and selected values tiles require finite rounded samples only within those tiles. Unselected outputs impose no output-range requirement.
 
 For count greater than one, values and axis depend on both scalar inputs, even for endpoint-only output. Count one depends only on start; the second input is still schema-checked. Empty selections read nothing. Values use global indices; unselected coordinates are not computed. Selected outputs share one call: an operational failure prevents successful publication of that call's outputs. Unsupported accelerated targets return BackendUnavailable.
+
+## Native fast numerical profile
+
+The additional `numeric.linspace_fast` key is selected by `CpuNumericProfile::Fast`. For an interior position it computes binary64 `t=i/(count-1)` and `fma(t,end-start,start)`, or `(1-t)*start+t*end` if the subtraction overflows, then converts to the selected output dtype. Endpoints are selected directly, count=1 reads only start, and axis has `[start,end,(end-start)/(count-1)]` or `[start,start,0]`. This is ordinary native evaluation rather than NUM correctly rounded rational coordinates. Repeated addition is not used.
+
+The endpoint-inclusive native grid and count-one/axis-only calculation are defined by the [CRV-04 fast profile](CRV-04_bake_lut1d.md#native-fast-numerical-profile).
 
 ## Acceptance
 

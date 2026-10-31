@@ -11,6 +11,7 @@ implementation_status: implemented_cpu_fixed_abi_8
 clarification_status: complete
 registered_operation_keys:
   - color.gray_to_color_strict
+  - color.gray_to_color_fast
   - color.gray_to_color_accelerated_apple_silicon
   - color.gray_to_color_accelerated_x86_64
 ---
@@ -30,6 +31,10 @@ The Gray slot expands into three canonical-order slots, retaining other channels
 ## Behavior
 
 Outputs that depend on Gray read it; inserted zero opponents have no sample dependency. This member materializes output and rejects forced view, even for a bypass-only request. Semantic sample validity is a caller precondition.
+
+## Native fast numerical profile
+
+The additional `_fast` operation key uses the same mathematical transform with the native FP32/FP64 algorithm and profile defined in the [family contract](FMT-11_model_conversion_contract.md#native-fast-numerical-profile). The strict and accelerated keys retain their existing numerical contracts.
 
 ## Acceptance
 

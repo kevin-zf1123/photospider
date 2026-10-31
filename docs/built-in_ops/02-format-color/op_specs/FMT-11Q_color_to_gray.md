@@ -11,6 +11,7 @@ implementation_status: implemented_cpu_fixed_abi_8
 clarification_status: complete
 registered_operation_keys:
   - color.color_to_gray_strict
+  - color.color_to_gray_fast
   - color.color_to_gray_accelerated_apple_silicon
   - color.color_to_gray_accelerated_x86_64
 ---
@@ -30,6 +31,10 @@ The native coordinate (Y, Y', l or L) is copied; the caller supplies the corresp
 ## Behavior
 
 Only the selected Y/Y'/l/L is consumed mathematically; discarded chroma is not read. Auto/materialize copy into independent dense output tiles. A nonempty forced view fails `InvalidArgument/ViewUnavailable`. Empty has no payload. Semantic sample validity is a caller precondition.
+
+## Native fast numerical profile
+
+The additional `_fast` operation key uses the same mathematical transform with the native FP32/FP64 algorithm and profile defined in the [family contract](FMT-11_model_conversion_contract.md#native-fast-numerical-profile). The strict and accelerated keys retain their existing numerical contracts.
 
 ## Acceptance
 

@@ -16,16 +16,22 @@ namespace ps {
  * bounded by 4*2^(floor(log2(abs(reference)))-23) in the normal FP32 range.
  * Zero, FP32-subnormal-range and out-of-FP32-range references use strict.
  * Special values, signed zero, integer/discrete results, copies and selected
- * endpoints preserve their exact operator rules. Monotonicity and other
- * operator invariants remain additional requirements; a per-value bound alone
- * does not establish them. Final expression output, not each isolated math
- * call, owns the numeric error budget. Caller floating state is preserved.
+ * endpoints preserve their exact operator rules for those profiles.
+ * Monotonicity and other operator invariants remain additional requirements; a
+ * per-value bound alone does not establish them. Final expression output, not
+ * each isolated math call, owns the numeric error budget. Fast instead uses the
+ * registered operator's native FP32/FP64 contract, with ordinary intermediate
+ * rounding and overflow, without the NUM final-rounding guarantee. Caller
+ * floating state is preserved for every profile.
  */
 enum class CpuNumericProfile : std::uint32_t {
   Unspecified = 0,
   Strict = 1,
   AppleSiliconNeon = 2,
-  X86Avx2 = 3
+  X86Avx2 = 3,
+  /** Native floating arithmetic; available on explicitly registered fast keys.
+   */
+  Fast = 4
 };
 /** @brief Bounded numerical fallback categories; resource/upstream failures
  * are never recoverable numerical fallbacks.

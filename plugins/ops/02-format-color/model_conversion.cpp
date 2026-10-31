@@ -12,6 +12,7 @@
 #include <utility>
 #include <vector>
 
+#include "02-format-color/fast_color.hpp"
 #include "02-format-color/model_math.hpp"
 #include "02-format-color/model_simd.hpp"
 #include "02-format-color/result_mapping.hpp"
@@ -35,6 +36,8 @@ struct Slot final {
   std::uint64_t source = 0;
 };
 struct Preparation final {
+  bool fast = false;
+  fast_color::Model native;
   MathConfig math;
   std::shared_ptr<const SchemaTemplate> output_schema;
   std::shared_ptr<const Constants> constants;
@@ -413,7 +416,8 @@ void native_metadata(const TensorInterpretation& interpretation,
 
 Result<OperationPreparation> prepare(
     Kind kind, SequenceProfile profile,
-    const std::vector<OperationMetadata>& inputs, const Params& p) {
+    const std::vector<OperationMetadata>& inputs, const Params& p,
+    bool fast = false) {
   using Answer = Result<OperationPreparation>;
   try {
     auto available = numeric_ops::sequence_profile_available(profile);
@@ -434,6 +438,7 @@ Result<OperationPreparation> prepare(
     auto selected = std::make_shared<Preparation>();
     auto& out = *selected;
     out.source_shape = full_shape;
+    out.fast = fast;
     out.math.kind = kind;
     out.math.profile = profile;
     out.math.narrow = input.descriptor.element_type == ElementType::Float32;
@@ -923,6 +928,29 @@ Result<OperationPreparation> prepare(
     if (!constants.ok())
       throw constants.status();
     out.constants = constants.take_value();
+    auto& native = out.native;
+    native.kind = static_cast<unsigned>(kind);
+    native.gray = static_cast<unsigned>(out.math.gray);
+    native.input_pi = out.math.input_pi;
+    native.output_pi = out.math.output_pi;
+    native.white_xy = out.math.white;
+    native.white = {
+        out.math.white[0] / out.math.white[1], 1,
+        (1 - out.math.white[0] - out.math.white[1]) / out.math.white[1]};
+    native.threshold = out.math.threshold;
+    native.literal_levels = true;
+    native.level_bits = out.math.levels;
+    native.black =
+        numeric_ops::numeric_double(out.math.levels[0], out.math.narrow);
+    native.bright =
+        numeric_ops::numeric_double(out.math.levels[1], out.math.narrow);
+    for (unsigned r = 0; r < 3; ++r)
+      for (unsigned c = 0; c < 3; ++c) {
+        const auto a = out.constants->first_fast[r][c];
+        const auto b = out.constants->second_fast[r][c];
+        native.first[r][c] = a.low + (a.high - a.low) * .5;
+        native.second[r][c] = b.low + (b.high - b.low) * .5;
+      }
     OperationPreparation result;
     result.outputs.push_back(std::move(output));
     result.state = std::move(selected);
@@ -965,7 +993,7 @@ std::uint64_t scratch_bytes(const Preparation& state, const Region& region) {
     return 0;
   for (const auto& span : state.spans)
     if (arithmetic(state, span) && intersection(span.region, region))
-      return sizeof(Scratch);
+      return state.fast ? sizeof(double) : sizeof(Scratch);
   return 0;
 }
 Result<std::set<TileIndex>> required_tiles(const Preparation& state,
@@ -1069,12 +1097,182 @@ Result<OperationProgram> lower(const OperationLowering& query) {
   return builder.finish();
 }
 struct PreparedModel final {
+  bool fast = false;
+  fast_color::Model native;
+  std::optional<std::uint32_t> source_axis, output_axis;
+  std::array<std::uint64_t, 3> components{};
+  std::vector<Slot> slots;
   MathConfig math;
   std::shared_ptr<const Constants> constants;
   std::vector<Preparation::Span> parts;
   fixed_tensor::PointInputs<1> inputs;
   bool calculates = false, view = false;
 };
+
+template <unsigned KindValue, class T>
+bool native_contiguous(const PreparedModel& state,
+                       const ps_kernel_invocation_v8& inv) {
+  if (inv.input_count != 1 || inv.output_count != 1 || !state.source_axis ||
+      !state.output_axis)
+    return false;
+  const auto& input = inv.inputs[0];
+  const auto& output = inv.outputs[0];
+  const auto& a = *input.layout;
+  const auto& b = *output.layout;
+  if (a.rank != b.rank || *state.source_axis + 1 != a.rank ||
+      *state.output_axis + 1 != b.rank)
+    return false;
+  const unsigned axis = a.rank - 1;
+  if (a.origin[axis] || b.origin[axis] || b.shape[axis] != state.slots.size())
+    return false;
+  const auto ic = a.shape[axis], oc = b.shape[axis];
+  constexpr unsigned outputs = KindValue == 16 || KindValue >= 18 ? 1 : 3;
+  constexpr unsigned inputs = KindValue >= 17 ? 1 : 3;
+  if (oc < outputs)
+    return false;
+  for (unsigned j = 0; j < outputs; ++j)
+    if (state.slots[j].component != static_cast<int>(j))
+      return false;
+  for (unsigned j = 0; j < inputs; ++j)
+    if (state.components[j] >= ic)
+      return false;
+  for (std::uint64_t j = outputs; j < oc; ++j)
+    if (state.slots[j].component >= 0 || state.slots[j].source >= ic)
+      return false;
+  std::uint64_t count = 1, is = sizeof(T), os = sizeof(T);
+  for (unsigned j = a.rank; j-- > 0;) {
+    if (a.strides[j] != static_cast<std::int64_t>(is) ||
+        b.strides[j] != static_cast<std::int64_t>(os))
+      return false;
+    if (j != axis) {
+      if (a.origin[j] != b.origin[j] || a.shape[j] != b.shape[j])
+        return false;
+      count *= b.shape[j];
+    }
+    is *= a.shape[j];
+    os *= b.shape[j];
+  }
+  const auto* source = reinterpret_cast<const T*>(
+      static_cast<const unsigned char*>(input.allocation) + input.byte_offset);
+  auto* target = reinterpret_cast<T*>(
+      static_cast<unsigned char*>(output.allocation) + output.byte_offset);
+  if (reinterpret_cast<std::uintptr_t>(source) % alignof(T) ||
+      reinterpret_cast<std::uintptr_t>(target) % alignof(T))
+    return false;
+  for (std::uint64_t begin = 0; begin < count; begin += 4096) {
+    if (inv.cancellation.is_cancelled &&
+        inv.cancellation.is_cancelled(inv.cancellation.context))
+      throw Status{ErrorCode::Cancelled, {}};
+    const auto n = std::min<std::uint64_t>(4096, count - begin);
+    state.native.span<KindValue>(source + begin * ic, target + begin * oc, n,
+                                 ic, oc, state.components);
+    for (std::uint64_t i = begin; i < begin + n; ++i) {
+      for (unsigned j = 0; j < outputs; ++j) {
+        const int copy = copied_component(state.math.kind, j, state.math.gray);
+        if (copy >= 0)
+          std::memcpy(target + i * oc + j,
+                      source + i * ic + state.components[copy], sizeof(T));
+      }
+      for (std::uint64_t j = outputs; j < oc; ++j) {
+        std::memcpy(target + i * oc + j,
+                    source + i * ic + state.slots[j].source, sizeof(T));
+      }
+    }
+  }
+  return true;
+}
+template <class T>
+bool native_contiguous(const PreparedModel& state,
+                       const ps_kernel_invocation_v8& inv) {
+  switch (state.native.kind) {
+#define PS_NATIVE_MODEL_CASE(K) \
+  case K:                       \
+    return native_contiguous<K, T>(state, inv)
+    PS_NATIVE_MODEL_CASE(0);
+    PS_NATIVE_MODEL_CASE(1);
+    PS_NATIVE_MODEL_CASE(2);
+    PS_NATIVE_MODEL_CASE(3);
+    PS_NATIVE_MODEL_CASE(4);
+    PS_NATIVE_MODEL_CASE(5);
+    PS_NATIVE_MODEL_CASE(6);
+    PS_NATIVE_MODEL_CASE(7);
+    PS_NATIVE_MODEL_CASE(8);
+    PS_NATIVE_MODEL_CASE(9);
+    PS_NATIVE_MODEL_CASE(10);
+    PS_NATIVE_MODEL_CASE(11);
+    PS_NATIVE_MODEL_CASE(12);
+    PS_NATIVE_MODEL_CASE(13);
+    PS_NATIVE_MODEL_CASE(14);
+    PS_NATIVE_MODEL_CASE(15);
+    PS_NATIVE_MODEL_CASE(16);
+    PS_NATIVE_MODEL_CASE(17);
+    PS_NATIVE_MODEL_CASE(18);
+    PS_NATIVE_MODEL_CASE(19);
+#undef PS_NATIVE_MODEL_CASE
+  }
+  return false;
+}
+void native_invoke(const PreparedModel& state,
+                   const ps_kernel_invocation_v8& inv) {
+  if (state.math.algorithm == Algorithm::Auto &&
+      (state.math.narrow ? native_contiguous<float>(state, inv)
+                         : native_contiguous<double>(state, inv)))
+    return;
+  fixed_tensor::PointReader<1> reader{state.inputs, inv};
+  const auto& output = inv.outputs[0];
+  const auto& layout = *output.layout;
+  auto* destination = static_cast<unsigned char*>(output.allocation);
+  const unsigned width = state.math.narrow ? 4 : 8;
+  for (const auto& span : state.parts) {
+    const auto& dims = span.region.dimensions();
+    std::uint64_t count = 1;
+    for (const auto& d : dims)
+      count *= d.extent;
+    const unsigned component = std::max(0, span.slot.component);
+    const int copy =
+        span.slot.component < 0
+            ? 0
+            : copied_component(state.math.kind, component, state.math.gray);
+    for (std::uint64_t i = 0; i < count; ++i) {
+      if (!(i % 4096) && inv.cancellation.is_cancelled &&
+          inv.cancellation.is_cancelled(inv.cancellation.context))
+        throw Status{ErrorCode::Cancelled, {}};
+      auto index = i;
+      std::array<std::uint64_t, 8> at{}, source{};
+      std::ptrdiff_t offset = output.byte_offset;
+      for (unsigned axis = dims.size(); axis-- > 0;) {
+        at[axis] = dims[axis].offset + index % dims[axis].extent;
+        index /= dims[axis].extent;
+        offset += (at[axis] - layout.origin[axis]) * layout.strides[axis];
+      }
+      std::array<std::uint64_t, 3> raw{};
+      fast_color::Triple x{};
+      unsigned map_index = 0;
+      for (unsigned j = 0; j < 3; ++j) {
+        if (!(span.mask & (1U << j)))
+          continue;
+        const auto& map = span.maps[map_index++];
+        for (unsigned axis = 0; axis < map.size(); ++axis) {
+          source[axis] = map[axis].source_origin;
+          if (map[axis].output_axis >= 0)
+            source[axis] += at[map[axis].output_axis] - map[axis].output_origin;
+        }
+        raw[j] = reader.bits(0, source, width);
+        if (copy == -1)
+          x[j] = numeric_ops::numeric_double(raw[j], state.math.narrow);
+      }
+      const auto result =
+          copy == -2  ? UINT64_C(0)
+          : copy >= 0 ? raw[copy]
+          : state.native.kind == 19
+              ? state.math.levels[x[0] == 0 ? 0 : 1]
+              : numeric_ops::numeric_bits(state.native.apply(x)[component],
+                                          state.math.narrow);
+      std::memcpy(destination + offset, &result, width);
+    }
+  }
+}
+
 void invoke(const ps_kernel_invocation_v8* invocation,
             ps_kernel_status_v8* status) noexcept {
   const auto& state =
@@ -1103,6 +1301,15 @@ void invoke(const ps_kernel_invocation_v8* invocation,
   if (state.calculates && !environment.active()) {
     *status =
         kernel_failure(ErrorCode::OperationFailed, "model numeric environment");
+    return;
+  }
+  if (state.fast) {
+    try {
+      native_invoke(state, *invocation);
+      *status = {};
+    } catch (const Status& failure) {
+      accept(failure);
+    }
     return;
   }
   std::unique_ptr<Scratch, void (*)(Scratch*)> scratch(
@@ -1239,6 +1446,12 @@ Result<ps_prepared_kernel_v8> prepare_kernel(const KernelPreparation& query) {
       !fixed_tensor::matches_region(write.layout, region.value()))
     return invalid();
   auto prepared = std::make_unique<PreparedModel>();
+  prepared->fast = state->fast;
+  prepared->native = state->native;
+  prepared->source_axis = state->source_axis;
+  prepared->output_axis = state->output_axis;
+  prepared->components = state->components;
+  prepared->slots = state->slots;
   prepared->math = state->math;
   prepared->constants = state->constants;
   prepared->calculates = scratch != 0;
@@ -1288,7 +1501,7 @@ Result<ps_prepared_kernel_v8> prepare_kernel(const KernelPreparation& query) {
   return Answer(kernel);
 }
 OperationDefinition definition(Kind kind, SequenceProfile profile,
-                               const char* suffix) {
+                               const char* suffix, bool fast = false) {
   OperationDefinition def;
   def.key = std::string(operation_name(kind)) + suffix;
   auto& traits = def.traits;
@@ -1321,8 +1534,9 @@ OperationDefinition definition(Kind kind, SequenceProfile profile,
   output.key = "values";
   output.output_schema = port;
   output.result_schema = tensor_ops::scalar_schema();
-  def.prepare_static = [kind, profile](const auto& inputs, const auto& params) {
-    return prepare(kind, profile, inputs, params);
+  def.prepare_static = [kind, profile, fast](const auto& inputs,
+                                             const auto& params) {
+    return prepare(kind, profile, inputs, params, fast);
   };
   def.lower = lower;
   def.prepare_kernel =
@@ -1356,6 +1570,12 @@ Status register_model_conversions(OperationRegistry* registry) {
       if (!status.ok())
         return status;
     }
+  for (unsigned member = 0; member < 20; ++member) {
+    auto status = registry->register_operation(definition(
+        static_cast<Kind>(member), SequenceProfile::Strict, "_fast", true));
+    if (!status.ok())
+      return status;
+  }
   return Status::success();
 }
 }  // namespace ps::plugin_internal

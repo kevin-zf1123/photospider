@@ -18,7 +18,9 @@ namespace format {
  * `input_description` supplies explicit color interpretation and optional group
  * selection. Without it, supply ordered components, axis and member-specific
  * geometry. `source_white` is required for raw XYZ adaptation. `layout`
- * defaults to `auto`, and `profile` defaults to `strict`. Inapplicable basis,
+ * defaults to `auto`, and `profile` defaults to `strict`. The explicit
+ * `fast` profile uses native FP32/FP64 arithmetic and ordinary intermediate
+ * rounding; strict/accelerated retain their NUM contracts. Inapplicable basis,
  * white or adaptation parameters are rejected. Results retain only structure
  * and samples; callers supply configuration to each downstream operation.
  * Native nodes use fixed invocation ABI 8. Semantic callers guarantee finite

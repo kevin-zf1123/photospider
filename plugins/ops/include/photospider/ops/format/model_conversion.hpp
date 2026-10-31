@@ -30,7 +30,9 @@ using ModelConstant = std::variant<float, double>;
  * are radian or pi_multiple. NCL presets are bt601, bt709 and bt2020_ncl,
  * independent of the underlying RGB basis/transfer. Reference bypasses
  * numerical fast filters; scalar suppresses batch SIMD; auto enables
- * profile-admitted SIMD and independently certified fast filters.
+ * profile-admitted SIMD and independently certified fast filters. The fast
+ * profile uses native FP32/FP64 arithmetic instead of NUM final rounding;
+ * scalar/reference select its scalar native path and auto enables SIMD.
  * Complete retained output tiles determine source-grid closure.
  * Auto/materialize write independent dense outputs. Only color_to_gray accepts
  * view statically; a nonempty view task fails InvalidArgument/ViewUnavailable.
@@ -77,7 +79,7 @@ inline Result<WorkflowNodeOutput> append(
   using Answer = Result<WorkflowNodeOutput>;
   if (options.profile != "strict" &&
       options.profile != "accelerated_apple_silicon" &&
-      options.profile != "accelerated_x86_64")
+      options.profile != "accelerated_x86_64" && options.profile != "fast")
     return Answer(Status{ErrorCode::InvalidArgument,
                          "unknown FMT-11 profile",
                          FailureReason::InvalidDomain,

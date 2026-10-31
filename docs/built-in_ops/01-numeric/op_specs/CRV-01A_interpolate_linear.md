@@ -6,6 +6,7 @@ function: interpolate_linear
 operation_family: curve.interpolate_linear
 proposed_operation_keys:
   - curve.interpolate_linear_strict
+  - curve.interpolate_linear_fast
   - curve.interpolate_linear_accelerated_apple_silicon
   - curve.interpolate_linear_accelerated_x86_64
 category: 01-numeric
@@ -71,6 +72,10 @@ Query positions may be unsorted and may repeat; their original order is preserve
 Finite x and mathematically used y/query values, strict x ordering (x[j]<x[j+1]; no sorting, duplicate merging or decreasing x) and finite representable destination values are caller preconditions. Finite negative values and values greater than one remain valid and are not clipped. These are not runtime validation passes or error-reporting guarantees.
 
 Static parameter errors return `InvalidArgument`; incompatible port metadata returns `TypeMismatch`. Operational failures retain their categories, and failed calls publish no partial successful Result.
+
+## Native fast numerical profile
+
+The additional `_fast` key is selected by `CpuNumericProfile::Fast`. Its native arithmetic algorithm is defined in the [family profile](CRV-01_interpolate.md#native-fast-numerical-profile); it replaces the strict/accelerated rounding guarantees for this key while retaining the stated parameter and shape interface.
 
 ## Acceptance
 

@@ -6,6 +6,7 @@ function: apply_lut1d
 operation_family: curve.apply_lut1d
 proposed_operation_keys:
   - curve.apply_lut1d_strict
+  - curve.apply_lut1d_fast
   - curve.apply_lut1d_accelerated_apple_silicon
   - curve.apply_lut1d_accelerated_x86_64
 category: 01-numeric
@@ -65,6 +66,10 @@ Knot/clamp/singleton selects one entry; interpolation/extrapolation selects two.
 Each output element depends on its input element, all L scalar table rows (the selected one or two entries participate in arithmetic) and, for L>1, axis endpoints a and b. For L=1 only table row zero is a dependency. Region and tile results equal the corresponding slice of the whole result. Static preparation errors use the common categories; numerical preconditions are unchecked.
 
 A producer of the table must meet its own requirements for all rows, even if lookup mathematically selects only one pair. A sampler's equal or repeated coordinates are valid only when they also meet this consumer's axis preconditions. Count-one baking can eliminate the axis edge; the producer's own values dependencies still apply.
+
+## Native fast numerical profile
+
+The additional `_fast` key is selected by `CpuNumericProfile::Fast`. Its native arithmetic algorithm is defined in the [family profile](CRV-05_apply_lut1d.md#native-fast-numerical-profile); it replaces the strict/accelerated rounding guarantees for this key while retaining the stated parameter and shape interface.
 
 ## Acceptance
 

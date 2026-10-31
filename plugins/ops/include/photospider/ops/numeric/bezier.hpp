@@ -38,8 +38,8 @@ enum class BezierDomain { Reject, Clamp };
  * Each selected values tile has one fixed CPU task reading complete controls,
  * start and, for count>1, end. Axis is an independent scalar-only task; count=1
  * excludes end and uses zero scratch for axis. All schemas remain checked.
- * Values use fixed preallocated ExactBezier/ExactSampling scratch, direct
- * anchor search and selected-segment RN64 reconstruction. Only selected output
+ * Values use fixed preallocated profile-specific scratch, anchor search
+ * and binary64 control reconstruction. Only selected output
  * tiles are computed and allocated. Empty reads no payload.
  *
  * Active endpoints must be finite and distinct for count>1. Axis selection
@@ -52,11 +52,14 @@ enum class BezierDomain { Reject, Clamp };
  * selected-coordinate separation requirements. Declared upstream tiles still
  * obey their producer's own contract, including mathematically unused y.
  *
- * Exact anchor/clamp converts one y and preserves zero sign. Interiors solve
- * the mathematical Bx(t)=q and round By(t) once after RN64 control
- * construction; exact interior zero is +0. Refinement/capacity guards remain
- * operational errors. Caller fenv is preserved; cancellation is checked per
- * value/search and in exact arithmetic. Prepared views are borrowed during
+ * Exact anchor/clamp converts one y and preserves zero sign. Strict solves
+ * mathematical Bx(t)=q and rounds By(t) once after RN64 control construction;
+ * exact interior zero is +0. Accelerated follows CpuNumericProfile's bound.
+ * Fast uses native binary64 grid coordinates and a bounded Newton/bisection
+ * solve followed by de Casteljau FMA and final dtype conversion, without
+ * exact-rounding or certified error bounds. Refinement/capacity guards remain
+ * operational errors where applicable. Caller fenv is preserved; cancellation
+ * is checked at bounded work intervals. Prepared views are borrowed during
  * invocation. Runs share immutable preparation and own scratch/output. Required
  * tasks share one call's ordered publication result, including joint
  * values/axis. Retained owners survive context teardown. Compatible rebinding
@@ -74,7 +77,8 @@ inline Result<WorkflowNode> sample_bezier_function_node(
                            ? "_accelerated_apple_silicon"
                        : profile == CpuNumericProfile::X86Avx2
                            ? "_accelerated_x86_64"
-                           : nullptr;
+                       : profile == CpuNumericProfile::Fast ? "_fast"
+                                                            : nullptr;
   if (!id || !suffix || (degree != 2 && degree != 3) || count < 1 ||
       count > 1048576 ||
       (dtype != ElementType::Float32 && dtype != ElementType::Float64) ||

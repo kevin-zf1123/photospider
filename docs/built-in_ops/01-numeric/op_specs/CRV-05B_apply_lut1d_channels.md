@@ -6,6 +6,7 @@ function: apply_lut1d_channels
 operation_family: curve.apply_lut1d_channels
 proposed_operation_keys:
   - curve.apply_lut1d_channels_strict
+  - curve.apply_lut1d_channels_fast
   - curve.apply_lut1d_channels_accelerated_apple_silicon
   - curve.apply_lut1d_channels_accelerated_x86_64
 category: 01-numeric
@@ -33,6 +34,10 @@ Each input[...,c] uses table[:,c]. Queries and therefore knot/segment selection 
 ## Behavior
 
 Each output element depends on its input element, the table column of its channel (all L rows; only the selected one or two entries participate in arithmetic) and, for L>1, axis positions 0 and 1. For L=1 only table row zero of the channel is a dependency, input and axis have no payload dependency, and finite input, axis `[a,a,+0]` and reject's input equality to a remain unchecked caller preconditions. Region and tile results equal the corresponding slice of the whole result. Invalid numerical preconditions carry no diagnostic guarantee.
+
+## Native fast numerical profile
+
+The additional `_fast` key is selected by `CpuNumericProfile::Fast`. Its native arithmetic algorithm is defined in the [family profile](CRV-05_apply_lut1d.md#native-fast-numerical-profile); it replaces the strict/accelerated rounding guarantees for this key while retaining the stated parameter and shape interface.
 
 ## Acceptance
 

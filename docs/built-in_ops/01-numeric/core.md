@@ -11,6 +11,7 @@
 | `axis` | 采样类输出附带的原子 Float64 `[3]`，内容为 `[start,end,step]`；单样本时为 `[start,start,0]`。 |
 | strict | 规定的数学表达式按成员给出的舍入阶段正确舍入，结果逐位确定。 |
 | accelerated | Apple Silicon CPU 与 x86-64 CPU 各自命名的 profile，满足 [accelerated 契约](op_specs/NUM_accelerated_contract.md)给出的误差界；成员可规定与 strict 逐位一致。 |
+| fast | 显式原生浮点 profile；适用于 NUM-01 与 NUM-02A，使用各成员规定的中间舍入和输出转换规则。 |
 | profile key | 同一成员按 dtype、精度类别或平台区分的注册名，例如 `numeric.abs_strict`。 |
 
 ## 基础数值规定
@@ -21,8 +22,8 @@
 
 | 族 | 功能 | 输入 → 输出 | 规格 |
 | --- | --- | --- | --- |
-| NUM-01 | 表达式采样 | Float32/64 `[1]` start/end 与具名系数 → `values[N]`、`axis` | [NUM-01](op_specs/NUM-01_sample_expression.md) |
-| NUM-02 | 等距序列 | 标量 Result 输入 → `values`、`axis` | [linspace](op_specs/NUM-02A_linspace.md)、[arange](op_specs/NUM-02B_arange.md) |
+| NUM-01 | 表达式采样 | Float32/64 `[1]` start/end 与具名系数 → `values[N]`、`axis`<br>`numeric.sample_expression_fast` | [NUM-01](op_specs/NUM-01_sample_expression.md) |
+| NUM-02 | 等距序列 | 标量 Result 输入 → `values`、`axis`<br>`numeric.linspace_fast` | [linspace](op_specs/NUM-02A_linspace.md)、[arange](op_specs/NUM-02B_arange.md) |
 | NUM-03 | 常量与显式广播 | 标量或数组 + shape → `values` | [constant](op_specs/NUM-03A_constant.md)、[broadcast](op_specs/NUM-03B_broadcast.md) |
 | NUM-04 | 一元函数 | 数组（rational 版本为 numerator/denominator）→ 同形 `values` | [一元契约](op_specs/NUM-04_unary_contract.md)、[三角契约](op_specs/NUM-04_trigonometric_contract.md)、[有理 π 契约](op_specs/NUM-04_rational_pi_contract.md) |
 | NUM-05 | 二元算术 | 两个同 shape、同 dtype 数组 → `values` | [二元契约](op_specs/NUM-05_binary_contract.md) |
@@ -41,8 +42,8 @@
 
 | ID / spec | 类别 | 注册 key | 实现 |
 | --- | --- | --- | --- |
-| [NUM-01 — sample_expression](op_specs/NUM-01_sample_expression.md) | primitive / D1_draft | `numeric.sample_expression_strict`<br>`numeric.sample_expression_accelerated_apple_silicon`<br>`numeric.sample_expression_accelerated_x86_64` | 已实现 |
-| [NUM-02A — linspace](op_specs/NUM-02A_linspace.md) | primitive / D1_draft | `numeric.linspace_strict`<br>`numeric.linspace_accelerated_apple_silicon`<br>`numeric.linspace_accelerated_x86_64` | 已实现 |
+| [NUM-01 — sample_expression](op_specs/NUM-01_sample_expression.md) | primitive / D1_draft | `numeric.sample_expression_strict`<br>`numeric.sample_expression_accelerated_apple_silicon`<br>`numeric.sample_expression_accelerated_x86_64`<br>`numeric.sample_expression_fast` | 已实现 |
+| [NUM-02A — linspace](op_specs/NUM-02A_linspace.md) | primitive / D1_draft | `numeric.linspace_strict`<br>`numeric.linspace_accelerated_apple_silicon`<br>`numeric.linspace_accelerated_x86_64`<br>`numeric.linspace_fast` | 已实现 |
 | [NUM-02B — arange](op_specs/NUM-02B_arange.md) | primitive / D1_draft | `numeric.arange_strict`<br>`numeric.arange_accelerated_apple_silicon`<br>`numeric.arange_accelerated_x86_64` | 已实现 |
 | [NUM-03A — constant](op_specs/NUM-03A_constant.md) | primitive / D1_draft | `numeric.constant_strict`<br>`numeric.constant_accelerated_apple_silicon`<br>`numeric.constant_accelerated_x86_64` | 已实现 |
 | [NUM-03B — broadcast](op_specs/NUM-03B_broadcast.md) | primitive / D1_draft | `numeric.broadcast_strict`<br>`numeric.broadcast_accelerated_apple_silicon`<br>`numeric.broadcast_accelerated_x86_64` | 已实现 |

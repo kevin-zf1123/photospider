@@ -95,6 +95,14 @@ Only a complete native matrix exactly equal to I selects bit-copy behavior befor
 | Forced view of a statically nonidentity matrix | Static preparation | InvalidArgument / InvalidDomain, ViewUnavailable message. |
 | Nonempty exact-I forced view | Invocation | InvalidArgument / ViewUnavailable. |
 
+## Native fast numerical profile
+
+The separately registered `color.rgb_to_xyz_fast`, `color.xyz_to_rgb_fast` and `color.adapt_xyz_white_fast` keys use ordinary native floating arithmetic. The authoring `profile="fast"` selects those keys; the default remains `strict`. This profile definition takes precedence over NUM exact-final-rounding and accelerated error guarantees for these keys only.
+
+Static geometry is resolved with the same exact primary/white definitions, then its matrix coefficients are converted to binary64 for computation. Float32 permits binary32 coefficients and fused multiply-add or widened binary64 evaluation before the final cast; Float64 uses binary64. Each row computes `m0*x0 + m1*x1 + m2*x2` at at least the sample dtype's precision. Reassociation and FMA are permitted; layout/ISA variants need not be bit-identical. Intermediate IEEE overflow, underflow and invalid results are ordinary native results, without exact-rational refinement.
+
+The complete exact-identity matrix is detected before approximation and retains the specified bit copy. Unselected samples retain their bits. Static selectors and the stage boundaries of D remain unchanged: `profile="fast"` still expands A -> optional C -> B, with a materialized sample-dtype boundary after each node. No fused RGB-to-RGB registry key is introduced.
+
 ## Acceptance
 
 Exact-rational Gaussian elimination/determinants and dyadic sample rounding, plus fixed special-value bit oracles, verify coefficients and outputs. Check all presets including virtual AP0, valid y=0 primaries, near-singular cancellation, positive white responses and all four methods. White mapping before rounding is compared with each dtype's actual rounded input cases; a nonrepresentable rational XYZ white is not treated as a floating input.

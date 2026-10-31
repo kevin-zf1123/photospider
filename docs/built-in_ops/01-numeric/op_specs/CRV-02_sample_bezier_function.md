@@ -5,6 +5,7 @@ function: sample_bezier_function
 operation_family: curve.sample_bezier_function
 proposed_operation_keys:
   - curve.sample_bezier_function_strict
+  - curve.sample_bezier_function_fast
   - curve.sample_bezier_function_accelerated_apple_silicon
   - curve.sample_bezier_function_accelerated_x86_64
 category: 01-numeric
@@ -94,6 +95,12 @@ The accelerated profiles follow the [final FP32 bound](NUM_accelerated_contract.
 Each values element q[i] depends on the complete anchors and handles (the segment is located by x search) plus start, and end when N>1. The axis output depends only on start and end (only start for N=1). An axis-only request does not need the control inputs; for N=1 the end input has no payload dependency. Values and axis for a region equal the corresponding slice of the whole result.
 
 Numerical caller preconditions are unchecked. Static schema, parameter, count, K, degree and shape errors use their static error categories.
+
+## Native fast numerical profile
+
+The additional `curve.sample_bezier_function_fast` key is selected by `CpuNumericProfile::Fast`. Relative handles form quadratic/cubic controls in binary64. For each query, locate the monotone anchor interval, solve `Bx(t)=q` by bracketed Newton with bisection safeguards (at most 128 iterations), then evaluate `By(t)` by de Casteljau FMA. A flat endpoint starts from the first nonzero x-derivative's root order (linear, square root or cube root), with a mirrored construction at the right endpoint. Exact anchor queries select their ordinate. This profile uses ordinary native rounding and does not refine to NUM's strict or accelerated certificate.
+
+The endpoint-inclusive native grid and count-one/axis-only calculation are defined by the [CRV-04 fast profile](CRV-04_bake_lut1d.md#native-fast-numerical-profile).
 
 ## Acceptance
 

@@ -11,6 +11,7 @@ implementation_status: implemented_cpu_fixed_abi_8
 clarification_status: complete
 registered_operation_keys:
   - color.xyz_to_cielab_strict
+  - color.xyz_to_cielab_fast
   - color.xyz_to_cielab_accelerated_apple_silicon
   - color.xyz_to_cielab_accelerated_x86_64
 ---
@@ -30,6 +31,10 @@ Use f from the math contract; l=(116*f(Y)-16)/100. Preserve source white and ref
 ## Behavior
 
 Sample support: l uses Y; a* uses X,Y; b* uses Y,Z. Static structure and explicit-configuration checks apply even to Empty/bypass-only requests. There is no halo, hidden-color skip, alpha validation or full-image scan. Semantic sample validity, finite rounded results and nonsingular semantic formulas are caller preconditions. This member materializes transformed output and rejects forced view, even for a bypass-only request. Raw specials and errors follow the family and math contract.
+
+## Native fast numerical profile
+
+The additional `_fast` operation key uses the same mathematical transform with the native FP32/FP64 algorithm and profile defined in the [family contract](FMT-11_model_conversion_contract.md#native-fast-numerical-profile). The strict and accelerated keys retain their existing numerical contracts.
 
 ## Acceptance
 

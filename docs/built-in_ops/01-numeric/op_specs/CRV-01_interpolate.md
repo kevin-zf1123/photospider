@@ -33,9 +33,9 @@ One operation never serves both ranks, and the function axis is never silently s
 
 ## Interface
 
-The four interfaces are registered as twelve keys and authored through public constructors. Each workflow input and output is a Result. An input schema contains one tensor member under any schema id and member key; `sample_shape()` supplies x[K], y[K] or y[K,C], and query[N]. Each input can use Float32 or Float64 independently. The `values` output uses schema `photospider.tensor`, member `samples`, no attached domain description, and shape [N] or [N,C]; the multi-function column is an ordinary sample axis.
+The four interfaces are registered as sixteen keys and authored through public constructors. Each workflow input and output is a Result. An input schema contains one tensor member under any schema id and member key; `sample_shape()` supplies x[K], y[K] or y[K,C], and query[N]. Each input can use Float32 or Float64 independently. The `values` output uses schema `photospider.tensor`, member `samples`, no attached domain description, and shape [N] or [N,C]; the multi-function column is an ordinary sample axis.
 
-The registry also contains `curve.sample_linear` and `curve.sample_monotone`, which use a controls tensor and a generated static-domain grid. They remain separate operation contracts. The twelve explicit-query keys in this family accept x, y and query tensors and do not alias those controls-based operations.
+The registry also contains `curve.sample_linear` and `curve.sample_monotone`, which use a controls tensor and a generated static-domain grid. They remain separate operation contracts. The sixteen explicit-query keys in this family accept x, y and query tensors and do not alias those controls-based operations.
 
 ## Mathematics
 
@@ -55,3 +55,11 @@ Finite x with strictly increasing values, finite consumed query/y values, repres
 - [Operator specification template](../../00-foundation/spec-template.md).
 - [Foundation execution contract](../../00-foundation/contracts.md).
 - [CRV-02 sampled Bezier function](CRV-02_sample_bezier_function.md).
+
+## Native fast numerical profile
+
+The four additional operation keys are `curve.interpolate_linear_fast`, `curve.interpolate_pchip_fast`, `curve.interpolate_linear_multi_fast` and `curve.interpolate_pchip_multi_fast`. SDK constructors select them with `CpuNumericProfile::Fast`. They retain the same ports, static parameters and output shapes. This profile uses ordinary binary64 computation and a final output-dtype cast, instead of NUM exact-rational final rounding or its certified accelerated bound. Intermediate native overflow and underflow are not repaired.
+
+For interval width `h_i=x[i+1]-x[i]`, secant `d_i=(y[i+1]-y[i])/h_i`, and `t=(q-x[i])/h_i`, linear evaluation uses `fma(q-x[i],d_i,y[i])`. PCHIP constructs the specified sign-limited endpoint slopes and weighted harmonic interior slopes. The harmonic calculation scales interval widths and the smaller absolute secant before division, avoiding reciprocal overflow for small secants. With `a=h_i*m_i`, `b=3*delta-2*a-h_i*m_(i+1)`, `c=a+h_i*m_(i+1)-2*delta`, its cubic is `y[i]+t*(a+t*(b+t*c))`, evaluated by Horner FMA.
+
+Exact knots and clamps select their stored ordinate before polynomial evaluation. Extrapolation uses the corresponding retained endpoint slope. K=2 reduces to the secant. Outputs depend on the knot and ordinate tables supplied to the current Run.

@@ -144,13 +144,13 @@ Outputs preserve source schema id, tensor key and batch prefix and set `atomic_t
 
 Strict rounds each complete requested formula once, apart from specified copies or selections. No rounded intermediate matrix, l*100, root, luma or hue conversion is inserted. Finite branch predicates and static validity are exact. Accelerated finite results inherit NUM's final FP32-scaled bound, including Float64; copies, selections, classification and errors remain exact. The math supplement defines raw NaN/Inf and zero behavior. Semantic validity follows actual component support over complete retained output tiles and requires finite consumed values and results as caller preconditions. Converted formulas do not consume alpha, while retained bypass alpha is read and copied. Alpha=0 never suppresses actual color work. Intermediate machine overflow cannot fail a representable final result. Negative/HDR samples remain legal except the explicit chroma, singularity and binary-selector rules.
 
-Raw does not apply semantic black or zero-chroma substitutions. Static structural and parameter legality, plus T's intrinsic binary selector rule, still apply. Copied samples retain all bits, including signaling NaN; semantic callers remain responsible for their numerical preconditions. Computed exact cancellation is +0; specified trigonometric/atan2 and copy rules take precedence. Nonzero underflow retains its sign.
+Strict and accelerated raw paths do not apply semantic black or zero-chroma substitutions; the fast profile defines its native branches below. Static structural and parameter legality, plus T's intrinsic binary selector rule, still apply. Copied samples retain all bits, including signaling NaN; semantic callers remain responsible for their numerical preconditions. Computed exact cancellation is +0; specified trigonometric/atan2 and copy rules take precedence. Nonzero underflow retains its sign.
 
 ## Layout
 
 Each output sample depends on the source coordinates listed by its formula; unselected channels do not introduce a dependency. Bypass slots copy their corresponding source, while constant R opponents have no payload dependency. Auto/materialize write independent dense output. Q accepts forced view as a static option, but a nonempty view fails `InvalidArgument/ViewUnavailable`. Other members reject forced view statically, including bypass-only selections. Empty creates no payload while retaining all static parameter and schema checks. Generic and spatial layouts use the same point mappings.
 
-S expands to the registered MASK channel-threshold operation with its selected CPU profile. No unsuffixed model-conversion alias is registered. The profiles are strict, accelerated_apple_silicon and accelerated_x86_64.
+S expands to the registered MASK channel-threshold operation with its selected CPU profile. No unsuffixed model-conversion alias is registered. The profiles are strict, accelerated_apple_silicon, accelerated_x86_64 and fast.
 
 ## Errors and prerequisites
 
@@ -165,6 +165,22 @@ S expands to the registered MASK channel-threshold operation with its selected C
 | Capacity/work/shape overflow, cancellation, stale or upstream failure | Preserve NUM/kernel category, scope and origin |
 
 NUM/CRV tuple consumers use the same native units and description codec; the helpers are in `photospider/ops/format/model_conversion.hpp`.
+
+## Native fast numerical profile
+
+All nineteen native model conversions additionally register their `_fast` key. FMT-11S selects `mask.threshold_channel_fast` through the same public helper. `ModelConversionOptions::profile="fast"` is explicit; the existing default and strict/accelerated keys retain their contracts. This section defines fast arithmetic in place of NUM whole-formula rounding, certified accelerated bounds and raw exact-refinement special-value rules.
+
+Native formulas use at least the input/output dtype's precision. Float32 formulas may use FP32 or widen to FP64 before final output conversion. Float64 stays FP64. FMA, ordinary intermediate rounding and algebraically equivalent evaluation are permitted. Machine overflow/underflow is not repaired by exact arithmetic, and ISA/layout variants need not produce identical computed bits. The mathematical model, coordinate units, static white/NCL parameters, branch domains and explicit hue units are unchanged.
+
+A/B evaluate the piecewise CIE function and inverse in native arithmetic. E/F use the specified LMS and OKLab matrices and real cube/cube-root operations. C/D/G/H use native hypot, atan2, sine and cosine. These native mathematical functions do not promise correctly rounded whole expressions.
+
+I/K compute extrema and branch on exact native comparisons. For HSL with components in [0,1], the saturation denominator is evaluated as `delta + 2*min(minimum,1-maximum)` to avoid cancellation near white and black; outside that interval the signed/HDR algebraic denominator is retained. Inverse hue is reduced periodically before sector evaluation; achromatic cases select the neutral result. No epsilon or gamut clipping is added.
+
+Fast uses the same native degenerate branches for raw and described inputs. D/H select zero opponent coordinates when C=0. O selects the supplied reference-white xy when the computed `(X+Y)+Z` is zero, and P selects X=Z=0 when Y=0 while copying Y. These fast selections replace the strict/accelerated raw special-value rules. Described inputs retain their stated finite-coordinate and singularity premises, and declared sample dependencies remain unchanged; a native shortcut does not validate an otherwise invalid semantic input.
+
+Q and copied components of C/G/O/P retain exact source bits. R's constant opponents and T's typed black/white selection retain their specified stored values; T treats either zero sign as black. Typed constants +0/+1 preserve the complete valid binary domain {+0,-0,+1} with either zero sign selecting black. S uses an ordered `>=` comparison, so raw NaN selects zero. A Float64 threshold between Float32 values retains its ordered comparison against the widened sample.
+
+`algorithm=auto|scalar|reference` retains this native numerical profile for every supported layout. Selecting `reference` does not select strict arithmetic.
 
 ## Acceptance
 

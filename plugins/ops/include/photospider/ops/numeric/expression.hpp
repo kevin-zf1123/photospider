@@ -26,7 +26,8 @@ namespace ps::numeric {
  * @param profile Explicit CPU key; unavailable platforms fail preparation.
  * @return Owned node with values: ordinary [count] in dtype, and axis: atomic
  * Float64 [3], both photospider.tensor v1/member samples. Axis contains
- * [start,end,RN64((end-start)/(count-1))], or [start,start,+0] for count one.
+ * [start,end,step], or [start,start,+0] for count one. Strict/accelerated
+ * compute step with exact arithmetic and RN64; Fast uses native binary64.
  * Invalid source, names, id, count, dtype or profile returns
  * InvalidArgument/InvalidDomain/Schema; incompatible schemas return
  * TypeMismatch during compilation. Allocation can throw bad_alloc. Authoring is
@@ -35,12 +36,15 @@ namespace ps::numeric {
  * values tile has one fixed task reading active endpoints and every
  * coefficient; axis has a separate task reading endpoints only. Excluded inputs
  * retain schema references. Empty selection emits no task or payload read.
- * Runtime uses global indices and endpoint-weighted RN64 coordinates. Strict
- * rounds each primitive to Float64 before its parent; final Float32 conversion
- * is a separate rounding. Accelerated four-lane batches enclose the strict AST
- * and replay uncertain samples strictly under the final FP32-scaled error
- * bound. Active inputs, evaluated intermediates and computed outputs must be
- * finite and within their mathematical domains as unchecked caller
+ * Strict/accelerated use global indices and endpoint-weighted RN64
+ * coordinates. Strict rounds each primitive to Float64 before its parent;
+ * final Float32 conversion is a separate rounding. Accelerated four-lane
+ * batches enclose the strict AST and replay uncertain samples strictly under
+ * the final FP32-scaled error bound. Fast uses native binary64 grid and
+ * elementary arithmetic/functions; finite nonnegative polynomials of degree at
+ * most eight on [0,1] may be evaluated by Horner FMA, without strict/certified
+ * error guarantees. Active inputs, evaluated intermediates and computed outputs
+ * must be finite and within their mathematical domains as unchecked caller
  * preconditions. Selected values coordinates must differ from their valid
  * adjacent coordinates; selected axis requires finite nonzero step when
  * count>1. Runtime performs no neighbor scan or numerical validation;
@@ -49,11 +53,11 @@ namespace ps::numeric {
  * scalar reads and scratch. Every invocation borrows preallocated private
  * arithmetic state and an independent dense output tile; axis uses smaller
  * state and 24 output bytes. Concurrent Runs share only immutable preparation.
- * Cancellation is checked per scalar, coordinate/batch, AST node and refinement
- * step. Bounded unresolved refinement may return ResourceExhausted. Operational
- * failures prevent the IR call's successful publication across selected
- * outputs. Successful owners can outlive ExecutionContext. Invocations restore
- * floating modes and flags.
+ * Cancellation is checked at bounded work intervals. Strict/accelerated
+ * refinement also checks cancellation and may return ResourceExhausted when
+ * its refinement bound is reached. Operational failures prevent the IR call's
+ * successful publication across selected outputs. Successful owners can outlive
+ * ExecutionContext. Invocations restore floating modes and flags.
  */
 PHOTOSPIDER_OPS_API Result<WorkflowNode> sample_expression_node(
     std::uint64_t id, std::string expression, WorkflowInput start,

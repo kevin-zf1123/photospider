@@ -5,6 +5,7 @@ function: sample_expression
 operation_family: numeric.sample_expression
 proposed_operation_keys:
   - numeric.sample_expression_strict
+  - numeric.sample_expression_fast
   - numeric.sample_expression_accelerated_apple_silicon
   - numeric.sample_expression_accelerated_x86_64
 category: 01-numeric
@@ -17,7 +18,7 @@ implementation_status: implemented
 
 # NUM-01: sample_expression
 
-This specification defines three explicit CPU profiles: strict, accelerated Apple Silicon and accelerated x86-64. The unsuffixed `numeric.sample_expression` has its own static start/step and indexed-coefficient interface and is not an alias for this family.
+This specification defines four explicit profiles: strict, accelerated Apple Silicon, accelerated x86-64 and native fast. The unsuffixed `numeric.sample_expression` has its own static start/step and indexed-coefficient interface and is not an alias for this family.
 
 The operation samples a real-valued function of one variable on an endpoint-inclusive grid. It returns named `values` and `axis` Results, usable independently by downstream numeric consumers or LUT authoring. Count, expression, coefficient names and output dtype are static; endpoint and coefficient payloads can change between Runs. Inherits the [NUM baseline](NUM_common_contract.md).
 
@@ -108,6 +109,12 @@ Input values remain active even when the expression is constant or a named coeff
 | Empty | none | none |
 
 Values and axis are independently selectable, but they share one call's success or failure: a failure in either selected output prevents successful publication of that call's outputs.
+
+## Native fast numerical profile
+
+The additional `numeric.sample_expression_fast` key uses a bounded AST (at most 256 nodes), binary64 coordinates/coefficients and native binary64 elementary arithmetic/functions before the final dtype cast. It preserves sorted coefficient ports and named values/axis outputs. Finite nonnegative polynomials of degree at most eight using addition and multiplication on [0,1] may be flattened to Horner FMA; all other expressions use the original AST structure. This profile permits ordinary intermediate rounding/overflow and does not certify NUM's strict stepwise result or accelerated bound.
+
+The endpoint-inclusive native grid and count-one/axis-only calculation are defined by the [CRV-04 fast profile](CRV-04_bake_lut1d.md#native-fast-numerical-profile).
 
 ## Acceptance
 

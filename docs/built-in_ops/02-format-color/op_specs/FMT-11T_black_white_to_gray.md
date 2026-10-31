@@ -11,6 +11,7 @@ implementation_status: implemented_cpu_fixed_abi_8
 clarification_status: complete
 registered_operation_keys:
   - color.black_white_to_gray_strict
+  - color.black_white_to_gray_fast
   - color.black_white_to_gray_accelerated_apple_silicon
   - color.black_white_to_gray_accelerated_x86_64
 ---
@@ -30,6 +31,10 @@ The selector is exactly 0 or 1 in all modes (a caller precondition); -0 selects 
 ## Behavior
 
 The binary selector is always read, including when both output levels are identical. This member materializes output and rejects forced view, even for a bypass-only request.
+
+## Native fast numerical profile
+
+The additional `_fast` operation key uses the same mathematical transform with the native FP32/FP64 algorithm and profile defined in the [family contract](FMT-11_model_conversion_contract.md#native-fast-numerical-profile). The strict and accelerated keys retain their existing numerical contracts.
 
 ## Acceptance
 

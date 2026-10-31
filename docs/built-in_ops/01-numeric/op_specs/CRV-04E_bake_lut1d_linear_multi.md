@@ -27,6 +27,10 @@ The expansion is numeric.linspace with the selected profile suffix, the start/en
 
 Each exported shape/dtype is inferred by its expanded source. Values have shape [count,C], including C=1; the template inserts or removes no component axis. Axis is always Float64 [3]. For count=1 it is [start,start,0] and no end payload is evaluated. The source's remaining domain, finite-value, precision and query-support restrictions are not normalized or weakened.
 
+## Native fast numerical profile
+
+`CpuNumericProfile::Fast` selects this template's fast node expansion and native coordinate/source formulas in the [family profile](CRV-04_bake_lut1d.md#native-fast-numerical-profile). The constructor remains a graph helper and adds no runtime bake key.
+
 ## Acceptance
 
 Analytic fixture: x=[0,1], y=[[0,10],[2,8]], start=[0], end=[1], count=3 -> values=[[0,10],[1,9],[2,8]], axis=[0,1,0.5].

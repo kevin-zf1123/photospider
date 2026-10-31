@@ -268,11 +268,13 @@ inline Result<BakedLut1d> bake_lut1d_pchip_multi(
  * Each selected output tile executes one fixed CPU task. For L>1 its reads
  * cover the matching input region, all L table rows for selected channels and
  * axis endpoints, rounded through each source grid. Step has no separate read.
- * Knots use direct endpoint-weighted RN64 reconstruction during bounded lookup.
- * The invocation owns preallocated ExactSampling/ExactCurve scratch independent
- * of L; output storage covers selected tiles. L=1 reads only the table row,
- * uses zero scratch and keeps input/axis as schema-only edges. Their producers
- * can be omitted. Static metadata is checked for all three ports.
+ * Strict/accelerated reconstruct endpoint-weighted RN64 knots during lookup
+ * and use preallocated exact-arithmetic scratch independent of L. Fast packs
+ * the selected table columns into binary64 scratch proportional to L and uses
+ * native normalized-axis interpolation. Output storage covers selected tiles.
+ * L=1 reads only the table row and keeps input/axis as schema-only edges; their
+ * producers can be omitted. Strict/accelerated singleton lookup uses zero
+ * scratch. Static metadata is checked for all three ports.
  *
  * Finite consumed queries/table entries, a valid complete strictly ordered
  * axis, step consistency, reject's closed domain and finite representable
@@ -281,10 +283,12 @@ inline Result<BakedLut1d> bake_lut1d_pchip_multi(
  * read. Generic unused table entries have no additional finite requirement;
  * declared upstream producer tiles must satisfy their own contracts. Math
  * selection converts one entry for knot/clamp/singleton and two for a segment.
- * Exact selection preserves zero sign; exact linear zero is -0 only for two -0
- * ends. Strict rounds the whole formula once; accelerated retains the final
- * FP32 bound and exact fallback. No bound relative to a generating function
- * follows.
+ * Selected endpoint/singleton values preserve zero sign. Strict/accelerated
+ * exact linear zero is -0 only for two -0 ends. Strict rounds the whole formula
+ * once; accelerated retains the final FP32 bound and exact fallback. Fast uses
+ * native binary64 FMA and final dtype conversion, without exact-rounding or
+ * certified error bounds, including at interior grid positions. No bound
+ * relative to a generating function follows.
  *
  * Prepared affine views are borrowed only during invocation. Runs share only
  * immutable preparation, own scratch/output, preserve fenv and check

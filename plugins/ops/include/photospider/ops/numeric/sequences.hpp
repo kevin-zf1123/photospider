@@ -51,8 +51,11 @@ inline SequenceInput sequence_input(const WorkflowInputDeclaration& input) {
  * its complete three-component tuple. Unselected outputs are not computed.
  * For count=1, tasks read only start; both declared input schemas still
  * validate. Larger counts require both scalar payloads even for endpoint-only
- * selection. Values use global indices and exact weighted arithmetic with
- * direct final rounding. Axis is Int64 in integer mode and Float64 otherwise.
+ * selection. Values use global indices. Strict and accelerated sequences use
+ * exact weighted arithmetic with direct final rounding. Fast is supported
+ * only for linspace and uses native binary64 interpolation and step arithmetic
+ * before final dtype conversion. Axis is Int64 in integer mode and Float64
+ * otherwise.
  *
  * Active floating inputs must be finite. Every computed floating component
  * must round to a finite result, and every computed integer component must fit
@@ -64,10 +67,11 @@ inline SequenceInput sequence_input(const WorkflowInputDeclaration& input) {
  * independently; there is no within-call output failure isolation.
  *
  * Each output tile owns its preallocated dense storage; axis owns 24 bytes.
- * Each invocation uses private SequenceMath scratch. Empty selections emit no
- * tasks, payload reads or scratch demand. Cancellation is checked per sample;
- * exact arithmetic loops have fixed bounds. No runtime payload allocation,
- * numerical validators, work counters or content cache is used. Successful
+ * Strict/accelerated invocations use private SequenceMath scratch. Fast
+ * linspace uses bounded batches with work admission. Empty selections emit no
+ * tasks, payload reads or scratch demand. Cancellation is checked at bounded
+ * work intervals. No runtime payload allocation, numerical validators or
+ * content cache is used. Successful
  * Results outlive the context. Worker and caller floating environments are
  * restored, including modes and flags.
  */
@@ -95,6 +99,11 @@ inline Result<WorkflowNode> sequence_node(std::uint64_t id, SequenceInput start,
       break;
     case CpuNumericProfile::X86Avx2:
       suffix = "_accelerated_x86_64";
+      break;
+    case CpuNumericProfile::Fast:
+      if (!linspace)
+        return invalid("native fast sequence requires linspace");
+      suffix = "_fast";
       break;
     default:
       return invalid("sequence profile must be explicit");

@@ -50,6 +50,9 @@ set(PHOTOSPIDER_OPERATION_SOURCES
   plugins/ops/07-grade/affine.cpp
   plugins/ops/07-grade/contrast.cpp
   plugins/ops/07-grade/levels.cpp
+  plugins/ops/07-grade/curves.cpp
+  plugins/ops/01-numeric/fast_curves.cpp
+  plugins/ops/01-numeric/fast_sampling.cpp
   plugins/ops/05-filter/restoration_noise.cpp
   plugins/ops/05-filter/restoration_nlm.cpp
   plugins/ops/05-filter/restoration_wavelet.cpp
@@ -286,6 +289,12 @@ int main() { return 0; }" PHOTOSPIDER_COMPILER_HAS_FRQ_SME_ACLE)
   else()
     message(STATUS "Compiler lacks SME support; frequency wavelets retain NEON")
   endif()
+endif()
+
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
+  list(APPEND PHOTOSPIDER_OPERATION_SOURCES plugins/ops/01-numeric/fast_compute_avx2.cpp)
+  set_property(SOURCE plugins/ops/01-numeric/fast_compute_avx2.cpp APPEND PROPERTY
+    COMPILE_OPTIONS "-mavx2" "-mfma")
 endif()
 
 set_property(SOURCE ${PHOTOSPIDER_OPERATION_SOURCES} APPEND PROPERTY

@@ -11,6 +11,7 @@ implementation_status: implemented_cpu_fixed_abi_8
 clarification_status: complete
 registered_operation_keys:
   - color.cielch_to_cielab_strict
+  - color.cielch_to_cielab_fast
   - color.cielch_to_cielab_accelerated_apple_silicon
   - color.cielch_to_cielab_accelerated_x86_64
 ---
@@ -30,6 +31,10 @@ Accept finite nonnegative semantic C* and arbitrary finite winding hue. C*=0 sti
 ## Behavior
 
 Sample support: l copies alone; a*/b* each use C*,h. Static structure and explicit-configuration checks apply even to Empty/bypass-only requests. There is no halo, hidden-color skip, alpha validation or full-image scan. Semantic sample validity, finite rounded results and nonsingular semantic formulas are caller preconditions. This member materializes transformed output and rejects forced view, even for a bypass-only request. Raw specials and errors follow the family and math contract.
+
+## Native fast numerical profile
+
+The additional `_fast` operation key uses the same mathematical transform with the native FP32/FP64 algorithm and profile defined in the [family contract](FMT-11_model_conversion_contract.md#native-fast-numerical-profile). The strict and accelerated keys retain their existing numerical contracts.
 
 ## Acceptance
 

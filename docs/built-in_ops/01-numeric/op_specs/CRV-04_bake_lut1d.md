@@ -25,7 +25,7 @@ There are six independent named source templates: expression, Bezier y=f(x), sin
 
 All six templates expose dynamic Float32/Float64 start/end scalar inputs and static required count in [1,1048576]. Static output dtype selects Float32 or Float64, default Float64. Scalar sources emit values[N]; multi-function sources emit values[N,C]. Axis is Float64 [start,end,step]. For count=1, sampling ignores end and axis is [start,start,0], inheriting the source sampler's no-end-read rule. All other source-specific parameters remain explicit; no inferred count or conversion into a typed image/color LUT is introduced by the template.
 
-The authoring template has static profile strict/apple_silicon/x86_64, default strict. Each source node expands into the corresponding independently named strict or CPU accelerated key (key suffix `_strict`, `_accelerated_apple_silicon` or `_accelerated_x86_64`). This is a workflow construction choice, not a new primitive mode parameter, and adds no profile parameter to the operation schemas. Interpolation templates generate query positions with linspace dtype=float64 regardless of requested table dtype; their CRV-01 node performs the selected final table conversion.
+The authoring template has static profile strict/apple_silicon/x86_64/fast, default strict. Each source node expands into the corresponding independently named strict, accelerated or fast key (key suffix `_strict`, `_accelerated_apple_silicon`, `_accelerated_x86_64` or `_fast`). This is a workflow construction choice, not a new primitive mode parameter, and adds no profile parameter to the operation schemas. Interpolation templates generate query positions with linspace dtype=float64 regardless of requested table dtype; their CRV-01 node performs the selected final table conversion.
 
 | ID and template | Runtime nodes | Exported values / axis |
 | --- | --- | --- |
@@ -51,6 +51,21 @@ Each expanded node preserves its own exactness/tolerance. In particular, sample_
 ## Behavior
 
 Count one omits the end payload dependency; axis-only requests need no coefficient or control inputs. Larger counts depend on both endpoints. Numerical domains and coordinate precision are caller preconditions. Axis belongs to the linspace (or sampler) call and values to the curve (or sampler) call. Dependency and numerical rules for each expansion come from the expanded operation contracts; a constructor adds no hidden evaluation.
+
+## Native fast numerical profile
+
+The authoring profile additionally accepts `CpuNumericProfile::Fast` (`fast`), while defaulting to strict. All six templates remain ordinary graph expansions:
+
+| Template | Fast operation keys |
+| --- | --- |
+| Expression | `numeric.sample_expression_fast` |
+| Bezier function | `curve.sample_bezier_function_fast` |
+| Linear / PCHIP | `numeric.linspace_fast` -> `curve.interpolate_linear_fast` / `curve.interpolate_pchip_fast` |
+| Linear multi / PCHIP multi | `numeric.linspace_fast` -> `curve.interpolate_linear_multi_fast` / `curve.interpolate_pchip_multi_fast` |
+
+Interpolation templates materialize the linspace values as Float64 before the interpolator, including for Float32 table output. Fast coordinates use direct endpoint-inclusive native evaluation rather than repeated addition: `t=i/(count-1)`, `q=fma(t,end-start,start)`, with a weighted-endpoint form when the subtraction overflows. Endpoints are selected directly. Count=1 uses only start, and axis-only output does not evaluate the source expression or curve.
+
+Each node follows its native fast numerical profile. The sequence and interpolation stages are not merged into a single unrounded expression. Expression sampling uses the bounded expression grammar with native elementary functions; a finite nonnegative polynomial of degree at most eight on [0,1] may be evaluated by Horner FMA. Bezier sampling solves the monotone x polynomial before evaluating y. Baking does not promise a bound on later LUT discretization error.
 
 ## Acceptance
 

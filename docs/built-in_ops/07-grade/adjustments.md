@@ -7,6 +7,7 @@
 - 全部成员为可独立调用的 tile 算子。E、H(r)、W、S 分别表示逐元素、邻域、全局统计和有序递推的数学依赖；tile 划分不改变统计区域或扫描起点。
 - 生产计算使用原生 FP32/FP64。独立 oracle 使用严格舍入，作为实现比较对象；浮点误差与离散结果按[共享契约](op_specs/GRD_common_contract.md)分别比较。
 - 颜色解释是显式静态参数；alpha 与 AOV 按成员定义保留。输入数值域沿用[公共 unchecked 契约](../00-foundation/contracts.md)。
+- [GRD-05 亮度曲线](op_specs/GRD-05_curves_contract.md)的描述式输入要求相对线性 RGB，接受 `scene`、`display`、`scene_relative`、`display_relative` reference；单位为 `1` 或 `relative`，显式尺度须为 `relative`。
 - CIELAB 明度存储为 l=L*/100，OKLab 使用原生 L。线性 Y、l、L 是不同坐标；亮度调整有 RGB 同比缩放、XYZ 只改 Y、CIELAB 只改 l、OKLab 只改 L 四个独立路径。
 - 统计默认使用二值选区，完整图像自动调整默认排除 alpha=0；软选区及 alpha 加权显式启用。统计选区与效果混合 mask 独立。
 - 效果强度、软 mask 混合与色域映射通过显式算子组合。
@@ -60,12 +61,12 @@
 | [GRD-03B Contrast on the exposure axis](op_specs/GRD-03B_contrast_log2.md) | primitive / tile / D1_draft | `grade.contrast_log2` | implemented |
 | [GRD-04A Bounded levels](op_specs/GRD-04A_levels_bounded.md) | primitive / tile / D1_draft | `grade.levels_bounded` | implemented |
 | [GRD-04B Signed levels](op_specs/GRD-04B_levels_signed.md) | primitive / tile / D1_draft | `grade.levels_signed` | implemented |
-| [GRD-05A Component curves with linear interpolation](op_specs/GRD-05A_curves_linear.md) | primitive / tile / D1_draft | `grade.curves_linear` | not_implemented |
-| [GRD-05B Component curves with PCHIP interpolation](op_specs/GRD-05B_curves_pchip.md) | primitive / tile / D1_draft | `grade.curves_pchip` | not_implemented |
-| [GRD-05C Proportional RGB luminance curve](op_specs/GRD-05C_curves_luminance.md) | primitive / tile / D1_draft | `grade.curves_luminance` | not_implemented |
-| [GRD-05D XYZ Y curve](op_specs/GRD-05D_curves_xyz_y.md) | primitive / tile / D1_draft | `grade.curves_xyz_y` | not_implemented |
-| [GRD-05E CIELAB lightness curve](op_specs/GRD-05E_curves_cielab_l.md) | primitive / tile / D1_draft | `grade.curves_cielab_l` | not_implemented |
-| [GRD-05F OKLab lightness curve](op_specs/GRD-05F_curves_oklab_l.md) | primitive / tile / D1_draft | `grade.curves_oklab_l` | not_implemented |
+| [GRD-05A Component curves with linear interpolation](op_specs/GRD-05A_curves_linear.md) | primitive / tile / D1_draft | `grade.curves_linear` | implemented_cpu_fixed_abi_9 |
+| [GRD-05B Component curves with PCHIP interpolation](op_specs/GRD-05B_curves_pchip.md) | primitive / tile / D1_draft | `grade.curves_pchip` | implemented_cpu_fixed_abi_9 |
+| [GRD-05C Proportional RGB luminance curve](op_specs/GRD-05C_curves_luminance.md) | primitive / tile / D1_draft | `grade.curves_luminance` | implemented_cpu_fixed_abi_9 |
+| [GRD-05D XYZ Y curve](op_specs/GRD-05D_curves_xyz_y.md) | primitive / tile / D1_draft | `grade.curves_xyz_y` | implemented_cpu_fixed_abi_9 |
+| [GRD-05E CIELAB lightness curve](op_specs/GRD-05E_curves_cielab_l.md) | primitive / tile / D1_draft | `grade.curves_cielab_l` | implemented_cpu_fixed_abi_9 |
+| [GRD-05F OKLab lightness curve](op_specs/GRD-05F_curves_oklab_l.md) | primitive / tile / D1_draft | `grade.curves_oklab_l` | implemented_cpu_fixed_abi_9 |
 | [GRD-06A Map a feature through an RGB ramp](op_specs/GRD-06A_gradient_map.md) | primitive / tile / D1_draft | `grade.gradient_map` | not_implemented |
 | [GRD-06B Image gradient mapping](op_specs/GRD-06B_gradient_map_image.md) | primitive / tile / D1_draft | `grade.gradient_map_image` | not_implemented |
 | [GRD-07A Trilinear RGB LUT](op_specs/GRD-07A_lut3d_trilinear.md) | primitive / tile / D1_draft | `grade.lut3d_trilinear` | not_implemented |

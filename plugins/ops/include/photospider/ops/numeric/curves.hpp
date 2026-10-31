@@ -22,7 +22,8 @@ inline Result<WorkflowNode> node(std::uint64_t id, const char* operation,
                            ? "_accelerated_apple_silicon"
                        : profile == CpuNumericProfile::X86Avx2
                            ? "_accelerated_x86_64"
-                           : nullptr;
+                       : profile == CpuNumericProfile::Fast ? "_fast"
+                                                            : nullptr;
   const auto* domain = policy == CurveDomain::Reject  ? "reject"
                        : policy == CurveDomain::Clamp ? "clamp"
                        : policy == CurveDomain::LinearExtrapolate
@@ -55,22 +56,23 @@ inline Result<WorkflowNode> node(std::uint64_t id, const char* operation,
  * metadata and may be used concurrently. Each selected output tile is a fixed
  * CPU task reading all x, its query rows and all y rows for its columns,
  * closed through each source grid. It computes only selected global outputs
- * with preallocated ExactCurve scratch. Allocation during authoring/preparation
- * may throw bad_alloc. Invalid helper parameters fail InvalidArgument;
- * incompatible connected metadata fails TypeMismatch. Finite consumed samples,
- * ordered x, reject-domain queries and representable outputs are caller
- * preconditions. Knot/clamp uses one y; linear uses two; PCHIP uses its local
- * stencil. Generic unused y values receive no numeric scan. Output tiles own
- * separate storage beyond context lifetime. Required tasks share one call's
- * publication outcome. Resource, stale and cancellation failures retain their
- * categories. Rebinding shares immutable preparation, not numeric state. Empty
- * reads no payload. Strict rounds complete exact rational formulas once.
+ * with preallocated profile-specific scratch. Allocation during
+ * authoring/preparation may throw bad_alloc. Invalid helper parameters fail
+ * InvalidArgument; incompatible connected metadata fails TypeMismatch. Finite
+ * consumed samples, ordered x, reject-domain queries and representable outputs
+ * are caller preconditions. Knot/clamp uses one y; linear uses two; PCHIP uses
+ * its local stencil. Generic unused y values receive no numeric scan. Output
+ * tiles own separate storage beyond context lifetime. Required tasks share one
+ * call's publication outcome. Resource, stale and cancellation failures retain
+ * their categories. Rebinding shares immutable preparation, not numeric state.
+ * Empty reads no payload. Strict rounds complete exact rational formulas once.
  * Accelerated follows CpuNumericProfile's bound while preserving cross-query
- * monotonicity; the current fast Float32 path requires a uniquely rounded
- * enclosure and Float64 uses exact formulas. Caller fenv is preserved.
- * Ordinary exact zero is -0 only for two -0 segment endpoints; node/clamp
- * retains y zero. CPU-specific profiles require their target. PCHIP
- * extrapolates its endpoint tangent; linear extrapolates its endpoint secant.
+ * monotonicity. Fast uses native binary64 coefficients and FMA followed by
+ * output-dtype conversion, without exact-rounding or certified error bounds.
+ * Caller fenv is preserved. Strict/accelerated ordinary exact zero is -0 only
+ * for two -0 segment endpoints; every profile retains y zero at knots/clamps.
+ * CPU-specific profiles require their target. PCHIP extrapolates its endpoint
+ * tangent; linear extrapolates its endpoint secant.
  */
 /** @brief Piecewise-linear single-function interpolation; shared contract
  * above. */
@@ -83,7 +85,7 @@ inline Result<WorkflowNode> interpolate_linear_node(
                             std::move(y), std::move(query), dtype, policy,
                             profile);
 }
-/** @brief Exact PCHIP single-function interpolation; shared contract above. */
+/** @brief PCHIP single-function interpolation; shared contract above. */
 inline Result<WorkflowNode> interpolate_pchip_node(
     std::uint64_t id, WorkflowInput x, WorkflowInput y, WorkflowInput query,
     ElementType dtype = ElementType::Float64,
@@ -104,7 +106,7 @@ inline Result<WorkflowNode> interpolate_linear_multi_node(
                             std::move(y), std::move(query), dtype, policy,
                             profile);
 }
-/** @brief Exact PCHIP multiple-function interpolation; shared contract above.
+/** @brief PCHIP multiple-function interpolation; shared contract above.
  */
 inline Result<WorkflowNode> interpolate_pchip_multi_node(
     std::uint64_t id, WorkflowInput x, WorkflowInput y, WorkflowInput query,

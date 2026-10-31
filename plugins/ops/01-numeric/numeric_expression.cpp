@@ -427,8 +427,7 @@ Result<WorkflowNode> sample_expression_node(
   using namespace plugin_internal::numeric_ops;  // NOLINT(build/namespaces)
   if (!id || count < 1 || count > 1048576 ||
       (dtype != ElementType::Float32 && dtype != ElementType::Float64) ||
-      profile < CpuNumericProfile::Strict ||
-      profile > CpuNumericProfile::X86Avx2)
+      profile < CpuNumericProfile::Strict || profile > CpuNumericProfile::Fast)
     return Result<WorkflowNode>(
         schema("invalid expression id/count/dtype/profile"));
   auto program = ExpressionParser(expression).run();
@@ -447,6 +446,8 @@ Result<WorkflowNode> sample_expression_node(
   const auto* suffix = profile == CpuNumericProfile::Strict ? "_strict"
                        : profile == CpuNumericProfile::AppleSiliconNeon
                            ? "_accelerated_apple_silicon"
+                       : profile == CpuNumericProfile::Fast
+                           ? "_fast"
                            : "_accelerated_x86_64";
   return Result<WorkflowNode>(WorkflowNode{
       id,

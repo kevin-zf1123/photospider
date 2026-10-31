@@ -6,6 +6,7 @@ function: interpolate_linear_multi
 operation_family: curve.interpolate_linear_multi
 proposed_operation_keys:
   - curve.interpolate_linear_multi_strict
+  - curve.interpolate_linear_multi_fast
   - curve.interpolate_linear_multi_accelerated_apple_silicon
   - curve.interpolate_linear_multi_accelerated_x86_64
 category: 01-numeric
@@ -33,6 +34,10 @@ Required String `dtype` is float32/float64 and `out_of_domain` is reject/clamp/l
 ## Mathematics and behavior
 
 Each output values[i,c] has the same formula, dtype rules, finite-value policy, domain policy, precision and zero handling as CRV-01A at query[i] using the column y[:,c]. Output row i, column c depends only on x, query[i] and the stencil of column y[:,c]; unselected query rows and columns do not enter arithmetic. The output column axis is ordinary, including C=1. Region and tile results equal the corresponding slice of the whole result. Caller preconditions follow the [CRV-01 family contract](CRV-01_interpolate.md#behavior).
+
+## Native fast numerical profile
+
+The additional `_fast` key is selected by `CpuNumericProfile::Fast`. Its native arithmetic algorithm is defined in the [family profile](CRV-01_interpolate.md#native-fast-numerical-profile); it replaces the strict/accelerated rounding guarantees for this key while retaining the stated parameter and shape interface.
 
 ## Acceptance
 

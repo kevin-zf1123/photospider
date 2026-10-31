@@ -6,6 +6,7 @@ function: interpolate_pchip
 operation_family: curve.interpolate_pchip
 proposed_operation_keys:
   - curve.interpolate_pchip_strict
+  - curve.interpolate_pchip_fast
   - curve.interpolate_pchip_accelerated_apple_silicon
   - curve.interpolate_pchip_accelerated_x86_64
 category: 01-numeric
@@ -90,6 +91,10 @@ Finite consumed x/y/query values, strictly increasing x and finite representable
 Otherwise, if the exact curve result is zero, return -0 only when both endpoint y values of the selected segment are -0; return +0 for other exact zeros. The first/last segment determines this rule for its endpoint tangent extrapolation. Nonzero results rounded to zero retain their mathematical sign. The accelerated allowance does not override these zero cases.
 
 Static parameter errors return `InvalidArgument`; incompatible port metadata returns `TypeMismatch`.
+
+## Native fast numerical profile
+
+The additional `_fast` key is selected by `CpuNumericProfile::Fast`. Its native arithmetic algorithm is defined in the [family profile](CRV-01_interpolate.md#native-fast-numerical-profile); it replaces the strict/accelerated rounding guarantees for this key while retaining the stated parameter and shape interface.
 
 ## Acceptance
 

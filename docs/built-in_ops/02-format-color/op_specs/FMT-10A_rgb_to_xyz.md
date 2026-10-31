@@ -11,6 +11,7 @@ implementation_status: implemented_cpu_fixed_abi_8
 clarification_status: complete
 registered_operation_keys:
   - color.rgb_to_xyz_strict
+  - color.rgb_to_xyz_fast
   - color.rgb_to_xyz_accelerated_apple_silicon
   - color.rgb_to_xyz_accelerated_x86_64
 ---
@@ -32,6 +33,10 @@ X/Y/Z are written into the original R/G/B slots on the source white/unit/referen
 ## Behavior
 
 Nonidentity output depends on the complete source triple at the same coordinate. Native exact I copies bits; approximate I does not select this path. Static selector/representation checks apply before pixels, including Empty or alpha-only output. Geometry validity is an unchecked numerical caller premise. A non-finite or failed consumed peer is not suppressed by a zero coefficient or by source alpha=0. Raw keeps NUM special values.
+
+## Native fast numerical profile
+
+The additional `_fast` operation key uses the same mathematical transform with the native FP32/FP64 algorithm and profile defined in the [family contract](FMT-10_rgb_basis_contract.md#native-fast-numerical-profile). The strict and accelerated keys retain their existing numerical contracts.
 
 ## Acceptance
 

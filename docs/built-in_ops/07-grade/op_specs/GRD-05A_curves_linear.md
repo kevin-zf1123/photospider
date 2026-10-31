@@ -7,10 +7,10 @@ kind: primitive
 category: 07-grade
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented_cpu_fixed_abi_9
 clarification_status: complete
 execution: tile
-proposed_operation_keys:
+registered_operation_keys:
   - grade.curves_linear
 ---
 
@@ -33,6 +33,10 @@ At a knot select the ordinate. Between k[i] and k[i+1], t=(x-k[i])/(k[i+1]-k[i])
 ## Behavior
 
 Each output uses the source query at that coordinate and the contributing control-table entries. The complete auxiliary table is an admitted static support superset. A source edit is local; table edits affect observations whose declared support includes the table. Empty and bypass-only requests have no table payload dependency.
+
+## Native fast numerical profile
+
+This key follows the native numerical [family profile](GRD-05_curves_contract.md#native-fast-numerical-profile). Curve evaluation and brightness feature boundaries use binary64, with final conversion to T. The strict/accelerated NUM rounding paths are not used.
 
 ## Acceptance
 

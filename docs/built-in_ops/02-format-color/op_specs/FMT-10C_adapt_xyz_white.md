@@ -11,6 +11,7 @@ implementation_status: implemented_cpu_fixed_abi_8
 clarification_status: complete
 registered_operation_keys:
   - color.adapt_xyz_white_strict
+  - color.adapt_xyz_white_fast
   - color.adapt_xyz_white_accelerated_apple_silicon
   - color.adapt_xyz_white_accelerated_x86_64
 ---
@@ -32,6 +33,10 @@ For nonidentity K, each row is one exact dot plus +0 before rounding, with all t
 ## Behavior
 
 Exact K=I uses bit-copy identity after all static parameter checks; equal source and target whites yield this case. Each output coordinate reads its matching source sample; raw retains all bits, including signaling NaNs and signed zeros. Semantic callers guarantee finite selected samples copied. A method with invalid white responses does not become legal by asking for identity, Empty or alpha-only output. Nonidentity XYZ Scaling is still a full three-input row under NUM special-value semantics, despite its diagonal coefficients; the zero-coefficient peers are read. There is no channel-dependent approximation, fallback method or metadata-only adaptation.
+
+## Native fast numerical profile
+
+The additional `_fast` operation key uses the same mathematical transform with the native FP32/FP64 algorithm and profile defined in the [family contract](FMT-10_rgb_basis_contract.md#native-fast-numerical-profile). The strict and accelerated keys retain their existing numerical contracts.
 
 ## Acceptance
 

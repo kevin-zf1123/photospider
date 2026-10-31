@@ -17,12 +17,14 @@
 
 CRV 继承 [NUM 共同契约](op_specs/NUM_common_contract.md)和 [NUM accelerated 契约](op_specs/NUM_accelerated_contract.md)；strict 与 Apple Silicon CPU、x86-64 CPU 的 accelerated profile 分别命名。曲线输出默认不 clip 到 `[0,1]`，需要截断时显式连接 clamp。控制点有限性、x 递增、单调拓扑、段索引合法性、LUT 轴有效性与输出可表示性为 unchecked 调用方前提。一般反函数由 CRV-10 求解原数学曲线，不能通过倒置数组次序得到。
 
+CRV-01、CRV-02、CRV-04、CRV-05 另有显式 `fast` profile，遵循各族的原生数值规则；其误差与舍入承诺见对应英文规格。
+
 ## 族目录
 
 | 族 | 功能 | 输入 → 输出 | 规格 |
 | --- | --- | --- | --- |
 | CRV-01 | 插值 | x`[K]`、y`[K]` 或 `[K,C]`、query`[N]` → `values` `[N]` 或 `[N,C]`；linear 与 PCHIP，单函数与多函数各为独立算子 | [CRV-01](op_specs/CRV-01_interpolate.md) |
-| CRV-02 | Bézier 函数采样 | anchors`[K,2]`、relative handles、start/end → `values[count]`、`axis` | [CRV-02](op_specs/CRV-02_sample_bezier_function.md) |
+| CRV-02 | Bézier 函数采样 | anchors`[K,2]`、relative handles、start/end → `values[count]`、`axis`<br>`curve.sample_bezier_function_fast` | [CRV-02](op_specs/CRV-02_sample_bezier_function.md) |
 | CRV-03 | 参数曲线求值 | anchors`[K,D]`、relative handles、Int64 segment_indices`[N]`、t`[N]` → `values[N,D]` | [CRV-03](op_specs/CRV-03_evaluate_bezier.md) |
 | CRV-04 | LUT1D 烘焙模板 | 六种函数来源 + start/end/count → `values`、`axis` | [CRV-04](op_specs/CRV-04_bake_lut1d.md) |
 | CRV-05 | LUT1D 应用 | input、table `[L]` 或 `[L,C]`、axis → 保持 input shape 的 `values` | [CRV-05](op_specs/CRV-05_apply_lut1d.md) |
@@ -54,11 +56,11 @@ PCHIP 与 B-spline 的性质可对照 SciPy 官方定义；Fourier resample 假�
 
 | ID / spec | 类别 | 注册 key | 实现 |
 | --- | --- | --- | --- |
-| [CRV-01A — interpolate_linear](op_specs/CRV-01A_interpolate_linear.md) | primitive / D1_draft | `curve.interpolate_linear_strict`<br>`curve.interpolate_linear_accelerated_apple_silicon`<br>`curve.interpolate_linear_accelerated_x86_64` | 已实现 |
-| [CRV-01B — interpolate_pchip](op_specs/CRV-01B_interpolate_pchip.md) | primitive / D1_draft | `curve.interpolate_pchip_strict`<br>`curve.interpolate_pchip_accelerated_apple_silicon`<br>`curve.interpolate_pchip_accelerated_x86_64` | 已实现 |
-| [CRV-01C — interpolate_linear_multi](op_specs/CRV-01C_interpolate_linear_multi.md) | primitive / D1_draft | `curve.interpolate_linear_multi_strict`<br>`curve.interpolate_linear_multi_accelerated_apple_silicon`<br>`curve.interpolate_linear_multi_accelerated_x86_64` | 已实现 |
-| [CRV-01D — interpolate_pchip_multi](op_specs/CRV-01D_interpolate_pchip_multi.md) | primitive / D1_draft | `curve.interpolate_pchip_multi_strict`<br>`curve.interpolate_pchip_multi_accelerated_apple_silicon`<br>`curve.interpolate_pchip_multi_accelerated_x86_64` | 已实现 |
-| [CRV-02 — sample_bezier_function](op_specs/CRV-02_sample_bezier_function.md) | primitive / D1_draft | `curve.sample_bezier_function_strict`<br>`curve.sample_bezier_function_accelerated_apple_silicon`<br>`curve.sample_bezier_function_accelerated_x86_64` | 已实现 |
+| [CRV-01A — interpolate_linear](op_specs/CRV-01A_interpolate_linear.md) | primitive / D1_draft | `curve.interpolate_linear_strict`<br>`curve.interpolate_linear_accelerated_apple_silicon`<br>`curve.interpolate_linear_accelerated_x86_64`<br>`curve.interpolate_linear_fast` | 已实现 |
+| [CRV-01B — interpolate_pchip](op_specs/CRV-01B_interpolate_pchip.md) | primitive / D1_draft | `curve.interpolate_pchip_strict`<br>`curve.interpolate_pchip_accelerated_apple_silicon`<br>`curve.interpolate_pchip_accelerated_x86_64`<br>`curve.interpolate_pchip_fast` | 已实现 |
+| [CRV-01C — interpolate_linear_multi](op_specs/CRV-01C_interpolate_linear_multi.md) | primitive / D1_draft | `curve.interpolate_linear_multi_strict`<br>`curve.interpolate_linear_multi_accelerated_apple_silicon`<br>`curve.interpolate_linear_multi_accelerated_x86_64`<br>`curve.interpolate_linear_multi_fast` | 已实现 |
+| [CRV-01D — interpolate_pchip_multi](op_specs/CRV-01D_interpolate_pchip_multi.md) | primitive / D1_draft | `curve.interpolate_pchip_multi_strict`<br>`curve.interpolate_pchip_multi_accelerated_apple_silicon`<br>`curve.interpolate_pchip_multi_accelerated_x86_64`<br>`curve.interpolate_pchip_multi_fast` | 已实现 |
+| [CRV-02 — sample_bezier_function](op_specs/CRV-02_sample_bezier_function.md) | primitive / D1_draft | `curve.sample_bezier_function_strict`<br>`curve.sample_bezier_function_accelerated_apple_silicon`<br>`curve.sample_bezier_function_accelerated_x86_64`<br>`curve.sample_bezier_function_fast` | 已实现 |
 | [CRV-03 — evaluate_bezier](op_specs/CRV-03_evaluate_bezier.md) | primitive / D1_draft | `curve.evaluate_bezier_strict`<br>`curve.evaluate_bezier_accelerated_apple_silicon`<br>`curve.evaluate_bezier_accelerated_x86_64` | 已实现 |
 | [CRV-04A — bake_lut1d_expression](op_specs/CRV-04A_bake_lut1d_expression.md) | composite_workflow / D1_draft | — | 已实现 |
 | [CRV-04B — bake_lut1d_bezier](op_specs/CRV-04B_bake_lut1d_bezier.md) | composite_workflow / D1_draft | — | 已实现 |
@@ -66,8 +68,8 @@ PCHIP 与 B-spline 的性质可对照 SciPy 官方定义；Fourier resample 假�
 | [CRV-04D — bake_lut1d_pchip](op_specs/CRV-04D_bake_lut1d_pchip.md) | composite_workflow / D1_draft | — | 已实现 |
 | [CRV-04E — bake_lut1d_linear_multi](op_specs/CRV-04E_bake_lut1d_linear_multi.md) | composite_workflow / D1_draft | — | 已实现 |
 | [CRV-04F — bake_lut1d_pchip_multi](op_specs/CRV-04F_bake_lut1d_pchip_multi.md) | composite_workflow / D1_draft | — | 已实现 |
-| [CRV-05A — apply_lut1d](op_specs/CRV-05A_apply_lut1d.md) | primitive / D1_draft | `curve.apply_lut1d_strict`<br>`curve.apply_lut1d_accelerated_apple_silicon`<br>`curve.apply_lut1d_accelerated_x86_64` | 已实现 |
-| [CRV-05B — apply_lut1d_channels](op_specs/CRV-05B_apply_lut1d_channels.md) | primitive / D1_draft | `curve.apply_lut1d_channels_strict`<br>`curve.apply_lut1d_channels_accelerated_apple_silicon`<br>`curve.apply_lut1d_channels_accelerated_x86_64` | 已实现 |
+| [CRV-05A — apply_lut1d](op_specs/CRV-05A_apply_lut1d.md) | primitive / D1_draft | `curve.apply_lut1d_strict`<br>`curve.apply_lut1d_accelerated_apple_silicon`<br>`curve.apply_lut1d_accelerated_x86_64`<br>`curve.apply_lut1d_fast` | 已实现 |
+| [CRV-05B — apply_lut1d_channels](op_specs/CRV-05B_apply_lut1d_channels.md) | primitive / D1_draft | `curve.apply_lut1d_channels_strict`<br>`curve.apply_lut1d_channels_accelerated_apple_silicon`<br>`curve.apply_lut1d_channels_accelerated_x86_64`<br>`curve.apply_lut1d_channels_fast` | 已实现 |
 | [CRV-06A — color_ramp_rgb](op_specs/CRV-06A_color_ramp_rgb.md) | primitive / D1_draft | `curve.color_ramp_rgb_strict`<br>`curve.color_ramp_rgb_accelerated_apple_silicon`<br>`curve.color_ramp_rgb_accelerated_x86_64` | 已实现 |
 | [CRV-06B — color_ramp_cmyk](op_specs/CRV-06B_color_ramp_cmyk.md) | primitive / D1_draft | `curve.color_ramp_cmyk_strict`<br>`curve.color_ramp_cmyk_accelerated_apple_silicon`<br>`curve.color_ramp_cmyk_accelerated_x86_64` | 已实现 |
 | [CRV-06C — color_ramp_cielab](op_specs/CRV-06C_color_ramp_cielab.md) | primitive / D1_draft | `curve.color_ramp_cielab_strict`<br>`curve.color_ramp_cielab_accelerated_apple_silicon`<br>`curve.color_ramp_cielab_accelerated_x86_64` | 已实现 |

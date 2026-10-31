@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "02-format-color/color_authoring.hpp"
+#include "02-format-color/fast_color.hpp"
 #include "02-format-color/rgb_basis_math.hpp"
 #include "common/domain/model_coordinates.hpp"
 #include "common/domain/rgb_geometry_codec.hpp"
@@ -188,7 +189,7 @@ struct Preparation final {
     unsigned terms;
   };
   std::vector<Span> spans;
-  bool narrow = false, is_identity = false;
+  bool narrow = false, is_identity = false, fast = false;
   SequenceProfile profile = SequenceProfile::Strict;
   std::array<double, 2> source_white{};
   Preparation(const Matrix& matrix)
@@ -209,7 +210,7 @@ struct Preparation final {
 
 OperationPreparation prepare_impl(const std::vector<OperationMetadata>& inputs,
                                   const Parameters& params, unsigned member,
-                                  SequenceProfile profile) {
+                                  SequenceProfile profile, bool fast = false) {
   plugin_internal::FloatingEnvironment environment;
   typed(environment.active(), "floating environment unavailable");
   checked(numeric_ops::sequence_profile_available(profile));
@@ -463,6 +464,7 @@ OperationPreparation prepare_impl(const std::vector<OperationMetadata>& inputs,
   state->selected = selected;
   state->narrow = input.descriptor.element_type == ElementType::Float32;
   state->profile = profile;
+  state->fast = fast;
   state->source_white = source_white;
   require(layout != "view" || state->is_identity,
           "ViewUnavailable: nonidentity transform");
@@ -557,10 +559,10 @@ OperationPreparation prepare_impl(const std::vector<OperationMetadata>& inputs,
 }
 Result<OperationPreparation> prepare(
     const std::vector<OperationMetadata>& inputs, const Parameters& params,
-    unsigned member, SequenceProfile profile) {
+    unsigned member, SequenceProfile profile, bool fast = false) {
   try {
     return Result<OperationPreparation>(
-        prepare_impl(inputs, params, member, profile));
+        prepare_impl(inputs, params, member, profile, fast));
   } catch (const CheckedFailure& f) {
     return Result<OperationPreparation>(f.status);
   } catch (const GeometryError&) {
@@ -590,7 +592,7 @@ bool calculates(const Preparation& state, const Region& output) {
   return false;
 }
 std::uint64_t scratch_bytes(const Preparation& state, const Region& output) {
-  return calculates(state, output) ? sizeof(Workspace) : 0;
+  return calculates(state, output) && !state.fast ? sizeof(Workspace) : 0;
 }
 Result<std::set<TileIndex>> required_tiles(const Preparation& state,
                                            const Region& output,
@@ -714,6 +716,8 @@ Result<OperationProgram> lower(const OperationLowering& query) {
 }
 struct PreparedBasis final {
   bool narrow, is_identity, view, calculates;
+  bool fast = false;
+  fast_color::Matrix native{};
   unsigned axis;
   SequenceProfile profile;
   std::array<std::uint64_t, 3> selected;
@@ -777,6 +781,126 @@ Status evaluate(Workspace* work, unsigned count, unsigned row,
   }
   return Status::success();
 }
+
+template <class T>
+bool native_contiguous(const PreparedBasis& state,
+                       const ps_kernel_invocation_v8& inv) {
+  if (inv.input_count != 1 || inv.output_count != 1)
+    return false;
+  const auto& input = inv.inputs[0];
+  const auto& output = inv.outputs[0];
+  const auto& a = *input.layout;
+  const auto& b = *output.layout;
+  if (a.rank != b.rank || state.axis + 1 != a.rank)
+    return false;
+  std::uint64_t count = 1, stride = sizeof(T);
+  for (unsigned j = a.rank; j-- > 0;) {
+    if (a.origin[j] != b.origin[j] || a.shape[j] != b.shape[j] ||
+        a.strides[j] != static_cast<std::int64_t>(stride) ||
+        b.strides[j] != static_cast<std::int64_t>(stride))
+      return false;
+    if (j != state.axis)
+      count *= b.shape[j];
+    stride *= a.shape[j];
+  }
+  const auto channels = a.shape[state.axis];
+  if (a.origin[state.axis])
+    return false;
+  for (auto c : state.selected)
+    if (c >= channels)
+      return false;
+  const auto* source = reinterpret_cast<const T*>(
+      static_cast<const unsigned char*>(input.allocation) + input.byte_offset);
+  auto* target = reinterpret_cast<T*>(
+      static_cast<unsigned char*>(output.allocation) + output.byte_offset);
+  if (reinterpret_cast<std::uintptr_t>(source) % alignof(T) ||
+      reinterpret_cast<std::uintptr_t>(target) % alignof(T))
+    return false;
+  for (std::uint64_t begin = 0; begin < count; begin += 4096) {
+    if (inv.cancellation.is_cancelled &&
+        inv.cancellation.is_cancelled(inv.cancellation.context))
+      throw Status{ErrorCode::Cancelled, {}};
+    const auto n = std::min<std::uint64_t>(4096, count - begin);
+    if (state.is_identity) {
+      std::memcpy(target + begin * channels, source + begin * channels,
+                  n * channels * sizeof(T));
+      continue;
+    }
+    if (channels == 3 &&
+        state.selected == std::array<std::uint64_t, 3>{0, 1, 2}) {
+      fast_color::matrix_span(state.native, source + begin * 3,
+                              target + begin * 3, n);
+      continue;
+    }
+    std::memcpy(target + begin * channels, source + begin * channels,
+                n * channels * sizeof(T));
+    for (std::uint64_t i = begin; i < begin + n; ++i) {
+      fast_color::Triple x{source[i * channels + state.selected[0]],
+                           source[i * channels + state.selected[1]],
+                           source[i * channels + state.selected[2]]};
+      const auto y = fast_color::multiply(state.native, x);
+      for (unsigned j = 0; j < 3; ++j)
+        target[i * channels + state.selected[j]] = static_cast<T>(y[j]);
+    }
+  }
+  return true;
+}
+void native_invoke(const PreparedBasis& state,
+                   const ps_kernel_invocation_v8& inv) {
+  if (state.narrow ? native_contiguous<float>(state, inv)
+                   : native_contiguous<double>(state, inv))
+    return;
+  fixed_tensor::PointReader<1> reader{state.inputs, inv};
+  const auto& output = inv.outputs[0];
+  const auto& layout = *output.layout;
+  const unsigned width = state.narrow ? 4 : 8;
+  std::uint64_t count = 1;
+  for (unsigned j = 0; j < layout.rank; ++j)
+    count *= layout.shape[j];
+  for (std::uint64_t i = 0; i < count; ++i) {
+    if (!(i % 4096) && inv.cancellation.is_cancelled &&
+        inv.cancellation.is_cancelled(inv.cancellation.context))
+      throw Status{ErrorCode::Cancelled, {}};
+    auto index = i;
+    std::array<std::uint64_t, 8> at{};
+    std::ptrdiff_t offset = output.byte_offset;
+    for (unsigned j = layout.rank; j-- > 0;) {
+      at[j] = layout.origin[j] + index % layout.shape[j];
+      index /= layout.shape[j];
+      offset += (at[j] - layout.origin[j]) * layout.strides[j];
+    }
+    const int row = state.row(at[state.axis]);
+    std::uint64_t raw;
+    if (row < 0 || state.is_identity) {
+      raw = reader.bits(0, at, width);
+    } else {
+      fast_color::Triple x{};
+      for (unsigned j = 0; j < 3; ++j) {
+        at[state.axis] = state.selected[j];
+        const auto bits = reader.bits(0, at, width);
+        if (state.narrow) {
+          const auto word = static_cast<std::uint32_t>(bits);
+          float value;
+          std::memcpy(&value, &word, 4);
+          x[j] = value;
+        } else {
+          std::memcpy(&x[j], &bits, 8);
+        }
+      }
+      const double value = fast_color::dot(state.native[row], x);
+      if (state.narrow) {
+        const float narrow = static_cast<float>(value);
+        raw = 0;
+        std::memcpy(&raw, &narrow, 4);
+      } else {
+        std::memcpy(&raw, &value, 8);
+      }
+    }
+    std::memcpy(static_cast<unsigned char*>(output.allocation) + offset, &raw,
+                width);
+  }
+}
+
 void invoke(const ps_kernel_invocation_v8* invocation,
             ps_kernel_status_v8* status) noexcept {
   const auto& state =
@@ -807,6 +931,15 @@ void invoke(const ps_kernel_invocation_v8* invocation,
   if (state.calculates && !environment.active()) {
     *status =
         kernel_failure(ErrorCode::OperationFailed, "RGB numeric environment");
+    return;
+  }
+  if (state.fast) {
+    try {
+      native_invoke(state, *invocation);
+      *status = {};
+    } catch (const Status& failure) {
+      accept(failure);
+    }
     return;
   }
   Workspace* work = state.calculates ? new (invocation->scratch[0].allocation)
@@ -910,6 +1043,9 @@ Result<ps_prepared_kernel_v8> prepare_kernel(const KernelPreparation& query) {
   prepared->calculates = calculates(*state, region.value());
   prepared->axis = state->axis;
   prepared->profile = state->profile;
+  prepared->fast = state->fast;
+  for (unsigned r = 0; r < 3; ++r)
+    prepared->native[r] = (*state->rows)[r].approximate;
   prepared->selected = state->selected;
   prepared->rows = state->rows;
   auto input =
@@ -956,7 +1092,7 @@ Result<ps_prepared_kernel_v8> prepare_kernel(const KernelPreparation& query) {
   return Answer(kernel);
 }
 OperationDefinition definition(unsigned member, const std::string& suffix,
-                               SequenceProfile profile) {
+                               SequenceProfile profile, bool fast = false) {
   const std::array<const char*, 3> names{
       {"rgb_to_xyz", "xyz_to_rgb", "adapt_xyz_white"}};
   OperationDefinition op;
@@ -997,9 +1133,9 @@ OperationDefinition definition(unsigned member, const std::string& suffix,
   output.key = "values";
   output.output_schema = port;
   output.result_schema = tensor_ops::scalar_schema();
-  op.prepare_static = [member, profile](const auto& inputs,
-                                        const auto& params) {
-    return prepare(inputs, params, member, profile);
+  op.prepare_static = [member, profile, fast](const auto& inputs,
+                                              const auto& params) {
+    return prepare(inputs, params, member, profile, fast);
   };
   op.lower = lower;
   op.prepare_kernel =
@@ -1109,7 +1245,8 @@ OperationMetadata edge_metadata(const WorkflowDocument& document,
 Parameters parameters(const format::RgbBasisOptions& options) {
   require(options.profile == "strict" ||
               options.profile == "accelerated_apple_silicon" ||
-              options.profile == "accelerated_x86_64",
+              options.profile == "accelerated_x86_64" ||
+              options.profile == "fast",
           "unknown CPU profile");
   Parameters out{{"layout", options.layout}};
   if (!options.group.empty()) {
@@ -1326,6 +1463,12 @@ Status register_members(OperationRegistry* registry) {
         return status;
       }
     }
+  }
+  for (unsigned member = 0; member < 3; ++member) {
+    auto status = registry->register_operation(
+        definition(member, "fast", SequenceProfile::Strict, true));
+    if (!status.ok())
+      return status;
   }
   return Status::success();
 }

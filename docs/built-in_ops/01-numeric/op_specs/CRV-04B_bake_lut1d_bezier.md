@@ -33,6 +33,10 @@ Values and axis are independent outputs of the same sampler. Axis-only needs no 
 
 When connected to CRV-05 with L>1, the consumer reads all table rows, so baking must satisfy its requirements across every producer row even for a sparse LUT query. L=1 can omit the sampler's axis and end payload; its values still require controls and start. Consumers retain their own axis and domain preconditions. Discrete baking supplies no error bound relative to the continuous function.
 
+## Native fast numerical profile
+
+`CpuNumericProfile::Fast` selects this template's fast node expansion and native coordinate/source formulas in the [family profile](CRV-04_bake_lut1d.md#native-fast-numerical-profile). The constructor remains a graph helper and adds no runtime bake key.
+
 ## Acceptance
 
 Analytic fixture: quadratic anchors=[[0,0],[1,1]], handles=[[[0.5,0]]], start=[0], end=[1], count=3 -> values=[0,0.25,1], axis=[0,1,0.5].

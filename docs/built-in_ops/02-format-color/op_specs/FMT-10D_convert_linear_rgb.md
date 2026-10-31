@@ -37,6 +37,10 @@ A B row of a nonidentity target inverse requires all three intermediate XYZ comp
 
 Auto/materialize/view apply per generated node. A forced view requires every constituent to pass the static exact-I check; a nonempty exact-I view then fails ViewUnavailable. Ordinary equal-source/target RGB conversion still traverses nonidentity A/B and therefore fails forced view. The no-conversion path is an explicitly retained input edge.
 
+## Native fast numerical profile
+
+The authoring parameter `profile="fast"` expands to `color.rgb_to_xyz_fast`, optional `color.adapt_xyz_white_fast`, and `color.xyz_to_rgb_fast`. Each generated node retains its own dtype publication boundary. The native arithmetic algorithm is defined in the [family profile](FMT-10_rgb_basis_contract.md#native-fast-numerical-profile).
+
 ## Acceptance
 
 1. Same sRGB/Rec.709 basis, Float32 RGB [1,0,0], no C: exact matrices from the RN64 preset with rounding after A and B yield strict output bit patterns [0x3f800000,0xb1356c32,0xaf63dc5c]. The small negative G/B values show why A->B is not an identity copy. Independent rational solving with certified RN32 at both stage boundaries reproduces them.

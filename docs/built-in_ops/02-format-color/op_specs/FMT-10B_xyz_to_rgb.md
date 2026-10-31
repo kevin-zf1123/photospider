@@ -11,6 +11,7 @@ implementation_status: implemented_cpu_fixed_abi_8
 clarification_status: complete
 registered_operation_keys:
   - color.xyz_to_rgb_strict
+  - color.xyz_to_rgb_fast
   - color.xyz_to_rgb_accelerated_apple_silicon
   - color.xyz_to_rgb_accelerated_x86_64
 ---
@@ -32,6 +33,10 @@ For each transformed row i, the output is RN_dtype(sum_j inverse(M)[i,j]*XYZ[j]+
 ## Behavior
 
 Native exact-I copy exceptions, nonidentity tuple/bypass support and auto/view/materialize follow the family. An explicit preserve_xyz choice does not authorize a view of a nonidentity inverse matrix. Default white mismatch and incompatible source/model/reference are preflight errors; geometry and source assertions are checked even for Empty/bypass-only requests. Negative/out-of-gamut RGB is legal; finite semantic input/output is an unchecked caller precondition.
+
+## Native fast numerical profile
+
+The additional `_fast` operation key uses the same mathematical transform with the native FP32/FP64 algorithm and profile defined in the [family contract](FMT-10_rgb_basis_contract.md#native-fast-numerical-profile). The strict and accelerated keys retain their existing numerical contracts.
 
 ## Acceptance
 
