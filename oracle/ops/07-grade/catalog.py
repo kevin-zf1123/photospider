@@ -6,6 +6,7 @@ observation per member; they are not runtime integration tests.
 from functools import partial
 from reference import point as p, curves as c, statistics as st, spatial as s
 from reference import dither as d, color as col, extended as e
+from reference.gradient_channels import gradient_channels
 from reference.precision import F, frac, rn
 
 REFERENCES={}
@@ -52,6 +53,8 @@ for suffix,route in [('C','ratio'),('D','xyz_y'),('E','cielab_l'),('F','oklab_l'
     add('05'+suffix,partial(e.brightness_curve,route=route),(rgb,[0,1],[0,.75]))
 add('06A',c.ramp,(.25,[0,1],[[0,0,0],[1,0,0]]),expected=[.25,0.,0.])
 add('06B',e.gradient_image,(rgb,[0,1],[[0,0,0],[1,0,0]]))
+add('06C',gradient_channels,([.25],0,1,[([0,1],[0,1]),([0,.5,1],[0,1,2]),([0,1],[1,0])]),
+    {'count':3},expected={'values':[[.25,.5,.75]],'table':[[0.,0.,1.],[.5,1.,.5],[1.,2.,0.]],'axis':[0.,1.,.5]})
 add('07A',c.lut_trilinear,(rgb,table),expected=rgb)
 add('07B',c.lut_tetrahedral,(rgb,table),expected=rgb)
 add('08A',p.hsl,([0,.5,.5],.25,2,.1))

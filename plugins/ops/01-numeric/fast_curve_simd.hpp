@@ -47,7 +47,7 @@ inline void store_pair(T* output, float64x2_t value) {
     vst1q_f64(output, value);
   }
 }
-template <bool Cubic, class Input, class Output>
+template <bool Cubic, bool Shortcut, class Input, class Output>
 inline void small_span(const Curve& curve, const Input* input, Output* output,
                        std::size_t count) {
   const auto xs = table8(curve.x, curve.size, INFINITY);
@@ -93,26 +93,41 @@ inline void small_span(const Curve& curve, const Input* input, Output* output,
     }
     index = vminq_u8(index, cap);
     const auto x = gather8(xs, index), y = gather8(ys, index);
-    auto delta = vsubq_f64(q, x), value = y;
-    if constexpr (Cubic) {
-      value = vfmaq_f64(
-          y, delta,
-          vfmaq_f64(gather8(aa, index), delta,
-                    vfmaq_f64(gather8(bb, index), delta, gather8(cc, index))));
+    float64x2_t value;
+    if constexpr (Shortcut) {
+      if (curve.identity) {
+        const auto zero = vdupq_n_f64(0);
+        value = vbslq_f64(native_simd::equal(q, zero), zero, q);
+      } else {
+        value = vdupq_n_f64(curve.identity_or_constant(0));
+        if (curve.edge == Edge::Linear && curve.y[0] == 0) {
+          value = vbslq_f64(native_simd::less(q, first),
+                            vdupq_n_f64(curve.first_constant), value);
+          value = vbslq_f64(native_simd::greater(q, last),
+                            vdupq_n_f64(curve.last_constant), value);
+        }
+      }
     } else {
-      value = vfmaq_f64(y, delta, gather8(aa, index));
-    }
-    if (curve.identity) {
-      value = q;
+      const auto delta = vsubq_f64(q, x);
+      if constexpr (Cubic) {
+        value = vfmaq_f64(y, delta,
+                          vfmaq_f64(gather8(aa, index), delta,
+                                    vfmaq_f64(gather8(bb, index), delta,
+                                              gather8(cc, index))));
+      } else {
+        value = vfmaq_f64(y, delta, gather8(aa, index));
+      }
     }
     value = vbslq_f64(native_simd::equal(q, x), y, value);
     if (curve.edge == Edge::Linear) {
-      const auto low =
-          vfmaq_n_f64(yfirst, vsubq_f64(q, first), curve.first_slope);
-      const auto high =
-          vfmaq_n_f64(ylast, vsubq_f64(q, last), curve.last_slope);
-      value = vbslq_f64(native_simd::less(q, first), low, value);
-      value = vbslq_f64(native_simd::greater(q, last), high, value);
+      if constexpr (!Shortcut) {
+        const auto low =
+            vfmaq_n_f64(yfirst, vsubq_f64(q, first), curve.first_slope);
+        const auto high =
+            vfmaq_n_f64(ylast, vsubq_f64(q, last), curve.last_slope);
+        value = vbslq_f64(native_simd::less(q, first), low, value);
+        value = vbslq_f64(native_simd::greater(q, last), high, value);
+      }
       value = vbslq_f64(native_simd::equal(q, first), yfirst, value);
       value = vbslq_f64(native_simd::equal(q, last), ylast, value);
     } else {
@@ -133,9 +148,15 @@ inline bool small_curve_span(const Curve& curve, const Input* input,
 #if defined(__aarch64__)
   if (curve.size <= 8 && count >= 16) {
     if (curve.cubic) {
-      small_span<true>(curve, input, output, count);
+      if (curve.identity || curve.constant)
+        small_span<true, true>(curve, input, output, count);
+      else
+        small_span<true, false>(curve, input, output, count);
     } else {
-      small_span<false>(curve, input, output, count);
+      if (curve.identity || curve.constant)
+        small_span<false, true>(curve, input, output, count);
+      else
+        small_span<false, false>(curve, input, output, count);
     }
     return true;
   }
@@ -195,8 +216,9 @@ inline void ordered_span(const Curve* curves, const Input* input,
           value[k] = vfmaq_f64(y[k], t, a[k]);
         }
         if (curves[k].identity) {
-          value[k] =
-              vbslq_f64(native_simd::equal(query, zero), value[k], query);
+          value[k] = vbslq_f64(native_simd::equal(query, zero), zero, query);
+        } else if (curves[k].constant) {
+          value[k] = vdupq_n_f64(curves[k].identity_or_constant(0));
         }
         value[k] = vbslq_f64(native_simd::equal(query, origin), y[k], value[k]);
       }
@@ -250,6 +272,13 @@ template <class Input, class Output>
 inline void lut_span(const Input* input, Output* output, std::size_t count,
                      const double* values, std::size_t size, double minimum,
                      double maximum, Edge edge) {
+  const double factor = size > 1 ? (size - 1) / (maximum - minimum) : 1;
+  if (!std::isfinite(factor) || factor == 0) {
+    for (std::size_t j = 0; j < count; ++j)
+      output[j] = static_cast<Output>(
+          lut(input[j], values, size, minimum, maximum, edge));
+    return;
+  }
 #if defined(__x86_64__)
   if (native_compute::available()) {
     native_compute::lut(sizeof(Input) == 4, sizeof(Output) == 4, input, output,
@@ -272,6 +301,15 @@ inline void lut_span(const Input* input, Output* output, std::size_t count,
   for (; j + 2 <= count; j += 2) {
     const auto q = load_pair(input + j);
     auto u = vmulq_f64(vsubq_f64(q, low), scale);
+    if (edge == Edge::Linear) {
+      const auto infinite = vceqq_f64(vabsq_f64(u), vdupq_n_f64(HUGE_VAL));
+      if (vgetq_lane_u64(infinite, 0) || vgetq_lane_u64(infinite, 1)) {
+        for (unsigned k = 0; k < 2; ++k)
+          output[j + k] = static_cast<Output>(
+              lut(input[j + k], values, size, minimum, maximum, edge));
+        continue;
+      }
+    }
     if (edge != Edge::Linear) {
       u = vminq_f64(limit, vmaxq_f64(zero, u));
     }

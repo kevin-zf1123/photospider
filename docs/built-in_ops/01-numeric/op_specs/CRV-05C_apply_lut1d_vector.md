@@ -4,13 +4,13 @@ id: CRV-05C
 parent_id: CRV-05
 function: apply_lut1d_vector
 operation_family: curve.apply_lut1d_vector
-proposed_operation_keys:
+registered_operation_keys:
   - curve.apply_lut1d_vector_fast
 category: 01-numeric
 kind: primitive
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented_cpu_fixed_abi_9
 clarification_status: complete
 ---
 
@@ -24,7 +24,7 @@ Ordered required inputs are `input: Float32/64[S]`, `table: Float32/64[L,C]` and
 
 Output `values` uses `photospider.tensor` v1/member `samples`, shape `S+[C]`, selected Float32/Float64 dtype and ordinary axes. Batch coordinates become ordinary output sample axes, as in CRV-05A/B. C=1 remains an explicit final axis. A rank-1 input `[N]` therefore produces `[N,C]`, and a query image `[H,W]` produces `[H,W,C]`.
 
-Required static String parameters are `dtype` (`float32` or `float64`) and `out_of_domain` (`reject`, `clamp` or `linear_extrapolate`). The proposed authoring constructor `apply_lut1d_vector_node` defaults dtype to the query input dtype and policy to reject, and selects the explicit `curve.apply_lut1d_vector_fast` key. No strict or accelerated registration is specified for this member. The Result carries no color description; no color model, hue unit, transfer or alpha parameter is consumed.
+Required static String parameters are `dtype` (`float32` or `float64`) and `out_of_domain` (`reject`, `clamp` or `linear_extrapolate`). The authoring constructor `apply_lut1d_vector_node` defaults dtype to the query input dtype and policy to reject, and selects the explicit `curve.apply_lut1d_vector_fast` key. No strict or accelerated registration is specified for this member. The Result carries no color description; no color model, hue unit, transfer or alpha parameter is consumed.
 
 ## Mathematics
 
@@ -39,6 +39,12 @@ For L>1, compute the binary64 normalized position `u=(q-start)*(L-1)/(end-start)
 The query, normalized position and selected row pair are shared across output components. For L=1, directly convert `table[0,c]`; query and axis payloads are inactive, while their static schemas and the inherited singleton/reject premises still apply. Direct selection preserves signed zero. Ordinary arithmetic retains the native fast profile's floating behavior. There is no nominal component clipping or periodic reduction: finite negative/HDR coordinates and multi-turn hue-like numbers are ordinary scalar table entries.
 
 The equivalent existing-node expression copies the query into C channels and invokes `curve.apply_lut1d_channels_fast`; the direct primitive permits query sharing without that replicated input tensor. This equivalence does not require a color-ramp conversion or a change to CRV-05A/B.
+
+## Current native implementation profile
+
+`curve.apply_lut1d_vector_fast` packs only the requested table columns into binary64 invocation-local scratch. All columns share one native normalized coordinate and row pair. The ordinary path forms `scale=(L-1)/(end-start)` and then `u=(q-start)*scale`; reciprocal underflow/overflow or an overflowing subtraction uses an algebraically scaled division path. Exact endpoint tests precede interpolation, and normalized fractions zero and one directly select the corresponding stored entry. These native operation orders may differ from strict rounded-grid reconstruction.
+
+Contiguous query spans use AVX2/FMA where available; scalar spans retain arbitrary signed strides and component counts. A span-local hint from the first and middle query packets may select a broadcast-capable loop. That loop checks the actual row of every query in each packet before sharing its two table-row loads, and otherwise gathers independently; interpolation fractions, FMA order and direct-entry selections are unchanged. The hint does not impose an ordering premise on the input. Singleton spans use constant-row vector stores without loading query or axis. Large x86 singleton output spans use aligned non-temporal stores followed by a store fence before return. `max_work` is an optional nonnegative Int64 with default 9223372036854775807; numerical work uses the existing v9 work service and invocation cancellation.
 
 ## Behavior
 

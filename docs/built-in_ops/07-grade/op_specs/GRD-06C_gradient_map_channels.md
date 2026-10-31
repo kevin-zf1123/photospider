@@ -7,10 +7,10 @@ kind: composite_workflow
 category: 07-grade
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented_cpu_fixed_abi_8_9
 clarification_status: complete
 execution: tile
-proposed_operation_keys:
+registered_operation_keys:
   - grade.gradient_map_channels_combined
   - grade.gradient_map_channels_compiled
 ---
@@ -44,6 +44,7 @@ x_(D-1): Float32/64[K(D-1)], y_(D-1): Float32/64[K(D-1)]
 | `dtype` | String `float32` or `float64`, defining U for table and values | `float64` |
 | `curve_edges` | String containing a JSON array of D strings; each `reject`, `clamp` or `linear_extrapolate` | All `reject` |
 | `lookup_edge` | String `reject`, `clamp` or `linear_extrapolate` | `clamp` |
+| `max_work` | Nonnegative Int64 invocation work limit; combined forwards it to budgeted child operations | 9223372036854775807 |
 
 The static input `axis` selector and named output `axis` occupy separate parameter and output namespaces. The two array-valued authoring options use String parameters under the existing operation parameter vocabulary, for example methods=`["linear","pchip","linear"]`. Their JSON shape and enum entries are structural checks. All expanded nodes receive explicit parameters. `color_description` selects D and the ordered model components below. Each channel has its own K, knot positions, ordinates, interpolation method and curve boundary policy. Require 2<=Kc<=65536. Equal ordinate values represent a constant channel. Knot ordering and numerical domains are inherited unchecked premises.
 
@@ -89,7 +90,7 @@ All selected finite-value, ordering, representability and consumer-axis premises
 
 ## Registration variants
 
-| Proposed operation key | Required realization |
+| Registered operation key | Required realization |
 | --- | --- |
 | `grade.gradient_map_channels_combined` | Compose the named stages using existing nodes/task groups or explicit existing IR control flow, with intermediate LUT columns, the assembled table and query edges represented in the computation. |
 | `grade.gradient_map_channels_compiled` | Provide an independently compiled fixed binary operation implementing the same staged function and named outputs through the existing fixed invocation interface. |
@@ -98,14 +99,14 @@ Both keys are required registrations with the same ports, parameters, destinatio
 
 ## Fast dependencies and implementation status
 
-The two GRD-06C keys and the direct CRV-05C fast primitive are specified as `not_implemented`. The following dependencies distinguish existing paths from the required addition; these statuses do not claim end-to-end GRD-06C runtime validation.
+The current combined profile lowers the actual sampling, per-component curve, extraction, assembly and vector-lookup operations into existing fixed CPU task groups. The terminal lookup writes public `values` tiles directly; independently exported table and axis tiles retain their own output storage. The compiled profile evaluates the same stages in a fixed invocation, baking the requested component columns into invocation-local scratch. It uses bounded batches for Float64 grid generation and curve evaluation, converts each baked value to U, and only then widens the stored table for shared vector lookup. Each output task uses the current Run inputs; it introduces no numerical cache between Runs.
 
 | Stage | Dependency | Status |
 | --- | --- | --- |
 | Shared sampling grid | `numeric.linspace_fast` (NUM-02A) | Existing implementation |
 | Linear component curve | `curve.interpolate_linear_fast` (CRV-01A), through CRV-04C | Existing implementation |
 | PCHIP component curve | `curve.interpolate_pchip_fast` (CRV-01B), through CRV-04D | Existing implementation |
-| Direct scalar-to-vector LUT lookup | `curve.apply_lut1d_vector_fast` (CRV-05C) | Required; not implemented |
+| Direct scalar-to-vector LUT lookup | `curve.apply_lut1d_vector_fast` (CRV-05C) | Implemented native fast |
 | Explicit reference composition for vector lookup | `curve.apply_lut1d_channels_fast` (CRV-05B), after query replication | Existing implementation |
 | Source extraction and LUT assembly | FMT-01A and FMT-02A exact copy paths | Existing implementation |
 

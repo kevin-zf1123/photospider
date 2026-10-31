@@ -10,13 +10,16 @@
 
 #include "01-numeric/fast_curve.hpp"
 #include "01-numeric/fast_sampling.hpp"
+#include "01-numeric/vector_lut.hpp"
 #include "02-format-color/fast_color.hpp"
 #include "02-format-color/fast_color_avx2.hpp"
 #include "07-grade/curves_math.hpp"
+#include "07-grade/gradient_map_math.hpp"
 
 namespace ps::plugin_internal::native_compute {
 namespace {
 using V = __m256d;
+void cube_roots_refined(const double*, double*, std::size_t, unsigned);
 inline V set(double x) {
   return _mm256_set1_pd(x);
 }
@@ -273,34 +276,46 @@ void small_curves(const fast_curve::Curve* curves, const Input* input,
     for (unsigned c = 0; c < C; ++c) {
       const auto& curve = curves[c];
       const auto y = _mm256_i64gather_pd(curve.y, index, 8);
-      const auto a = _mm256_i64gather_pd(curve.a, index, 8);
       V value;
-      if constexpr (Cubic) {
-        value = _mm256_fmadd_pd(
-            t,
-            _mm256_fmadd_pd(
-                t,
-                _mm256_fmadd_pd(t, _mm256_i64gather_pd(curve.c, index, 8),
-                                _mm256_i64gather_pd(curve.b, index, 8)),
-                a),
-            y);
-      } else {
-        value = _mm256_fmadd_pd(t, a, y);
-      }
       if (curve.identity) {
-        value = choose(eq(q, set(0)), value, q);
+        value = choose(eq(q, set(0)), set(0), q);
+      } else if (curve.constant) {
+        value = set(curve.identity_or_constant(0));
+        if (curve.edge == fast_curve::Edge::Linear && curve.y[0] == 0) {
+          value = choose(_mm256_cmp_pd(q, first, _CMP_LT_OQ),
+                         set(curve.first_constant), value);
+          value = choose(_mm256_cmp_pd(q, last, _CMP_GT_OQ),
+                         set(curve.last_constant), value);
+        }
+      } else {
+        const auto a = _mm256_i64gather_pd(curve.a, index, 8);
+        if constexpr (Cubic) {
+          value = _mm256_fmadd_pd(
+              t,
+              _mm256_fmadd_pd(
+                  t,
+                  _mm256_fmadd_pd(t, _mm256_i64gather_pd(curve.c, index, 8),
+                                  _mm256_i64gather_pd(curve.b, index, 8)),
+                  a),
+              y);
+        } else {
+          value = _mm256_fmadd_pd(t, a, y);
+        }
       }
       value = choose(eq(q, x), y, value);
       if (curve.edge == fast_curve::Edge::Linear) {
-        value = choose(_mm256_cmp_pd(q, first, _CMP_LT_OQ),
-                       _mm256_fmadd_pd(_mm256_sub_pd(q, first),
-                                       set(curve.first_slope), set(curve.y[0])),
-                       value);
-        value = choose(
-            _mm256_cmp_pd(q, last, _CMP_GT_OQ),
-            _mm256_fmadd_pd(_mm256_sub_pd(q, last), set(curve.last_slope),
-                            set(curve.y[axis.size - 1])),
-            value);
+        if (!curve.identity && !curve.constant) {
+          value =
+              choose(_mm256_cmp_pd(q, first, _CMP_LT_OQ),
+                     _mm256_fmadd_pd(_mm256_sub_pd(q, first),
+                                     set(curve.first_slope), set(curve.y[0])),
+                     value);
+          value = choose(
+              _mm256_cmp_pd(q, last, _CMP_GT_OQ),
+              _mm256_fmadd_pd(_mm256_sub_pd(q, last), set(curve.last_slope),
+                              set(curve.y[axis.size - 1])),
+              value);
+        }
         value = choose(eq(q, first), set(curve.y[0]), value);
         value = choose(eq(q, last), set(curve.y[axis.size - 1]), value);
       } else {
@@ -368,7 +383,9 @@ void ordered_curves(const fast_curve::Curve* curves, const Input* input,
           value[k] = _mm256_fmadd_pd(t, a[k], y[k]);
         }
         if (curves[k].identity) {
-          value[k] = choose(eq(q, zero), value[k], q);
+          value[k] = choose(eq(q, zero), zero, q);
+        } else if (curves[k].constant) {
+          value[k] = set(curves[k].identity_or_constant(0));
         }
         value[k] = choose(eq(q, origin), y[k], value[k]);
       }
@@ -456,8 +473,14 @@ void lut_t(const void* in, void* out, std::size_t count, const double* values,
     }
     return;
   }
-  const auto scale = set((size - 1) / (end - start)), low = set(start),
-             high = set(end);
+  const double factor = (size - 1) / (end - start);
+  if (!std::isfinite(factor) || factor == 0) {
+    for (std::size_t j = 0; j < count; ++j)
+      output[j * output_step] = static_cast<Output>(fast_curve::lut(
+          input[j * input_step], values, size, start, end, edge));
+    return;
+  }
+  const auto scale = set(factor), low = set(start), high = set(end);
   const auto zero = set(0), one = set(1), limit = set(size - 1),
              cap = set(size - 2);
   std::size_t j = 0;
@@ -471,6 +494,13 @@ void lut_t(const void* in, void* out, std::size_t count, const double* values,
                         input[(j + 1) * input_step], input[j * input_step]);
     }
     auto u = _mm256_mul_pd(_mm256_sub_pd(q, low), scale);
+    if (edge == fast_curve::Edge::Linear &&
+        _mm256_movemask_pd(eq(_mm256_andnot_pd(set(-0.0), u), set(HUGE_VAL)))) {
+      for (unsigned k = 0; k < 4; ++k)
+        output[(j + k) * output_step] = static_cast<Output>(fast_curve::lut(
+            input[(j + k) * input_step], values, size, start, end, edge));
+      continue;
+    }
     if (edge != fast_curve::Edge::Linear) {
       u = _mm256_min_pd(limit, _mm256_max_pd(zero, u));
     }
@@ -644,8 +674,371 @@ void components_t(unsigned channels, unsigned selected,
     }
   }
 }
+template <class T>
+void store_four_columns(T* target, const std::array<V, 4>& values) {
+  if constexpr (sizeof(T) == 4) {
+    auto a = _mm256_cvtpd_ps(values[0]), b = _mm256_cvtpd_ps(values[1]);
+    auto c = _mm256_cvtpd_ps(values[2]), d = _mm256_cvtpd_ps(values[3]);
+    _MM_TRANSPOSE4_PS(a, b, c, d);
+    _mm_storeu_ps(target, a);
+    _mm_storeu_ps(target + 4, b);
+    _mm_storeu_ps(target + 8, c);
+    _mm_storeu_ps(target + 12, d);
+  } else {
+    const auto rg0 = _mm256_unpacklo_pd(values[0], values[1]);
+    const auto rg1 = _mm256_unpackhi_pd(values[0], values[1]);
+    const auto ba0 = _mm256_unpacklo_pd(values[2], values[3]);
+    const auto ba1 = _mm256_unpackhi_pd(values[2], values[3]);
+    _mm256_storeu_pd(target, _mm256_permute2f128_pd(rg0, ba0, 0x20));
+    _mm256_storeu_pd(target + 4, _mm256_permute2f128_pd(rg1, ba1, 0x20));
+    _mm256_storeu_pd(target + 8, _mm256_permute2f128_pd(rg0, ba0, 0x31));
+    _mm256_storeu_pd(target + 12, _mm256_permute2f128_pd(rg1, ba1, 0x31));
+  }
+}
+// Large constant results have no input locality to retain. Streaming stores
+// avoid read-for-ownership traffic; the fence retires stores before return.
+template <unsigned Channels, class Output>
+void constant_stream(const double* table, Output* output, std::size_t count) {
+  constexpr unsigned lanes = 32 / sizeof(Output);
+  Output row[Channels];
+  for (unsigned c = 0; c < Channels; ++c)
+    row[c] = static_cast<Output>(table[c]);
+  const auto elements = count * Channels;
+  std::size_t j = 0;
+  for (; j < elements && reinterpret_cast<std::uintptr_t>(output + j) % 32; ++j)
+    output[j] = row[j % Channels];
+  alignas(32) Output pattern[Channels * lanes];
+  for (unsigned c = 0; c < Channels * lanes; ++c)
+    pattern[c] = row[(j + c) % Channels];
+  if constexpr (sizeof(Output) == 4) {
+    std::array<__m256, Channels> values;
+    for (unsigned c = 0; c < Channels; ++c)
+      values[c] = _mm256_load_ps(pattern + c * lanes);
+    for (; j + Channels * lanes <= elements; j += Channels * lanes)
+      for (unsigned c = 0; c < Channels; ++c)
+        _mm256_stream_ps(output + j + c * lanes, values[c]);
+  } else {
+    std::array<V, Channels> values;
+    for (unsigned c = 0; c < Channels; ++c)
+      values[c] = _mm256_load_pd(pattern + c * lanes);
+    for (; j + Channels * lanes <= elements; j += Channels * lanes)
+      for (unsigned c = 0; c < Channels; ++c)
+        _mm256_stream_pd(output + j + c * lanes, values[c]);
+  }
+  _mm_sfence();
+  for (; j < elements; ++j)
+    output[j] = row[j % Channels];
+}
+template <unsigned Channels, bool SharedRows, class Input, class Output>
+void vector_lut_rows(const fast_curve::VectorLut& lut, const Input* input,
+                     Output* output, std::size_t count, std::ptrdiff_t stride) {
+  const auto zero = set(0), one = set(1), first = set(lut.start),
+             last = set(lut.end);
+  const auto factor = set(lut.scale), cap = set(lut.length - 2),
+             limit = set(lut.length - 1);
+  std::size_t j = 0;
+  for (; j + 4 <= count; j += 4) {
+    const auto index = static_cast<std::ptrdiff_t>(j) * stride;
+    const auto q = stride == 1
+                       ? load4(input + j)
+                       : _mm256_set_pd(input[index + 3 * stride],
+                                       input[index + 2 * stride],
+                                       input[index + stride], input[index]);
+    auto u = _mm256_mul_pd(_mm256_sub_pd(q, first), factor);
+    if (lut.edge == fast_curve::Edge::Linear &&
+        _mm256_movemask_pd(eq(_mm256_andnot_pd(set(-0.0), u), set(HUGE_VAL)))) {
+      for (unsigned k = 0; k < 4; ++k) {
+        const auto p =
+            lut.position(input[static_cast<std::ptrdiff_t>(j + k) * stride]);
+        for (unsigned c = 0; c < Channels; ++c)
+          output[(j + k) * Channels + c] = static_cast<Output>(lut.value(p, c));
+      }
+      continue;
+    }
+    if (lut.edge != fast_curve::Edge::Linear)
+      u = _mm256_min_pd(limit, _mm256_max_pd(zero, u));
+    const auto position =
+        _mm256_min_pd(cap, _mm256_max_pd(zero, _mm256_floor_pd(u)));
+    const auto row = _mm256_cvtepi32_epi64(_mm256_cvttpd_epi32(position));
+    const auto offset = _mm256_mul_epi32(row, _mm256_set1_epi64x(Channels));
+    const auto next = _mm256_add_epi64(offset, _mm256_set1_epi64x(Channels));
+    const auto t = _mm256_sub_pd(u, position);
+    const auto at_left = eq(t, zero), at_right = eq(t, one);
+    const auto at_first = eq(q, first), at_last = eq(q, last);
+    std::array<V, Channels> values;
+    const auto interpolate = [&](V a, V b, unsigned c) {
+      auto value = _mm256_fmadd_pd(t, _mm256_sub_pd(b, a), a);
+      value = choose(at_left, a, value);
+      value = choose(at_right, b, value);
+      value = choose(at_first, set(lut.table[c]), value);
+      return choose(at_last, set(lut.table[(lut.length - 1) * Channels + c]),
+                    value);
+    };
+    // Ordered queries often share one interval. Broadcast its two rows while
+    // retaining each query's interpolation fraction and endpoint selections.
+    bool shared = false;
+    if constexpr (SharedRows) {
+      const auto first_offset = _mm256_permute4x64_epi64(offset, 0);
+      const auto same_row = _mm256_cmpeq_epi64(offset, first_offset);
+      shared = _mm256_movemask_pd(_mm256_castsi256_pd(same_row)) == 15;
+    }
+    if (shared) {
+      const auto base =
+          static_cast<std::size_t>(_mm256_extract_epi64(offset, 0));
+      for (unsigned c = 0; c < Channels; ++c)
+        values[c] = interpolate(set(lut.table[base + c]),
+                                set(lut.table[base + Channels + c]), c);
+    } else {
+      for (unsigned c = 0; c < Channels; ++c)
+        values[c] = interpolate(_mm256_i64gather_pd(lut.table + c, offset, 8),
+                                _mm256_i64gather_pd(lut.table + c, next, 8), c);
+    }
+    if constexpr (Channels == 4)
+      store_four_columns(output + j * Channels, values);
+    else
+      store_columns<Output, Channels>(output + j * Channels, values);
+  }
+  for (; j < count; ++j) {
+    const auto position =
+        lut.position(input[static_cast<std::ptrdiff_t>(j) * stride]);
+    for (unsigned c = 0; c < Channels; ++c)
+      output[j * Channels + c] = static_cast<Output>(lut.value(position, c));
+  }
+}
+template <unsigned Channels, class Input, class Output>
+void vector_lut_t(const fast_curve::VectorLut& lut, const Input* input,
+                  Output* output, std::size_t count, std::ptrdiff_t stride) {
+  if (lut.length == 1) {
+    if (count * Channels * sizeof(Output) >= 8388608) {
+      constant_stream<Channels>(lut.table, output, count);
+      return;
+    }
+    constexpr unsigned lanes = 32 / sizeof(Output);
+    alignas(32) Output pattern[Channels * lanes];
+    for (unsigned c = 0; c < Channels; ++c)
+      pattern[c] = static_cast<Output>(lut.table[c]);
+    for (unsigned j = Channels; j < Channels * lanes; ++j)
+      pattern[j] = pattern[j % Channels];
+    std::size_t j = 0;
+    if constexpr (sizeof(Output) == 4) {
+      std::array<__m256, Channels> values;
+      for (unsigned c = 0; c < Channels; ++c) {
+        values[c] = _mm256_load_ps(pattern + c * lanes);
+        // Preserve full-width cached stores under strict floating semantics.
+        __asm__ __volatile__("" : "+x"(values[c]));
+      }
+      for (; j + lanes <= count; j += lanes)
+        for (unsigned c = 0; c < Channels; ++c)
+          _mm256_storeu_ps(output + j * Channels + c * lanes, values[c]);
+    } else {
+      std::array<V, Channels> values;
+      for (unsigned c = 0; c < Channels; ++c)
+        values[c] = _mm256_load_pd(pattern + c * lanes);
+      for (; j + lanes <= count; j += lanes)
+        for (unsigned c = 0; c < Channels; ++c)
+          _mm256_storeu_pd(output + j * Channels + c * lanes, values[c]);
+    }
+    for (; j < count; ++j)
+      std::copy_n(pattern, Channels, output + j * Channels);
+    return;
+  }
+  if (!std::isfinite(lut.scale) || lut.scale == 0) {
+    lut.generate(
+        [&](std::size_t j) {
+          return input[static_cast<std::ptrdiff_t>(j) * stride];
+        },
+        output, count);
+    return;
+  }
+  // A small locality hint selects the loop once per span. The shared-row
+  // loop still checks every packet; later changes in query order are safe.
+  bool shared_rows = count >= 64;
+  if (shared_rows) {
+    // Probe the middle too: a flat border need not describe the image body.
+    const std::array<std::size_t, 2> probes{0, (count / 2) & ~std::size_t(3)};
+    for (auto probe : probes) {
+      const auto at = static_cast<std::ptrdiff_t>(probe) * stride;
+      const auto row = std::min(lut.length - 2, lut.position(input[at]).row);
+      for (std::ptrdiff_t k = 1; k < 4; ++k) {
+        if (std::min(lut.length - 2,
+                     lut.position(input[at + k * stride]).row) != row) {
+          shared_rows = false;
+          break;
+        }
+      }
+      if (!shared_rows)
+        break;
+    }
+  }
+  if (shared_rows)
+    vector_lut_rows<Channels, true>(lut, input, output, count, stride);
+  else
+    vector_lut_rows<Channels, false>(lut, input, output, count, stride);
+}
+template <class Input, class Output>
+void vector_lut_dispatch(const fast_curve::VectorLut& lut, const void* source,
+                         void* target, std::size_t count,
+                         std::ptrdiff_t stride) {
+  const auto* input = static_cast<const Input*>(source);
+  auto* output = static_cast<Output*>(target);
+  if (lut.columns == 3) {
+    vector_lut_t<3>(lut, input, output, count, stride);
+  } else if (lut.columns == 4) {
+    vector_lut_t<4>(lut, input, output, count, stride);
+  } else if (lut.columns == 1) {
+    vector_lut_t<1>(lut, input, output, count, stride);
+  } else {
+    lut.generate(
+        [&](std::size_t j) {
+          return input[static_cast<std::ptrdiff_t>(j) * stride];
+        },
+        output, count);
+  }
+}
+template <class T>
+std::array<V, 3> gradient_rgb(const T* source, unsigned channels) {
+  if (channels == 3) {
+    if constexpr (sizeof(T) == 8) {
+      return fast_color::avx2::Packet<double>::load3(source);
+    } else {
+      const auto rgb = fast_color::Packet<float>::load3(source);
+      return {_mm256_cvtps_pd(rgb[0]), _mm256_cvtps_pd(rgb[1]),
+              _mm256_cvtps_pd(rgb[2])};
+    }
+  }
+  if constexpr (sizeof(T) == 4) {
+    auto a = _mm_loadu_ps(source), b = _mm_loadu_ps(source + 4);
+    auto c = _mm_loadu_ps(source + 8), d = _mm_loadu_ps(source + 12);
+    _MM_TRANSPOSE4_PS(a, b, c, d);
+    return {_mm256_cvtps_pd(a), _mm256_cvtps_pd(b), _mm256_cvtps_pd(c)};
+  } else {
+    const auto a = _mm256_loadu_pd(source), b = _mm256_loadu_pd(source + 4);
+    const auto c = _mm256_loadu_pd(source + 8),
+               d = _mm256_loadu_pd(source + 12);
+    const auto t0 = _mm256_unpacklo_pd(a, b), t1 = _mm256_unpackhi_pd(a, b);
+    const auto t2 = _mm256_unpacklo_pd(c, d), t3 = _mm256_unpackhi_pd(c, d);
+    return {_mm256_permute2f128_pd(t0, t2, 0x20),
+            _mm256_permute2f128_pd(t1, t3, 0x20),
+            _mm256_permute2f128_pd(t0, t2, 0x31)};
+  }
+}
+inline V gradient_dot(const fast_color::Triple& row,
+                      const std::array<V, 3>& v) {
+  return _mm256_fmadd_pd(
+      v[2], set(row[2]),
+      _mm256_fmadd_pd(v[1], set(row[1]), _mm256_mul_pd(v[0], set(row[0]))));
+}
+template <unsigned Mode, class T>
+void gradient_map_t(unsigned channels, const grade::gradient::Feature& feature,
+                    const fast_curve::Curve* curves, const void* source,
+                    void* target, std::size_t count) {
+  const auto* input = static_cast<const T*>(source);
+  auto* output = static_cast<T*>(target);
+  constexpr std::size_t block = 256;
+  alignas(64) double args[3][block], roots[3][block], query[block];
+  alignas(64) T rgb_output[3 * block];
+  for (std::size_t base = 0; base < count; base += block) {
+    const auto n = std::min(block, count - base);
+    std::size_t j = 0;
+    for (; j + 4 <= n; j += 4) {
+      const auto rgb = gradient_rgb(input + (base + j) * channels, channels);
+      if constexpr (Mode == 0) {
+        _mm256_store_pd(query + j,
+                        _mm256_max_pd(rgb[0], _mm256_max_pd(rgb[1], rgb[2])));
+      } else if constexpr (Mode == 1) {
+        _mm256_store_pd(query + j, gradient_dot(feature.rgb_to_xyz[1], rgb));
+      } else if constexpr (Mode == 2) {
+        _mm256_store_pd(args[0] + j, gradient_dot(feature.rgb_to_xyz[1], rgb));
+      } else {
+        for (unsigned c = 0; c < 3; ++c)
+          _mm256_store_pd(args[c] + j,
+                          gradient_dot(feature.rgb_to_lms[c], rgb));
+      }
+    }
+    for (; j < n; ++j) {
+      const auto* pixel = input + (base + j) * channels;
+      const fast_color::Triple rgb{pixel[0], pixel[1], pixel[2]};
+      if constexpr (Mode == 0) {
+        query[j] = std::max(rgb[0], std::max(rgb[1], rgb[2]));
+      } else if constexpr (Mode == 1) {
+        query[j] = fast_color::dot(feature.rgb_to_xyz[1], rgb);
+      } else if constexpr (Mode == 2) {
+        args[0][j] = fast_color::dot(feature.rgb_to_xyz[1], rgb);
+      } else {
+        const auto lms = fast_color::multiply(feature.rgb_to_lms, rgb);
+        for (unsigned c = 0; c < 3; ++c)
+          args[c][j] = lms[c];
+      }
+    }
+    if constexpr (Mode >= 2) {
+      for (unsigned c = 0; c < (Mode == 2 ? 1U : 3U); ++c)
+        cube_roots_refined(args[c], roots[c], n, 2);
+      j = 0;
+      for (; j + 4 <= n; j += 4) {
+        V value;
+        if constexpr (Mode == 2) {
+          const auto y = _mm256_load_pd(args[0] + j);
+          const auto high = _mm256_div_pd(
+              _mm256_sub_pd(
+                  _mm256_mul_pd(_mm256_load_pd(roots[0] + j), set(116)),
+                  set(16)),
+              set(100));
+          const auto low =
+              _mm256_div_pd(_mm256_mul_pd(y, set(24389.0 / 27)), set(100));
+          value = choose(le(y, set(216.0 / 24389)), low, high);
+        } else {
+          value = gradient_dot(
+              fast_color::kLmsToOklab[0],
+              {_mm256_load_pd(roots[0] + j), _mm256_load_pd(roots[1] + j),
+               _mm256_load_pd(roots[2] + j)});
+        }
+        _mm256_store_pd(query + j, value);
+      }
+      for (; j < n; ++j) {
+        if constexpr (Mode == 2)
+          query[j] = args[0][j] > 216.0 / 24389
+                         ? (116 * roots[0][j] - 16) / 100
+                         : (24389.0 / 27) * args[0][j] / 100;
+        else
+          query[j] = fast_color::dot(fast_color::kLmsToOklab[0],
+                                     {roots[0][j], roots[1][j], roots[2][j]});
+      }
+    }
+    auto* destination = channels == 3 ? output + base * 3 : rgb_output;
+    curve_t<double, T>(curves, 3, query, destination, n);
+    if (channels == 4) {
+      for (std::size_t j = 0; j < n; ++j) {
+        std::memcpy(output + (base + j) * 4, rgb_output + j * 3, 3 * sizeof(T));
+        std::memcpy(output + (base + j) * 4 + 3, input + (base + j) * 4 + 3,
+                    sizeof(T));
+      }
+    }
+  }
+}
+template <class T>
+void gradient_map_dispatch(unsigned channels,
+                           const grade::gradient::Feature& feature,
+                           const fast_curve::Curve* curves, const void* input,
+                           void* output, std::size_t count) {
+  switch (feature.mode) {
+    case 0:
+      gradient_map_t<0, T>(channels, feature, curves, input, output, count);
+      break;
+    case 1:
+      gradient_map_t<1, T>(channels, feature, curves, input, output, count);
+      break;
+    case 2:
+      gradient_map_t<2, T>(channels, feature, curves, input, output, count);
+      break;
+    default:
+      gradient_map_t<3, T>(channels, feature, curves, input, output, count);
+      break;
+  }
+}
 }  // namespace
-void cube_roots(const double* input, double* output, std::size_t count) {
+namespace {
+void cube_roots_refined(const double* input, double* output, std::size_t count,
+                        unsigned iterations) {
   std::size_t j = 0;
   for (; j + 4 <= count; j += 4) {
     std::array<double, 4> normalized, scales;
@@ -681,7 +1074,7 @@ void cube_roots(const double* input, double* output, std::size_t count) {
                         x, set(3642.0 / 4921));
     // Exponent reduction gives x in [1,8). Three Halley refinements from
     // this bounded quadratic seed converge to native binary64 accuracy.
-    for (unsigned iteration = 0; iteration < 3; ++iteration) {
+    for (unsigned iteration = 0; iteration < iterations; ++iteration) {
       const auto cube = _mm256_mul_pd(_mm256_mul_pd(y, y), y);
       y = _mm256_mul_pd(y, _mm256_div_pd(_mm256_fmadd_pd(set(2), x, cube),
                                          _mm256_fmadd_pd(set(2), cube, x)));
@@ -692,6 +1085,10 @@ void cube_roots(const double* input, double* output, std::size_t count) {
   for (; j < count; ++j) {
     output[j] = std::cbrt(input[j]);
   }
+}
+}  // namespace
+void cube_roots(const double* input, double* output, std::size_t count) {
+  cube_roots_refined(input, output, count, 3);
 }
 void model(unsigned kind, bool narrow, const fast_color::Model& m,
            const void* x, void* y, std::size_t n, std::size_t ic,
@@ -798,6 +1195,32 @@ void brightness(bool narrow, unsigned channels,
   } else {
     brightness_t<double>(channels, b, curve, x, y, n);
   }
+}
+void vector_lut(bool input32, bool output32, const fast_curve::VectorLut& lut,
+                const void* input, void* output, std::size_t count,
+                std::ptrdiff_t stride) {
+  if (input32) {
+    if (output32)
+      vector_lut_dispatch<float, float>(lut, input, output, count, stride);
+    else
+      vector_lut_dispatch<float, double>(lut, input, output, count, stride);
+  } else {
+    if (output32)
+      vector_lut_dispatch<double, float>(lut, input, output, count, stride);
+    else
+      vector_lut_dispatch<double, double>(lut, input, output, count, stride);
+  }
+}
+void gradient_map(bool narrow, unsigned channels,
+                  const grade::gradient::Feature& feature,
+                  const fast_curve::Curve* curves, const void* input,
+                  void* output, std::size_t count) {
+  if (narrow)
+    gradient_map_dispatch<float>(channels, feature, curves, input, output,
+                                 count);
+  else
+    gradient_map_dispatch<double>(channels, feature, curves, input, output,
+                                  count);
 }
 void components(bool narrow, unsigned channels, unsigned selected,
                 const fast_curve::Curve* curves, const void* x, void* y,

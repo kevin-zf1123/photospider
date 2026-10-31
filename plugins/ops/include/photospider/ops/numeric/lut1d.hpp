@@ -327,4 +327,26 @@ inline Result<WorkflowNode> apply_lut1d_channels_node(
                             std::move(table), std::move(axis),
                             dtype.value_or(input_type), domain, profile);
 }
+/** @brief Maps each scalar query through every LUT column using native Fast.
+ * Input sample_shape has rank 1..7; table is [L,C], axis is Float64[3].
+ * Output appends C as an ordinary final component axis, including C=1.
+ * Input/table dtypes are independent. The input_type hint supplies the default
+ * output dtype; all query/table/axis and lifetime rules above apply. Singleton
+ * lookup has no query or axis payload dependency. Columns share one normalized
+ * coordinate and preserve stored signed zeros on direct selection. This helper
+ * owns only metadata and always selects curve.apply_lut1d_vector_fast.
+ */
+inline Result<WorkflowNode> apply_lut1d_vector_node(
+    std::uint64_t id, WorkflowInput input, WorkflowInput table,
+    WorkflowInput axis, ElementType input_type,
+    std::optional<ElementType> dtype = {},
+    CurveDomain domain = CurveDomain::Reject) {
+  if (input_type != ElementType::Float32 && input_type != ElementType::Float64)
+    return Result<WorkflowNode>(
+        lut1d_detail::invalid("LUT1D input dtype hint requires Float32/64"));
+  return curve_detail::node(id, "apply_lut1d_vector", std::move(input),
+                            std::move(table), std::move(axis),
+                            dtype.value_or(input_type), domain,
+                            CpuNumericProfile::Fast);
+}
 }  // namespace ps::numeric

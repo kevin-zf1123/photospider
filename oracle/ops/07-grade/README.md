@@ -1,6 +1,6 @@
 # Strict grading oracles
 
-These independent references accompany [GRD specifications](../../../docs/built-in_ops/07-grade/adjustments.md). They cover 100 member identities through reusable scalar, pixel and small-array functions. Production GRD computation uses native FP32/FP64; these oracles provide the strictly rounded comparison values.
+These independent references accompany [GRD specifications](../../../docs/built-in_ops/07-grade/adjustments.md). They cover 101 member identities through reusable scalar, pixel and small-array functions. Production GRD computation uses native FP32/FP64; these oracles provide the strictly rounded comparison values.
 
 ## Run
 
@@ -22,7 +22,7 @@ Python float inputs denote their exact binary64 values. For Float32 inputs, supp
 
 `reference/precision.py` evaluates rational formulas with `Fraction`. Direct conversion uses nearest/ties-to-even, including subnormals, signed underflow and infinity on overflow. Transcendentals use directed MPFR interval bounds. A result is returned only when both enclosing endpoints round to the same destination bit pattern. Comparisons require interval separation or an established equality. `Uncertified` reports an unresolved rounding or comparison boundary; high precision alone is not treated as a proof. Reference-domain diagnostics are independent of the production unchecked contract.
 
-Complete member expressions round at their output. Named intermediate feature, model, table and parameter outputs round to Float64 at the specification's boundaries. The Floyd-Steinberg recurrence strictly rounds each declared Float64 state operation, rather than retaining unbounded rational diffusion state. Stored palette RGB entries are copied after selection. Explicit copy paths preserve source bits within the mathematical finite-input API.
+Complete member expressions round at their output. Named intermediate feature, model, table and parameter outputs round at the specification's declared boundaries. GRD-06C publishes its grid in Float64 and its table in the selected output dtype before the final lookup. The Floyd-Steinberg recurrence strictly rounds each declared Float64 state operation, rather than retaining unbounded rational diffusion state. Stored palette RGB entries are copied after selection. Explicit copy paths preserve source bits within the mathematical finite-input API.
 
 Compare native continuous results using the GRD tolerances and record absolute/relative errors. Compare copies, integer outputs and palette membership exactly. Report discrete decisions near rounding-sensitive thresholds as discrete mismatches; a small color error alone does not establish the same mask or dither pattern. The reference check command verifies the oracle, not conformance of any production implementation.
 
@@ -33,6 +33,7 @@ Compare native continuous results using the GRD tolerances and record absolute/r
 | `reference/precision.py` | Exact fractions, direct IEEE rounding, certified MPFR enclosures |
 | `reference/point.py` | Exposure, affine/LGG, levels, native model edits, tonal weights, saturation, selectors, CDL |
 | `reference/curves.py` | Linear/PCHIP interpolation, ramps, LUTs and displacement meshes |
+| `reference/gradient_channels.py` | GRD-06C staged Float64 grid, U table publication and vector lookup; direct unwrapped coordinates |
 | `reference/statistics.py` | Binary/weighted quantiles, histograms, CDF, CLAHE and parameter states |
 | `reference/spatial.py` | Local thresholds, bilateral log base and vignette geometry |
 | `reference/dither.py` | Ordered/noise quantization, Float64-state diffusion, dot/line screens |

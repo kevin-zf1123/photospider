@@ -5,7 +5,7 @@ kind: shared_operator_contract
 category: 01-numeric
 status: Proposed
 document_maturity: D1_draft
-implementation_status: partially_implemented
+implementation_status: implemented_cpu_fixed_abi_8_9
 clarification_status: complete
 ---
 
@@ -19,7 +19,7 @@ Three independent operations:
 
 - Single-table application ([CRV-05A](CRV-05A_apply_lut1d.md)): table[L] maps every numeric element of input.
 - Per-channel multi-table application ([CRV-05B](CRV-05B_apply_lut1d_channels.md)): table[L,C] column c maps input[...,c].
-- Scalar-to-vector application ([CRV-05C](CRV-05C_apply_lut1d_vector.md)): table[L,C] maps each input scalar through every column and appends C to the output shape. Its proposed fast key is not implemented.
+- Scalar-to-vector application ([CRV-05C](CRV-05C_apply_lut1d_vector.md)): table[L,C] maps each input scalar through every column and appends C to the output shape. Its registered native key is `curve.apply_lut1d_vector_fast`.
 
 All three receive a precomputed uniform-axis table and explicit axis[3]. A/B preserve input shape and have eight implemented CPU-profile keys in total. C defines one additional native fast key. CRV-06 separately consumes color controls at explicit, potentially nonuniform stops and defines model-specific interpolation. Numerical profiles and output-shape exceptions are specified by each member.
 
@@ -37,9 +37,11 @@ Callers guarantee finite consumed queries/table entries, a valid complete axis, 
 
 ## Native fast numerical profile
 
-The additional A/B keys `curve.apply_lut1d_fast` and `curve.apply_lut1d_channels_fast` are selected by `CpuNumericProfile::Fast`. The proposed C key `curve.apply_lut1d_vector_fast` shares this native arithmetic while mapping one query through all table columns; its implementation remains pending. The A/B shape, dtype, axis direction and table-column parameters are unchanged; C defines its appended output axis in its member specification. These keys use ordinary binary64 interpolation and final output-dtype conversion, without NUM exact-rational final rounding or accelerated certification.
+The additional A/B keys `curve.apply_lut1d_fast` and `curve.apply_lut1d_channels_fast` are selected by `CpuNumericProfile::Fast`. The registered C key `curve.apply_lut1d_vector_fast` shares this native arithmetic while mapping one query through all table columns. The A/B shape, dtype, axis direction and table-column parameters are unchanged; C defines its appended output axis in its member specification. These keys use ordinary binary64 interpolation and final output-dtype conversion, without NUM exact-rational final rounding or accelerated certification.
 
 For L>1, compute `u=(q-start)*(L-1)/(end-start)`, select `i=floor(u)` bounded to `[0,L-2]`, and evaluate `table[i] + (u-i)*(table[i+1]-table[i])` with FMA. Clamp and exact normalized endpoint positions select the corresponding table value; linear extrapolation uses the endpoint segment. The negative denominator naturally handles descending axes. Native normalized-axis arithmetic replaces the strict profile's exact reconstruction of every RN64 grid coordinate; ordinary rounding can differ at interior grid positions.
+
+The current native implementation uses `(q-start)*scale` with binary64 `scale=(L-1)/(end-start)` for ordinary finite intermediates. It uses division before multiplication when the reciprocal is nonfinite or zero, and a half-scaled numerator/denominator when an endpoint or query subtraction would overflow. Scalar, NEON and AVX2 paths retain these fallback equations.
 
 L=1 selects the single table entry and does not read query or axis payload.
 

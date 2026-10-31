@@ -9,12 +9,16 @@ struct Model;
 }
 namespace fast_curve {
 struct Curve;
-}
+struct VectorLut;
+}  // namespace fast_curve
 namespace fast_sampling {
 struct Polynomial;
 }
 namespace grade::curves {
 struct Brightness;
+}
+namespace grade::gradient {
+struct Feature;
 }
 namespace native_compute {
 inline bool available() {
@@ -38,6 +42,9 @@ void lut(bool input32, bool output32, const void* input, void* output,
          std::size_t count, const double* values, std::size_t length,
          double start, double end, unsigned edge, std::ptrdiff_t input_step = 1,
          std::ptrdiff_t output_step = 1);
+void vector_lut(bool input32, bool output32, const fast_curve::VectorLut&,
+                const void* input, void* output, std::size_t count,
+                std::ptrdiff_t stride);
 void polynomial(bool narrow, const fast_sampling::Polynomial& polynomial,
                 double start, double end, std::uint64_t total,
                 std::uint64_t first, void* output, std::size_t count);
@@ -46,6 +53,9 @@ void coordinates(bool narrow, double start, double end, std::uint64_t total,
 void brightness(bool narrow, unsigned channels,
                 const grade::curves::Brightness&, const fast_curve::Curve&,
                 const void* input, void* output, std::size_t count);
+void gradient_map(bool narrow, unsigned channels,
+                  const grade::gradient::Feature&, const fast_curve::Curve*,
+                  const void* input, void* output, std::size_t count);
 void components(bool narrow, unsigned channels, unsigned selected,
                 const fast_curve::Curve*, const void* input, void* output,
                 std::size_t count);

@@ -51,8 +51,17 @@ struct Curve final {
   std::size_t size = 0;
   Edge edge = Edge::Reject;
   bool cubic = false;
-  bool identity = false;
-  double first_slope = 0, last_slope = 0;
+  bool identity = false, constant = false;
+  // Constant curves store extrapolated values instead of endpoint slopes.
+  // The constant flag selects the active member, retaining the curve layout.
+  union {
+    double first_slope = 0;
+    double first_constant;
+  };
+  union {
+    double last_slope = 0;
+    double last_constant;
+  };
   double index_scale = 0;
   unsigned guide_count = 0;
   std::array<std::uint32_t, 257> guide{};
@@ -69,9 +78,10 @@ struct Curve final {
     a = slope + size;
     b = a + size;
     c = b + size;
-    identity = true;
+    identity = constant = true;
     for (std::size_t i = 0; i < size; ++i) {
       identity &= x[i] == y[i];
+      constant &= y[i] == y[0];
     }
     for (std::size_t i = 0; i + 1 < size; ++i) {
       const double h = x[i + 1] - x[i];
@@ -100,6 +110,13 @@ struct Curve final {
     }
     first_slope = slope[0];
     last_slope = slope[size - 1];
+    if (constant) {
+      // Outside the interval, the displacement has a fixed sign. Preserve
+      // the endpoint FMA's zero sign without repeating arithmetic per query.
+      first_constant = y[0] == 0 ? std::fma(-1.0, first_slope, y[0]) : y[0];
+      last_constant = y[size - 1] == 0 ? std::fma(1.0, last_slope, y[size - 1])
+                                       : y[size - 1];
+    }
     for (std::size_t j = 0; j + 1 < size; ++j) {
       slope[j] = 1 / (x[j + 1] - x[j]);
     }
@@ -147,25 +164,40 @@ struct Curve final {
     return lo;
   }
 
+  // Exact knots select stored ordinates before this algebraic shortcut.
+  // Interior shortcut zeros are positive; copied knot/edge zeros retain their
+  // sign. Constant extrapolation uses the separately prepared endpoint values.
+  double identity_or_constant(double q) const {
+    const double value = identity ? q : y[0];
+    return value == 0 ? 0.0 : value;
+  }
+
   __attribute__((always_inline)) double evaluate(double q) const {
     if (q <= x[0]) {
       if (q == x[0] || edge != Edge::Linear) {
         return y[0];
       }
-      return std::fma(q - x[0], first_slope, y[0]);
+      return identity || constant
+                 ? (identity ? identity_or_constant(q) : first_constant)
+                 : std::fma(q - x[0], first_slope, y[0]);
     }
     if (q >= x[size - 1]) {
       if (q == x[size - 1] || edge != Edge::Linear) {
         return y[size - 1];
       }
-      return std::fma(q - x[size - 1], last_slope, y[size - 1]);
+      return identity || constant
+                 ? (identity ? identity_or_constant(q) : last_constant)
+                 : std::fma(q - x[size - 1], last_slope, y[size - 1]);
     }
-    if (identity && q != 0) {
-      return q;
+    if ((identity && q != 0) || (constant && y[0] != 0)) {
+      return identity_or_constant(q);
     }
     const auto i = segment(q);
     if (q == x[i]) {
       return y[i];
+    }
+    if (identity || constant) {
+      return identity_or_constant(q);
     }
     if (!cubic) {
       return std::fma(q - x[i], a[i], y[i]);
@@ -202,9 +234,20 @@ inline void shared_span(const Curve* curves, unsigned columns, Query query,
   for (std::size_t j = 0; j < count; ++j) {
     const double q = query(j);
     auto* destination = output + j * nc;
-    if (!(q > axis.x[0] && q < axis.x[last])) {
+    if (q <= axis.x[0] || q >= axis.x[last]) {
+      const bool upper = q >= axis.x[last];
+      const auto row = upper ? last : 0;
       for (unsigned c = 0; c < nc; ++c) {
-        destination[c] = static_cast<T>(curves[c].evaluate(q));
+        const auto& curve = curves[c];
+        const double value =
+            q == axis.x[row] || curve.edge != Edge::Linear ? curve.y[row]
+            : curve.identity ? curve.identity_or_constant(q)
+            : curve.constant
+                ? (upper ? curve.last_constant : curve.first_constant)
+                : std::fma(q - axis.x[row],
+                           upper ? curve.last_slope : curve.first_slope,
+                           curve.y[row]);
+        destination[c] = static_cast<T>(value);
       }
       continue;
     }
@@ -233,7 +276,7 @@ inline void shared_span(const Curve* curves, unsigned columns, Query query,
     for (unsigned c = 0; c < nc; ++c) {
       const auto& curve = curves[c];
       const double value =
-          curve.identity && q != 0 ? q
+          curve.identity || curve.constant ? curve.identity_or_constant(q)
           : Cubic
               ? std::fma(
                     t,
@@ -264,6 +307,42 @@ inline void shared_dispatch(const Curve* curves, unsigned columns, Query query,
 #undef PS_SHARED_CURVE
 }
 template <class Query, class T>
+__attribute__((noinline)) void constant_triplet_span(const Curve* curves,
+                                                     Query query, T* output,
+                                                     std::size_t count) {
+  const auto& axis = curves[0];
+  const auto last = axis.size - 1;
+  std::array<T, 3> left, middle, right;
+  for (unsigned c = 0; c < 3; ++c) {
+    const auto& curve = curves[c];
+    left[c] = static_cast<T>(curve.edge == Edge::Linear ? curve.first_constant
+                                                        : curve.y[0]);
+    right[c] = static_cast<T>(curve.edge == Edge::Linear ? curve.last_constant
+                                                         : curve.y[last]);
+    middle[c] = static_cast<T>(curve.identity_or_constant(0));
+  }
+  for (std::size_t j = 0; j < count; ++j) {
+    const double q = query(j);
+    const T* row = nullptr;
+    std::size_t knot = 0;
+    if (q < axis.x[0]) {
+      row = left.data();
+    } else if (q > axis.x[last]) {
+      row = right.data();
+    } else {
+      knot = q == axis.x[last] ? last : axis.segment(q);
+      if (q != axis.x[knot])
+        row = middle.data();
+    }
+    if (row) {
+      std::copy_n(row, 3, output + 3 * j);
+    } else {
+      for (unsigned c = 0; c < 3; ++c)
+        output[3 * j + c] = static_cast<T>(curves[c].y[knot]);
+    }
+  }
+}
+template <class Query, class T>
 inline void shared(const Curve* curves, unsigned columns, Query query,
                    T* output, std::size_t count, int direction) {
   if (!columns || !count) {
@@ -272,7 +351,11 @@ inline void shared(const Curve* curves, unsigned columns, Query query,
   if (columns == 1) {
     shared_dispatch<1>(curves, columns, query, output, count, direction);
   } else if (columns == 3) {
-    shared_dispatch<3>(curves, columns, query, output, count, direction);
+    if (!direction && count >= 16 && curves[0].constant && curves[1].constant &&
+        curves[2].constant)
+      constant_triplet_span(curves, query, output, count);
+    else
+      shared_dispatch<3>(curves, columns, query, output, count, direction);
   } else {
     shared_dispatch<0>(curves, columns, query, output, count, direction);
   }
@@ -286,6 +369,12 @@ inline bool ordered_curve_span(const Curve*, unsigned, const Input*, Output*,
 template <class Input, class Output>
 inline void span_multi(const Curve* curves, unsigned columns,
                        const Input* input, Output* output, std::size_t count) {
+  if (count && columns == 1 && curves[0].constant && curves[0].y[0] != 0) {
+    // Every knot, clamp and extrapolated value has the same nonzero ordinate.
+    // Zero constants still need knot selection and directional zero signs.
+    std::fill_n(output, count, static_cast<Output>(curves[0].y[0]));
+    return;
+  }
 #if defined(__x86_64__)
   if (native_compute::available()) {
     native_compute::curve(sizeof(Input) == 4, sizeof(Output) == 4, curves,
@@ -327,6 +416,18 @@ inline double load(const void* source, std::ptrdiff_t stride,
               sizeof(value));
   return value;
 }
+// Keep the ordinary reciprocal path, but do not let a reciprocal overflow
+// turn a valid strictly ordered subnormal axis into an endpoint hit.
+inline double normalized_position(double query, double start, double end,
+                                  std::size_t size, double scale) {
+  const double delta = query - start;
+  if (std::isfinite(delta) && std::isfinite(scale) && scale != 0)
+    return delta * scale;
+  const double width = end - start;
+  if (std::isfinite(delta) && std::isfinite(width))
+    return (delta / width) * (size - 1);
+  return ((query * .5 - start * .5) / (end * .5 - start * .5)) * (size - 1);
+}
 inline double lut(double query, const double* values, std::size_t size,
                   double minimum, double maximum, Edge edge) {
   if (query == minimum) {
@@ -335,7 +436,8 @@ inline double lut(double query, const double* values, std::size_t size,
   if (query == maximum) {
     return values[size - 1];
   }
-  const double u = (query - minimum) * ((size - 1) / (maximum - minimum));
+  const double u = normalized_position(query, minimum, maximum, size,
+                                       (size - 1) / (maximum - minimum));
   if (edge != Edge::Linear) {
     if (u <= 0) {
       return values[0];

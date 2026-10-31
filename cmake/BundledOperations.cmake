@@ -51,6 +51,10 @@ set(PHOTOSPIDER_OPERATION_SOURCES
   plugins/ops/07-grade/contrast.cpp
   plugins/ops/07-grade/levels.cpp
   plugins/ops/07-grade/curves.cpp
+  plugins/ops/07-grade/gradient_map.cpp
+  plugins/ops/07-grade/gradient_channels.cpp
+  plugins/ops/07-grade/gradient_channels_combined.cpp
+  plugins/ops/01-numeric/vector_lut.cpp
   plugins/ops/01-numeric/fast_curves.cpp
   plugins/ops/01-numeric/fast_sampling.cpp
   plugins/ops/05-filter/restoration_noise.cpp

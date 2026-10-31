@@ -327,7 +327,11 @@ void invoke(const ps_kernel_invocation_v8* invocation,
           axis == state.axis
               ? state.selected.index
               : at[axis - (!state.selected.keepdims && axis > state.axis)];
-    const auto bits = reader.bits(0, source, state.width);
+    std::uint64_t bits;
+#if defined(__aarch64__) && __has_cpp_attribute(clang::always_inline)
+    [[clang::always_inline]]
+#endif
+    bits = reader.bits(0, source, state.width);
     std::memcpy(destination + sample * state.width, &bits, state.width);
     for (unsigned axis = output.layout->rank; axis-- > 0;) {
       if (++at[axis] < output.layout->origin[axis] + output.layout->shape[axis])
@@ -450,6 +454,10 @@ Result<OperationPreparation> prepare_alpha_extraction(
     const std::vector<OperationMetadata>& inputs,
     const format_result::Params& p, numeric_ops::SequenceProfile profile) {
   return prepare_extraction(inputs, p, false, profile);
+}
+OperationDefinition channel_extraction_for_composition() {
+  return extraction("channel.extract_index_strict", false,
+                    SequenceProfile::Strict);
 }
 Status register_channel_extraction(OperationRegistry* registry) {
   for (const auto& profile :

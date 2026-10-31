@@ -1167,6 +1167,9 @@ Result<OperationPreparation> prepare_alpha_channel_mapping(
     const format_result::Params& p, numeric_ops::SequenceProfile profile) {
   return prepare(inputs, p, 2, profile);
 }
+OperationDefinition channel_assembly_for_composition() {
+  return definition("channel.assemble_strict", 0, SequenceProfile::Strict);
+}
 Status register_channel_assembly(OperationRegistry* registry) {
   for (const auto& p :
        {std::make_pair("strict", SequenceProfile::Strict),
