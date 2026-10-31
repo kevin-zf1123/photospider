@@ -15,7 +15,7 @@ This contract defines the shared inputs, units, arithmetic and spatial behavior 
 
 ## Interface conventions
 
-Every member is an independently callable tile operator with a proposed key. Each ordered input port is a Result containing exactly one tensor at index zero; the input tensor key is unconstrained. Each ordered output port is a `photospider.tensor` version 1 Result with one tensor named `samples`. Output names are those in the member signature. Shapes and dtypes are inferred from input descriptors and static parameters.
+Members expose tile results through their proposed operation keys; a member may explicitly define a composition and a fixed realization under separate keys, as in [GRD-06C](GRD-06C_gradient_map_channels.md). Each ordered input port is a Result containing exactly one tensor at index zero; the input tensor key is unconstrained. Each ordered output port is a `photospider.tensor` version 1 Result with one tensor named `samples`. Output names are those in the member signature. Shapes and dtypes are inferred from input descriptors and static parameters.
 
 `T` is Float32 or Float64. All image inputs within a signature marked T share that dtype; image outputs retain T. `S` denotes the ordered non-component sample axes; `[S,C]` is logical notation for a component axis, not a storage-layout requirement. `axis:Int64` identifies that axis; ordered `components:Array[Int64]` identifies selected slots. A supplied `input_description` may resolve these selectors under the existing FMT structural rules. Model-dependent formulas require their explicit model, RGB basis, white, transfer, reference and units. They use the existing FMT description representation. Descriptions are static call parameters; Results carry no color metadata.
 

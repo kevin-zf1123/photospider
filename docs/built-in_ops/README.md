@@ -27,7 +27,7 @@
 | [空间滤镜](05-filter/spatial.md) | 卷积、秩滤波、边缘、锐化、边缘保持 |
 | [频域与修复](05-filter/frequency-restoration.md) | FFT、PSD 基础、反卷积、去噪、图像修复 |
 | [散景与光学](06-optics/bokeh.md) | 固定/可变 PSF、CoC、深度、光谱、优化 |
-| [调色](07-grade/adjustments.md) | 100 个 tile 成员：基础调色、四条亮度路径、局部细节、加权统计、调色板抖动与半色调 |
+| [调色](07-grade/adjustments.md) | 101 个成员：基础调色、多模型渐变映射、四条亮度路径、局部细节、加权统计、调色板抖动与半色调 |
 | [几何变换](08-transform/geometry.md) | 重采样、仿射、STMap、置换、液化 |
 | [鱼眼与投影](08-transform/projections.md) | 投影模型、畸变校正及 3D 光栅化边界 |
 | [混合与合成](09-composite/blending.md) | 线性／编码域覆盖合成、逐通道及原生模型颜色混合 |

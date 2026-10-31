@@ -4,13 +4,14 @@
 
 ## 基本术语与数值规定
 
-- 全部成员为可独立调用的 tile 算子。E、H(r)、W、S 分别表示逐元素、邻域、全局统计和有序递推的数学依赖；tile 划分不改变统计区域或扫描起点。
+- 成员通过独立入口提供 tile 结果；GRD-06C 定义组合执行与固定二进制两个注册版本。E、H(r)、W、S 分别表示逐元素、邻域、全局统计和有序递推的数学依赖；tile 划分不改变统计区域或扫描起点。
 - 生产计算使用原生 FP32/FP64。独立 oracle 使用严格舍入，作为实现比较对象；浮点误差与离散结果按[共享契约](op_specs/GRD_common_contract.md)分别比较。
 - 颜色解释是显式静态参数；alpha 与 AOV 按成员定义保留。输入数值域沿用[公共 unchecked 契约](../00-foundation/contracts.md)。
 - [GRD-05 亮度曲线](op_specs/GRD-05_curves_contract.md)的描述式输入要求相对线性 RGB，接受 `scene`、`display`、`scene_relative`、`display_relative` reference；单位为 `1` 或 `relative`，显式尺度须为 `relative`。
 - CIELAB 明度存储为 l=L*/100，OKLab 使用原生 L。线性 Y、l、L 是不同坐标；亮度调整有 RGB 同比缩放、XYZ 只改 Y、CIELAB 只改 l、OKLab 只改 L 四个独立路径。
 - 统计默认使用二值选区，完整图像自动调整默认排除 alpha=0；软选区及 alpha 加权显式启用。统计选区与效果混合 mask 独立。
 - 效果强度、软 mask 混合与色域映射通过显式算子组合。
+- [GRD-06C](op_specs/GRD-06C_gradient_map_channels.md)直接选择输入通道作为 query，在目标模型坐标中分别生成各通道 LUT，输出新图像；色相保留完整浮点 radian 或 pi_multiple 数值。`combined` 与 `compiled` 共享契约；所需新增 fast 入口及复用依赖见该规格。
 
 ## 族目录
 
@@ -21,7 +22,7 @@
 | [GRD-03 对比度](op_specs/GRD-03_contrast_contract.md) | 线性支点与 log2 曝光轴对比 | A, B |
 | [GRD-04 色阶](op_specs/GRD-04_levels_contract.md) | 有界色阶与 signed 扩展 | A, B |
 | [GRD-05 曲线](op_specs/GRD-05_curves_contract.md) | 逐通道插值与四条独立亮度调整路径 | A, B, C, D, E, F |
-| [GRD-06 渐变映射](op_specs/GRD-06_gradient_map_contract.md) | 标量特征到 RGB 渐变与完整图像入口 | A, B |
+| [GRD-06 渐变映射](op_specs/GRD-06_gradient_map_contract.md) | RGB 渐变与按独立通道 LUT 生成目标模型图像 | A, B, C |
 | [GRD-07 三维 LUT](op_specs/GRD-07_lut3d_contract.md) | 三线性与四面体 RGB 联合映射 | A, B |
 | [GRD-08 HSL / HSV](op_specs/GRD-08_hsl_hsv_contract.md) | 原生色相、饱和度及明度／值调整 | A, B |
 | [GRD-09 LCh](op_specs/GRD-09_lch_contract.md) | CIELCh 与 OKLCh 调整 | A, B |
@@ -49,7 +50,7 @@
 
 ## 逐成员入口
 
-共 100 个成员，规格状态均为 Proposed；实现状态与规格成熟度分别记录。
+共 101 个成员，规格状态均为 Proposed；实现状态与规格成熟度分别记录。
 
 | 成员 | 类别 / 执行 / 成熟度 | 提议注册 key | 实现状态 |
 | --- | --- | --- | --- |
@@ -69,6 +70,7 @@
 | [GRD-05F OKLab lightness curve](op_specs/GRD-05F_curves_oklab_l.md) | primitive / tile / D1_draft | `grade.curves_oklab_l` | implemented_cpu_fixed_abi_9 |
 | [GRD-06A Map a feature through an RGB ramp](op_specs/GRD-06A_gradient_map.md) | primitive / tile / D1_draft | `grade.gradient_map` | not_implemented |
 | [GRD-06B Image gradient mapping](op_specs/GRD-06B_gradient_map_image.md) | primitive / tile / D1_draft | `grade.gradient_map_image` | not_implemented |
+| [GRD-06C Generate a model-space image through independent channel LUTs](op_specs/GRD-06C_gradient_map_channels.md) | composite_workflow / tile / D1_draft | `grade.gradient_map_channels_combined`<br>`grade.gradient_map_channels_compiled` | not_implemented |
 | [GRD-07A Trilinear RGB LUT](op_specs/GRD-07A_lut3d_trilinear.md) | primitive / tile / D1_draft | `grade.lut3d_trilinear` | not_implemented |
 | [GRD-07B Tetrahedral RGB LUT](op_specs/GRD-07B_lut3d_tetrahedral.md) | primitive / tile / D1_draft | `grade.lut3d_tetrahedral` | not_implemented |
 | [GRD-08A Native HSL adjustment](op_specs/GRD-08A_hsl.md) | primitive / tile / D1_draft | `grade.hsl` | not_implemented |

@@ -5,7 +5,7 @@ kind: shared_operator_contract
 category: 01-numeric
 status: Proposed
 document_maturity: D1_draft
-implementation_status: implemented
+implementation_status: partially_implemented
 clarification_status: complete
 ---
 
@@ -15,20 +15,21 @@ Numeric profile: strict retains the exact reference defined below. Floating arit
 
 ## Split
 
-Two independent operations, both preserving input shape:
+Three independent operations:
 
 - Single-table application ([CRV-05A](CRV-05A_apply_lut1d.md)): table[L] maps every numeric element of input.
 - Per-channel multi-table application ([CRV-05B](CRV-05B_apply_lut1d_channels.md)): table[L,C] column c maps input[...,c].
+- Scalar-to-vector application ([CRV-05C](CRV-05C_apply_lut1d_vector.md)): table[L,C] maps each input scalar through every column and appends C to the output shape. Its proposed fast key is not implemented.
 
-Mapping one scalar to a vector/color ramp is CRV-06 rather than this same-shape LUT family. Both operations receive explicit axis[3], use fixed linear interpolation and inherit their specified finite-value, exact-rounding and mathematical table-selection contracts. They use eight explicit CPU-profile keys and public constructors.
+All three receive a precomputed uniform-axis table and explicit axis[3]. A/B preserve input shape and have eight implemented CPU-profile keys in total. C defines one additional native fast key. CRV-06 separately consumes color controls at explicit, potentially nonuniform stops and defines model-specific interpolation. Numerical profiles and output-shape exceptions are specified by each member.
 
 ## Interface
 
-Each input Result has one tensor member under any schema id/version/key. Complete `sample_shape()` includes batch axes. Static preparation checks all three input schemas and parameters, including inputs whose payload is inactive. Output `values` uses `photospider.tensor` v1/member `samples`, preserves the complete input shape as ordinary axes and selects Float32 or Float64.
+Each input Result has one tensor member under any schema id/version/key. Complete `sample_shape()` includes batch axes. Static preparation checks all three input schemas and parameters, including inputs whose payload is inactive. Output `values` uses `photospider.tensor` v1/member `samples`, uses the complete input shape as ordinary axes and selects Float32 or Float64. A/B preserve that shape; C appends the table component count.
 
 ## Behavior
 
-Each output element depends on the matching input element, all L table rows (the channel operation restricts table columns to the element's channel) and axis positions 0 and 1. Step is a consistency precondition and has no separate payload dependency. Region and tile results equal the corresponding slice of the whole result.
+Each output element depends on its query input element, all L table rows in its selected column and axis positions 0 and 1. A/B use matching input coordinates; C removes the appended output component coordinate to identify the shared input query. Step is a consistency precondition and has no separate payload dependency. Region and tile results equal the corresponding slice of the whole result.
 
 For L=1 the output is the sole table row (the selected column for channels). Input and axis payloads are not read. The singleton axis `[a,a,+0]`, finite input and reject's equality to a remain caller preconditions; this constant-output path does not diagnose violations.
 
@@ -36,7 +37,7 @@ Callers guarantee finite consumed queries/table entries, a valid complete axis, 
 
 ## Native fast numerical profile
 
-The additional keys `curve.apply_lut1d_fast` and `curve.apply_lut1d_channels_fast` are selected by `CpuNumericProfile::Fast`. Shape, dtype, axis direction and table-column parameters are unchanged. These keys use ordinary binary64 interpolation and final output-dtype conversion, without NUM exact-rational final rounding or accelerated certification.
+The additional A/B keys `curve.apply_lut1d_fast` and `curve.apply_lut1d_channels_fast` are selected by `CpuNumericProfile::Fast`. The proposed C key `curve.apply_lut1d_vector_fast` shares this native arithmetic while mapping one query through all table columns; its implementation remains pending. The A/B shape, dtype, axis direction and table-column parameters are unchanged; C defines its appended output axis in its member specification. These keys use ordinary binary64 interpolation and final output-dtype conversion, without NUM exact-rational final rounding or accelerated certification.
 
 For L>1, compute `u=(q-start)*(L-1)/(end-start)`, select `i=floor(u)` bounded to `[0,L-2]`, and evaluate `table[i] + (u-i)*(table[i+1]-table[i])` with FMA. Clamp and exact normalized endpoint positions select the corresponding table value; linear extrapolation uses the endpoint segment. The negative denominator naturally handles descending axes. Native normalized-axis arithmetic replaces the strict profile's exact reconstruction of every RN64 grid coordinate; ordinary rounding can differ at interior grid positions.
 
@@ -50,6 +51,7 @@ Expected values are exact rational evaluations for valid numerical inputs. Inclu
 
 - [Single-table specification](CRV-05A_apply_lut1d.md).
 - [Per-channel table specification](CRV-05B_apply_lut1d_channels.md).
+- [Scalar-to-vector table specification](CRV-05C_apply_lut1d_vector.md).
 - [Baking templates](CRV-04_bake_lut1d.md).
 - [Curve category](../curves.md).
 - [Operator template](../../00-foundation/spec-template.md).
