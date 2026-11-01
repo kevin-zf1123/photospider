@@ -73,12 +73,12 @@
 | [GRD-06C Generate a model-space image through independent channel LUTs](op_specs/GRD-06C_gradient_map_channels.md) | composite_workflow / tile / D1_draft | `grade.gradient_map_channels_combined`<br>`grade.gradient_map_channels_compiled` | not_implemented |
 | [GRD-07A Trilinear RGB LUT](op_specs/GRD-07A_lut3d_trilinear.md) | primitive / tile / D1_draft | `grade.lut3d_trilinear` | not_implemented |
 | [GRD-07B Tetrahedral RGB LUT](op_specs/GRD-07B_lut3d_tetrahedral.md) | primitive / tile / D1_draft | `grade.lut3d_tetrahedral` | not_implemented |
-| [GRD-08A Native HSL adjustment](op_specs/GRD-08A_hsl.md) | primitive / tile / D1_draft | `grade.hsl` | not_implemented |
-| [GRD-08B Native HSV adjustment](op_specs/GRD-08B_hsv.md) | primitive / tile / D1_draft | `grade.hsv` | not_implemented |
-| [GRD-09A CIELCh adjustment](op_specs/GRD-09A_cielch.md) | primitive / tile / D1_draft | `grade.cielch` | not_implemented |
-| [GRD-09B OKLCh adjustment](op_specs/GRD-09B_oklch.md) | primitive / tile / D1_draft | `grade.oklch` | not_implemented |
-| [GRD-10A CIELAB affine adjustment](op_specs/GRD-10A_lab.md) | primitive / tile / D1_draft | `grade.lab` | not_implemented |
-| [GRD-10B OKLab affine adjustment](op_specs/GRD-10B_oklab.md) | primitive / tile / D1_draft | `grade.oklab` | not_implemented |
+| [GRD-08A Native HSL adjustment](op_specs/GRD-08A_hsl.md) | primitive / tile / D1_draft | `grade.hsl` | implemented_cpu_fixed_abi_9 |
+| [GRD-08B Native HSV adjustment](op_specs/GRD-08B_hsv.md) | primitive / tile / D1_draft | `grade.hsv` | implemented_cpu_fixed_abi_9 |
+| [GRD-09A CIELCh adjustment](op_specs/GRD-09A_cielch.md) | primitive / tile / D1_draft | `grade.cielch` | implemented_cpu_fixed_abi_9 |
+| [GRD-09B OKLCh adjustment](op_specs/GRD-09B_oklch.md) | primitive / tile / D1_draft | `grade.oklch` | implemented_cpu_fixed_abi_9 |
+| [GRD-10A CIELAB affine adjustment](op_specs/GRD-10A_lab.md) | primitive / tile / D1_draft | `grade.lab` | implemented_cpu_fixed_abi_9 |
+| [GRD-10B OKLab affine adjustment](op_specs/GRD-10B_oklab.md) | primitive / tile / D1_draft | `grade.oklab` | implemented_cpu_fixed_abi_9 |
 | [GRD-11A White balance with RGB gains](op_specs/GRD-11A_white_balance_gains.md) | primitive / tile / D1_draft | `grade.white_balance_gains` | not_implemented |
 | [GRD-11B White-point adaptation of RGB](op_specs/GRD-11B_white_balance_adapt.md) | primitive / tile / D1_draft | `grade.white_balance_adapt` | not_implemented |
 | [GRD-11C White balance from temperature and tint](op_specs/GRD-11C_white_balance_temperature_tint.md) | primitive / tile / D1_draft | `grade.white_balance_temperature_tint` | not_implemented |

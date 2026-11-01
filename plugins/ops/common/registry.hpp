@@ -10,6 +10,7 @@ Status register_grade_levels(OperationRegistry* registry);
 Status register_grade_curves(OperationRegistry* registry);
 Status register_grade_gradient_map(OperationRegistry* registry);
 Status register_grade_gradient_channels(OperationRegistry* registry);
+Status register_grade_native_coordinates(OperationRegistry* registry);
 Status register_vector_lut(OperationRegistry* registry);
 Status register_fast_curves(OperationRegistry* registry);
 Status register_fast_sampling(OperationRegistry* registry);

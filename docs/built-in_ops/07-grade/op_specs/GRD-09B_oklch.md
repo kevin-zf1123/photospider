@@ -7,7 +7,7 @@ kind: primitive
 category: 07-grade
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented_cpu_fixed_abi_9
 clarification_status: complete
 execution: tile
 proposed_operation_keys:
@@ -26,9 +26,17 @@ Select OKLCh; native OKLab L and C; C>=0, chroma_scale>=0. Suggested [0,1,0]. Re
 
 Port ordering, tensor members, calculation dtype, channel selection, static parameter types and unchecked premises follow the common contract. Output shape and dtype are those in the signature.
 
+### Current parameters
+
+The operation key and selector encoding follow the [family parameter profile](GRD-09_lch_contract.md#current-parameters). Both tensors are dynamic inputs; controls retain the Float64 shape and row order in this signature.
+
 ## Mathematics
 
 L_out=L+delta_l; C_out=C*chroma_scale. If C>0, h_out=h+delta_h; otherwise copy h. Lightness is unclipped and hue retains winding. Identity component controls copy.
+
+### Current native algorithm/profile
+
+Consumed source coordinates are widened to Float64, evaluated with the stated addition or multiplication, and converted once to the image dtype. Clamping occurs only where required by the member formula. Hue gating reads the original saturation or chroma, including when its scale is zero. Identity controls, achromatic hue and unselected components copy original bytes. Hue increments retain their declared unit and winding under the common native floating profile.
 
 ## Behavior
 

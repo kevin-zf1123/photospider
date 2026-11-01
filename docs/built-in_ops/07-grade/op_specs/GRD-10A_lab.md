@@ -7,7 +7,7 @@ kind: primitive
 category: 07-grade
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented_cpu_fixed_abi_9
 clarification_status: complete
 execution: tile
 proposed_operation_keys:
@@ -26,9 +26,17 @@ Select CIELAB. Suggested rows [1,0]; coefficients may be signed. CIELAB uses l=L
 
 Port ordering, tensor members, calculation dtype, channel selection, static parameter types and unchecked premises follow the common contract. Output shape and dtype are those in the signature.
 
+### Current parameters
+
+The operation key and selector encoding follow the [family parameter profile](GRD-10_lab_contract.md#current-parameters). Both tensors are dynamic inputs; controls retain the Float64 shape and row order in this signature.
+
 ## Mathematics
 
 Apply y=x*gain+offset independently to the three native coordinates. Identity rows copy. Coordinates remain unclipped.
+
+### Current native algorithm/profile
+
+Selected coordinates use `fma(Float64(x), gain, offset)` and are converted once to the image dtype. Identity rows and unselected components copy original bytes. The native binary64 profile permits fused arithmetic and leaves coordinates unclipped; it does not impose strict whole-expression rounding.
 
 ## Behavior
 
