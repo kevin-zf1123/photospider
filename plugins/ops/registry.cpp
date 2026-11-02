@@ -22,6 +22,7 @@ Status register_builtin_operations(OperationRegistry* registry) {
                               register_grade_native_coordinates,
                               register_grade_finishing,
                               register_grade_threshold,
+                              register_grade_channel_mixer,
                               register_vector_lut,
                               register_fast_curves,
                               register_fast_sampling,
