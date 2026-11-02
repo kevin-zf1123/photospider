@@ -14,6 +14,7 @@ Status register_grade_native_coordinates(OperationRegistry* registry);
 Status register_grade_finishing(OperationRegistry* registry);
 Status register_grade_threshold(OperationRegistry* registry);
 Status register_grade_channel_mixer(OperationRegistry* registry);
+Status register_grade_color_balance(OperationRegistry* registry);
 Status register_vector_lut(OperationRegistry* registry);
 Status register_fast_curves(OperationRegistry* registry);
 Status register_fast_sampling(OperationRegistry* registry);

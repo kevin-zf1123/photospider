@@ -58,6 +58,7 @@ set(PHOTOSPIDER_OPERATION_SOURCES
   plugins/ops/07-grade/finishing.cpp
   plugins/ops/07-grade/threshold.cpp
   plugins/ops/07-grade/channel_mixer.cpp
+  plugins/ops/07-grade/color_balance.cpp
   plugins/ops/01-numeric/vector_lut.cpp
   plugins/ops/01-numeric/fast_curves.cpp
   plugins/ops/01-numeric/fast_sampling.cpp

@@ -92,8 +92,8 @@
 | [GRD-14C Gaussian-weighted local threshold](op_specs/GRD-14C_threshold_local_gaussian.md) | primitive / tile / D1_draft | `grade.threshold_local_gaussian` | implemented_cpu_fixed_abi_9 |
 | [GRD-14D Sauvola local threshold](op_specs/GRD-14D_threshold_sauvola.md) | primitive / tile / D1_draft | `grade.threshold_sauvola` | implemented_cpu_fixed_abi_9 |
 | [GRD-15A Matrix channel mixer](op_specs/GRD-15A_channel_mixer.md) | primitive / tile / D1_draft | `grade.channel_mixer` | implemented_cpu_fixed_abi_9 |
-| [GRD-16A Tonal RGB color balance](op_specs/GRD-16A_color_balance_rgb.md) | primitive / tile / D1_draft | `grade.color_balance_rgb` | not_implemented |
-| [GRD-16B Tonal opponent-color balance](op_specs/GRD-16B_color_balance_opponent.md) | primitive / tile / D1_draft | `grade.color_balance_opponent` | not_implemented |
+| [GRD-16A Tonal RGB color balance](op_specs/GRD-16A_color_balance_rgb.md) | primitive / tile / D1_draft | `grade.color_balance_rgb` | implemented_cpu_fixed_abi_9 |
+| [GRD-16B Tonal opponent-color balance](op_specs/GRD-16B_color_balance_opponent.md) | primitive / tile / D1_draft | `grade.color_balance_opponent` | implemented_cpu_fixed_abi_9 |
 | [GRD-17A Reflect a numeric range](op_specs/GRD-17A_invert.md) | primitive / tile / D1_draft | `grade.invert` | not_implemented |
 | [GRD-18A Soft tonal-zone weights](op_specs/GRD-18A_tonal_zone_masks.md) | primitive / tile / D1_draft | `grade.tonal_zone_masks` | not_implemented |
 | [GRD-18B Exposure and offset by tonal zone](op_specs/GRD-18B_tonal_zone_grade.md) | primitive / tile / D1_draft | `grade.tonal_zone_grade` | not_implemented |
