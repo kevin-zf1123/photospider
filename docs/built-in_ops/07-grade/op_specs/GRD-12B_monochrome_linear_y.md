@@ -7,7 +7,7 @@ kind: primitive
 category: 07-grade
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented_cpu_fixed_abi_9
 clarification_status: complete
 execution: tile
 proposed_operation_keys:
@@ -26,9 +26,17 @@ Select relative linear RGB with explicit basis/white. Output replaces the same R
 
 Port ordering, tensor members, calculation dtype, channel selection, static parameter types and unchecked premises follow the common contract. Output shape and dtype are those in the signature.
 
+### Current parameters
+
+`source_basis: String` uses the FMT basis codec and is required for raw selection; a described relative linear RGB group may supply it. Other selectors follow the family profile.
+
 ## Mathematics
 
 Extract Y in Float64 and return the neutral triple (Y,Y,Y).
+
+### Current native algorithm/profile
+
+Form Y from the second row of the resolved RGB-to-XYZ matrix using Float64 native dot products, then write (Y,Y,Y) to the selected RGB slots. No opponent-model lightness is substituted for Y.
 
 ## Behavior
 

@@ -7,7 +7,7 @@ kind: primitive
 category: 07-grade
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented_cpu_fixed_abi_9
 clarification_status: complete
 execution: tile
 proposed_operation_keys:
@@ -26,9 +26,17 @@ Select relative linear RGB with explicit basis/white. Output replaces the same R
 
 Port ordering, tensor members, calculation dtype, channel selection, static parameter types and unchecked premises follow the common contract. Output shape and dtype are those in the signature.
 
+### Current parameters
+
+Resolve `source_basis` and the relative linear RGB selection as in GRD-12B.
+
 ## Mathematics
 
 Convert through the common `cielab_l` route in Float64, retain the native l/L coordinate, replace a,b by zero and convert back to the source linear RGB basis. This reconstructs neutral color in the selected model rather than treating l/L as a linear RGB value.
+
+### Current native algorithm/profile
+
+Compute relative Y in Float64, then explicitly publish l = 1.16*f(Y)-0.16 in Float64. Form f_y=(l+0.16)/1.16 and y_n=f^-1(f_y), and reconstruct inverse(M)*(W_x*y_n,y_n,W_z*y_n). The published lightness stage is retained rather than algebraically cancelling the Lab round trip. Native matrix dot products may use fused arithmetic; final RGB is converted once to T.
 
 ## Behavior
 

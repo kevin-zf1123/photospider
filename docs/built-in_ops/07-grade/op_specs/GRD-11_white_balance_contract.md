@@ -5,7 +5,7 @@ kind: shared_operator_contract
 category: 07-grade
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented_cpu_fixed_abi_9
 clarification_status: complete
 ---
 
@@ -20,6 +20,12 @@ Inherit [GRD common](GRD_common_contract.md) for port representation, native flo
 | [GRD-11A](GRD-11A_white_balance_gains.md) | White balance with RGB gains | `grade.white_balance_gains` |
 | [GRD-11B](GRD-11B_white_balance_adapt.md) | White-point adaptation of RGB | `grade.white_balance_adapt` |
 | [GRD-11C](GRD-11C_white_balance_temperature_tint.md) | White balance from temperature and tint | `grade.white_balance_temperature_tint` |
+
+## Current parameters
+
+The registered operation keys are the keys in the member table. Raw selection uses `axis: Int64` relative to the cell descriptor, before batch axes, and `components: String` containing three distinct canonical decimal indices separated by commas in RGB order. Described selection uses the serialized FMT `input_description: String` and its `group: String`; roles resolve RGB order and this form excludes raw selectors. The described group must be linear RGB with an explicit relative or absolute reference.
+
+B and C resolve `source_basis: String` from an explicit parameter or the source description. Basis strings are the existing named FMT presets or `basis-v1:` followed by eight comma-separated, sixteen-digit hexadecimal Float64 words for primary xy pairs and white xy. White strings are `d65`, `d50`, `aces`, or `xy-v1:` followed by two such words. An explicit basis assertion must agree with the description. Member pages list adaptation, destination and temperature parameters.
 
 ## Shared mathematics and behavior
 

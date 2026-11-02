@@ -7,7 +7,7 @@ kind: primitive
 category: 07-grade
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented_cpu_fixed_abi_9
 clarification_status: complete
 execution: tile
 proposed_operation_keys:
@@ -26,9 +26,17 @@ Select relative linear RGB with explicit basis/white. Output replaces the same R
 
 Port ordering, tensor members, calculation dtype, channel selection, static parameter types and unchecked premises follow the common contract. Output shape and dtype are those in the signature.
 
+### Current parameters
+
+Resolve `source_basis` and the relative linear RGB selection as in GRD-12B.
+
 ## Mathematics
 
 Convert through the common `oklab_l` route in Float64, retain the native l/L coordinate, replace a,b by zero and convert back to the source linear RGB basis. This reconstructs neutral color in the selected model rather than treating l/L as a linear RGB value.
+
+### Current native algorithm/profile
+
+Compose the source RGB-to-XYZ, working-white-to-D65 Bradford and XYZ-to-LMS matrices in Float64. Apply signed cube roots, then publish the native OKLab L coordinate in Float64. Multiply L by each element of the first column of the inverse OKLab matrix, cube those three results, and apply the inverse LMS, inverse Bradford and source RGB transforms. The three inverse-column coefficients are retained explicitly; final RGB is converted once to T.
 
 ## Behavior
 

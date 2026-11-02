@@ -79,18 +79,18 @@
 | [GRD-09B OKLCh adjustment](op_specs/GRD-09B_oklch.md) | primitive / tile / D1_draft | `grade.oklch` | implemented_cpu_fixed_abi_9 |
 | [GRD-10A CIELAB affine adjustment](op_specs/GRD-10A_lab.md) | primitive / tile / D1_draft | `grade.lab` | implemented_cpu_fixed_abi_9 |
 | [GRD-10B OKLab affine adjustment](op_specs/GRD-10B_oklab.md) | primitive / tile / D1_draft | `grade.oklab` | implemented_cpu_fixed_abi_9 |
-| [GRD-11A White balance with RGB gains](op_specs/GRD-11A_white_balance_gains.md) | primitive / tile / D1_draft | `grade.white_balance_gains` | not_implemented |
-| [GRD-11B White-point adaptation of RGB](op_specs/GRD-11B_white_balance_adapt.md) | primitive / tile / D1_draft | `grade.white_balance_adapt` | not_implemented |
-| [GRD-11C White balance from temperature and tint](op_specs/GRD-11C_white_balance_temperature_tint.md) | primitive / tile / D1_draft | `grade.white_balance_temperature_tint` | not_implemented |
-| [GRD-12A Artistic monochrome feature](op_specs/GRD-12A_monochrome_weights.md) | primitive / tile / D1_draft | `grade.monochrome_weights` | not_implemented |
-| [GRD-12B Linear-Y monochrome](op_specs/GRD-12B_monochrome_linear_y.md) | primitive / tile / D1_draft | `grade.monochrome_linear_y` | not_implemented |
-| [GRD-12C CIELAB monochrome](op_specs/GRD-12C_monochrome_cielab.md) | primitive / tile / D1_draft | `grade.monochrome_cielab` | not_implemented |
-| [GRD-12D OKLab monochrome](op_specs/GRD-12D_monochrome_oklab.md) | primitive / tile / D1_draft | `grade.monochrome_oklab` | not_implemented |
-| [GRD-13A Uniform posterization](op_specs/GRD-13A_posterize.md) | primitive / tile / D1_draft | `grade.posterize` | not_implemented |
-| [GRD-14A Fixed threshold](op_specs/GRD-14A_threshold.md) | primitive / tile / D1_draft | `grade.threshold` | not_implemented |
-| [GRD-14B Local-mean threshold](op_specs/GRD-14B_threshold_local_mean.md) | primitive / tile / D1_draft | `grade.threshold_local_mean` | not_implemented |
-| [GRD-14C Gaussian-weighted local threshold](op_specs/GRD-14C_threshold_local_gaussian.md) | primitive / tile / D1_draft | `grade.threshold_local_gaussian` | not_implemented |
-| [GRD-14D Sauvola local threshold](op_specs/GRD-14D_threshold_sauvola.md) | primitive / tile / D1_draft | `grade.threshold_sauvola` | not_implemented |
+| [GRD-11A White balance with RGB gains](op_specs/GRD-11A_white_balance_gains.md) | primitive / tile / D1_draft | `grade.white_balance_gains` | implemented_cpu_fixed_abi_9 |
+| [GRD-11B White-point adaptation of RGB](op_specs/GRD-11B_white_balance_adapt.md) | primitive / tile / D1_draft | `grade.white_balance_adapt` | implemented_cpu_fixed_abi_9 |
+| [GRD-11C White balance from temperature and tint](op_specs/GRD-11C_white_balance_temperature_tint.md) | primitive / tile / D1_draft | `grade.white_balance_temperature_tint` | implemented_cpu_fixed_abi_9 |
+| [GRD-12A Artistic monochrome feature](op_specs/GRD-12A_monochrome_weights.md) | primitive / tile / D1_draft | `grade.monochrome_weights` | implemented_cpu_fixed_abi_9 |
+| [GRD-12B Linear-Y monochrome](op_specs/GRD-12B_monochrome_linear_y.md) | primitive / tile / D1_draft | `grade.monochrome_linear_y` | implemented_cpu_fixed_abi_9 |
+| [GRD-12C CIELAB monochrome](op_specs/GRD-12C_monochrome_cielab.md) | primitive / tile / D1_draft | `grade.monochrome_cielab` | implemented_cpu_fixed_abi_9 |
+| [GRD-12D OKLab monochrome](op_specs/GRD-12D_monochrome_oklab.md) | primitive / tile / D1_draft | `grade.monochrome_oklab` | implemented_cpu_fixed_abi_9 |
+| [GRD-13A Uniform posterization](op_specs/GRD-13A_posterize.md) | primitive / tile / D1_draft | `grade.posterize` | implemented_cpu_fixed_abi_9 |
+| [GRD-14A Fixed threshold](op_specs/GRD-14A_threshold.md) | primitive / tile / D1_draft | `grade.threshold` | implemented_cpu_fixed_abi_9 |
+| [GRD-14B Local-mean threshold](op_specs/GRD-14B_threshold_local_mean.md) | primitive / tile / D1_draft | `grade.threshold_local_mean` | implemented_cpu_fixed_abi_9 |
+| [GRD-14C Gaussian-weighted local threshold](op_specs/GRD-14C_threshold_local_gaussian.md) | primitive / tile / D1_draft | `grade.threshold_local_gaussian` | implemented_cpu_fixed_abi_9 |
+| [GRD-14D Sauvola local threshold](op_specs/GRD-14D_threshold_sauvola.md) | primitive / tile / D1_draft | `grade.threshold_sauvola` | implemented_cpu_fixed_abi_9 |
 | [GRD-15A Matrix channel mixer](op_specs/GRD-15A_channel_mixer.md) | primitive / tile / D1_draft | `grade.channel_mixer` | not_implemented |
 | [GRD-16A Tonal RGB color balance](op_specs/GRD-16A_color_balance_rgb.md) | primitive / tile / D1_draft | `grade.color_balance_rgb` | not_implemented |
 | [GRD-16B Tonal opponent-color balance](op_specs/GRD-16B_color_balance_opponent.md) | primitive / tile / D1_draft | `grade.color_balance_opponent` | not_implemented |

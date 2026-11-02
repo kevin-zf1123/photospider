@@ -7,7 +7,7 @@ kind: primitive
 category: 07-grade
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented_cpu_fixed_abi_9
 clarification_status: complete
 execution: tile
 proposed_operation_keys:
@@ -26,9 +26,17 @@ Selected normalized components; static levels:Int64 2..65536, default 8; edge=re
 
 Port ordering, tensor members, calculation dtype, channel selection, static parameter types and unchecked premises follow the common contract. Output shape and dtype are those in the signature.
 
+### Current parameters
+
+`levels: Int64` defaults to 8 and `edge: String` defaults to `clamp`. Raw selection uses descriptor-relative `axis: Int64` and comma-separated `components: String`; a serialized `input_description: String` with `group: String` may resolve the selected components instead.
+
 ## Mathematics
 
 Set u=x in reject mode, otherwise clamp(x,0,1). Let q=round_ties_even(u*(levels-1)); output q/(levels-1). The product and division use native floating arithmetic. Zero and one return exactly 0 and 1.
+
+### Current native algorithm/profile
+
+Cast the integer count levels-1 to T. Both the product u*T(levels-1) and division by T(levels-1) are evaluated in T; no Float64 arithmetic operand is introduced by the integer parameter. Round the product to the nearest even integer, independently of a floor(x+0.5) approximation. The scalar form uses floor, the fractional remainder and integer parity; the packet form uses the same nearest/even operation. Bypass slots retain their original bits.
 
 ## Behavior
 

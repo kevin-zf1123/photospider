@@ -5,7 +5,7 @@ kind: shared_operator_contract
 category: 07-grade
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented_cpu_fixed_abi_9
 clarification_status: complete
 ---
 
@@ -18,6 +18,10 @@ Inherit [GRD common](GRD_common_contract.md) for port representation, native flo
 | Member | Function | Proposed key |
 | --- | --- | --- |
 | [GRD-13A](GRD-13A_posterize.md) | Uniform posterization | `grade.posterize` |
+
+## Current parameters
+
+The registered key is `grade.posterize`. Its current scalar and selector encodings are listed in the member page. `levels` is an Int64 control; it does not promote the native image arithmetic to Float64.
 
 ## Shared mathematics and behavior
 

@@ -7,7 +7,7 @@ kind: primitive
 category: 07-grade
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented_cpu_fixed_abi_9
 clarification_status: complete
 execution: tile
 proposed_operation_keys:
@@ -26,9 +26,17 @@ Select RGB; signed weights are legal. Static normalize=false by default; normali
 
 Port ordering, tensor members, calculation dtype, channel selection, static parameter types and unchecked premises follow the common contract. Output shape and dtype are those in the signature.
 
+### Current parameters
+
+`normalize: Bool` defaults to false. `weights` and `bias` remain required dynamic Float64 tensors with shapes [3] and [1]. Selection follows the family parameter profile.
+
 ## Mathematics
 
 v=sum(w_c*x_c)/d+bias, with d=sum(w) when normalize=true and d=1 otherwise. Output is an artistic scalar feature in the declared RGB coordinate system. It contains only this feature; complete-image gray rendering uses GRD-12B/C/D or explicit assembly.
+
+### Current native algorithm/profile
+
+Accumulate the selected RGB feature in Float64; d is (w0+w1)+w2 when normalized and 1 otherwise. Native fused arithmetic and reassociation within the common tolerance are permitted, including a fused dot product with bias when d=1. Publish only the resulting single feature, converted once to T; the component axis has extent one and alpha/AOV slots are removed.
 
 ## Behavior
 

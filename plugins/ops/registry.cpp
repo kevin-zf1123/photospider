@@ -20,6 +20,8 @@ Status register_builtin_operations(OperationRegistry* registry) {
                               register_grade_gradient_map,
                               register_grade_gradient_channels,
                               register_grade_native_coordinates,
+                              register_grade_finishing,
+                              register_grade_threshold,
                               register_vector_lut,
                               register_fast_curves,
                               register_fast_sampling,

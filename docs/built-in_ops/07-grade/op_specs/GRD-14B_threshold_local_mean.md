@@ -7,7 +7,7 @@ kind: primitive
 category: 07-grade
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented_cpu_fixed_abi_9
 clarification_status: complete
 execution: tile
 proposed_operation_keys:
@@ -26,9 +26,17 @@ Static radius:Int64 0..4096, default 3. Suggested offset=0 in feature units.
 
 Port ordering, tensor members, calculation dtype, channel selection, static parameter types and unchecked premises follow the common contract. Output shape and dtype are those in the signature.
 
+### Current parameters
+
+`radius: Int64` defaults to 3. The image and Float64[1] offset remain required dynamic inputs; this member accepts one [H,W] image.
+
 ## Mathematics
 
 For the cropped square radius neighborhood N_p, m=sum(x_q)/|N_p|. Return 1 iff x_p>=m-offset. Accumulation uses Float64 and the common order.
+
+### Current native algorithm/profile
+
+Use a full-image Float64 prefix grid for d=x-x(0,0). A cropped rectangle gives mean=x(0,0)+sum(d)/N. Candidate comparisons may be formed in scaled-sum coordinates. Apply the family numerical refinement rule near a decision boundary, preserving the Float64 mean and subsequent mean-offset subtraction. Radius zero directly compares x against x-offset.
 
 ## Behavior
 

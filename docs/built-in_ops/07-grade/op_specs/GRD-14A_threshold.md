@@ -7,7 +7,7 @@ kind: primitive
 category: 07-grade
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented_cpu_fixed_abi_9
 clarification_status: complete
 execution: tile
 proposed_operation_keys:
@@ -26,9 +26,17 @@ Suggested threshold=0.5 in the feature unit. Static keepdims:Bool=true; false re
 
 Port ordering, tensor members, calculation dtype, channel selection, static parameter types and unchecked premises follow the common contract. Output shape and dtype are those in the signature.
 
+### Current parameters
+
+`keepdims: Bool` defaults to true. Raw selection uses descriptor-relative `axis: Int64` and `components: String` equal to `0`, selecting an extent-one feature axis. Alternatively, `input_description: String` and `group: String` resolve the feature. Removing the axis must leave positive cell-descriptor rank; batch axes are retained.
+
 ## Mathematics
 
 Return 1 if x>=threshold and 0 otherwise. Compare in the common calculation dtype. Equality belongs to 1.
+
+### Current native algorithm/profile
+
+Compare the promoted sample against the dynamic Float64 threshold and write UInt8 0 or 1. For finite Float32 samples, a comparison against the least Float32 value not below the Float64 threshold is equivalent and may be used without rounding the threshold downward.
 
 ## Behavior
 

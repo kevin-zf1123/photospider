@@ -7,7 +7,7 @@ kind: primitive
 category: 07-grade
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented_cpu_fixed_abi_9
 clarification_status: complete
 execution: tile
 proposed_operation_keys:
@@ -26,9 +26,17 @@ Select linear RGB. Gains are positive; suggested [1,1,1].
 
 Port ordering, tensor members, calculation dtype, channel selection, static parameter types and unchecked premises follow the common contract. Output shape and dtype are those in the signature.
 
+### Current parameters
+
+The dynamic `gains` tensor is Float64[3] in selected RGB order. Selection follows the family parameter profile.
+
 ## Mathematics
 
 y_c=x_c*g_c. Unit gains copy. The existing RGB basis and reference interpretation remain the caller-selected ones; gain normalization is explicit in the supplied values.
+
+### Current native algorithm/profile
+
+Each selected sample is promoted to Float64 and multiplied by its corresponding gain, then converted once to T. A unit gain uses the source sample bits, including on a partial identity; unselected components also copy their original bits.
 
 ## Behavior
 

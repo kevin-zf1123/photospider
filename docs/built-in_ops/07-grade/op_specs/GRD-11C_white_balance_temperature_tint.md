@@ -7,7 +7,7 @@ kind: primitive
 category: 07-grade
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented_cpu_fixed_abi_9
 clarification_status: complete
 execution: tile
 proposed_operation_keys:
@@ -26,9 +26,17 @@ Select linear RGB. Required static source_temperature:Float64 in [1000,20000] ke
 
 Port ordering, tensor members, calculation dtype, channel selection, static parameter types and unchecked premises follow the common contract. Output shape and dtype are those in the signature.
 
+### Current parameters
+
+`source_temperature: Float64` is required. `source_tint: Float64` defaults to 0; `adaptation: String` defaults to `bradford`; optional `target_white: String` defaults to the source RGB basis white. Resolve `source_basis` and selection as in the family profile.
+
 ## Mathematics
 
 Construct the source white from the Planckian CCT/tint model in [GRD-11](GRD-11_white_balance_contract.md). Adapt it to target_white using GRD-11B with the same source/destination RGB basis. source_temperature describes the illuminant being corrected; positive source_tint shifts that illuminant toward positive CIE 1960 v. The adaptation compensates that cast.
+
+### Current native algorithm/profile
+
+Evaluate the 471 sampled Planck terms and their analytic temperature derivatives in Float64, using expm1 for the exponential denominator and a common cancelling spectral scale. Normalize the UCS perpendicular with hypot and orient its v component positively before applying tint. Publish W = (1.5*u/v, 1, (4-u-10*v)/(2*v)) to Float64, then prepare the same effective adaptation matrix as GRD-11B. The sampled illuminant, target white and effective matrix depend only on the static parameters.
 
 ## Behavior
 

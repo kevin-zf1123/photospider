@@ -55,6 +55,8 @@ set(PHOTOSPIDER_OPERATION_SOURCES
   plugins/ops/07-grade/gradient_channels.cpp
   plugins/ops/07-grade/gradient_channels_combined.cpp
   plugins/ops/07-grade/native_coordinates.cpp
+  plugins/ops/07-grade/finishing.cpp
+  plugins/ops/07-grade/threshold.cpp
   plugins/ops/01-numeric/vector_lut.cpp
   plugins/ops/01-numeric/fast_curves.cpp
   plugins/ops/01-numeric/fast_sampling.cpp

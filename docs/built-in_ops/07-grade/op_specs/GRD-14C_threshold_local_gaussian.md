@@ -7,7 +7,7 @@ kind: primitive
 category: 07-grade
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented_cpu_fixed_abi_9
 clarification_status: complete
 execution: tile
 proposed_operation_keys:
@@ -26,9 +26,17 @@ radius:Int64 0..4096 default 3; sigma:Float64>0 default 2 pixels. Suggested offs
 
 Port ordering, tensor members, calculation dtype, channel selection, static parameter types and unchecked premises follow the common contract. Output shape and dtype are those in the signature.
 
+### Current parameters
+
+`radius: Int64` defaults to 3 and `sigma: Float64` defaults to 2. The image and Float64[1] offset remain required dynamic inputs.
+
 ## Mathematics
 
 For the cropped square radius neighborhood, w_q=exp(-distance(p,q)^2/(2*sigma^2)); m=sum(w_q*x_q)/sum(w_q). Return 1 iff x_p>=m-offset. Use Float64 sums.
+
+### Current native algorithm/profile
+
+Prepare w_0=1 and w_j=exp(-0.5*(j/sigma)^2) in Float64. Evaluate the finite separable convolution with independent normalization at the full-image x and y boundaries. Symmetric pair sums and native fused arithmetic are permitted. Candidate comparisons may use scaled weighted sums; near a boundary, recompute the cropped two-dimensional weighted mean in row-major order around the center sample. Zero rounded weights contribute nothing in this refinement, and the mean is formed before subtracting offset. Radius zero agrees with the direct GRD-14B calculation.
 
 ## Behavior
 
