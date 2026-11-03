@@ -7,7 +7,7 @@ kind: primitive
 category: 07-grade
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented_cpu_fixed_abi_9
 clarification_status: complete
 execution: tile
 proposed_operation_keys:
@@ -29,6 +29,10 @@ Port ordering, tensor members, calculation dtype, channel selection, static para
 ## Mathematics
 
 Add delta to the first coordinate and copy a,b. Values remain unclipped; delta=0 copies.
+
+### Current native algorithm/profile
+
+The selected normalized l or native L coordinate is widened to binary64, added to the matching dynamic delta, and converted once to T without clipping. Delta zero copies original bits; a,b and other components copy independently. The required consumer unit is `modulation_unit="delta_lightness"`. Other current parameters and the native numerical profile are specified by the [family](GRD-20_feature_curve_contract.md#current-parameters).
 
 ## Behavior
 

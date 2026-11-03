@@ -7,7 +7,7 @@ kind: primitive
 category: 07-grade
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented_cpu_fixed_abi_9
 clarification_status: complete
 execution: tile
 proposed_operation_keys:
@@ -29,6 +29,10 @@ Port ordering, tensor members, calculation dtype, channel selection, static para
 ## Mathematics
 
 Compute source Y from the Y row of the RGB-to-XYZ matrix in Float64. If target==Y, copy RGB. For Y!=0 return RGB*(target/Y). For Y=0 and nonzero target return the neutral triple (target,target,target).
+
+### Current native algorithm/profile
+
+The current native algorithm extracts binary64 Y with the explicit RGB matrix, checks exact target equality, then uses the proportional or zero-Y neutral branch stated above. Arithmetic RGB results convert once to T; copied components retain their original bits. The basis codec, selector parameters and native profile are specified by the [family](GRD-20_feature_curve_contract.md#current-parameters).
 
 ## Behavior
 

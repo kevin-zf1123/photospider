@@ -103,16 +103,16 @@
 | [GRD-19B Adjust a supplied local tonal base](op_specs/GRD-19B_local_base_grade.md) | primitive / tile / D1_draft | `grade.local_base_grade` | implemented_cpu_fixed_abi_9 |
 | [GRD-19C Local shadows, highlights and detail](op_specs/GRD-19C_shadow_highlight_local.md) | primitive / tile / D1_draft | `grade.shadow_highlight_local` | implemented_cpu_fixed_abi_9 |
 | [GRD-19D Independent local detail strength](op_specs/GRD-19D_local_detail.md) | primitive / tile / D1_draft | `grade.local_detail` | implemented_cpu_fixed_abi_9 |
-| [GRD-20A Periodic feature curve](op_specs/GRD-20A_feature_curve_periodic.md) | primitive / tile / D1_draft | `grade.feature_curve_periodic` | not_implemented |
-| [GRD-20B Nonperiodic feature curve](op_specs/GRD-20B_feature_curve_linear.md) | primitive / tile / D1_draft | `grade.feature_curve_linear` | not_implemented |
-| [GRD-20C Apply a hue-increment field](op_specs/GRD-20C_apply_hue_delta.md) | primitive / tile / D1_draft | `grade.apply_hue_delta` | not_implemented |
-| [GRD-20D Apply a chroma-scale field](op_specs/GRD-20D_apply_chroma_scale.md) | primitive / tile / D1_draft | `grade.apply_chroma_scale` | not_implemented |
-| [GRD-20E Apply a native lightness-increment field](op_specs/GRD-20E_apply_lightness_delta.md) | primitive / tile / D1_draft | `grade.apply_lightness_delta` | not_implemented |
-| [GRD-20F Set luminance by proportional RGB scaling](op_specs/GRD-20F_reconstruct_luminance.md) | primitive / tile / D1_draft | `grade.reconstruct_luminance` | not_implemented |
-| [GRD-20G Apply an HSL/HSV saturation-scale field](op_specs/GRD-20G_apply_saturation_scale.md) | primitive / tile / D1_draft | `grade.apply_saturation_scale` | not_implemented |
-| [GRD-20H Set XYZ Y while retaining X and Z](op_specs/GRD-20H_set_xyz_y.md) | primitive / tile / D1_draft | `grade.set_xyz_y` | not_implemented |
-| [GRD-20I Set CIELAB lightness while retaining a and b](op_specs/GRD-20I_set_cielab_lightness.md) | primitive / tile / D1_draft | `grade.set_cielab_lightness` | not_implemented |
-| [GRD-20J Set OKLab lightness while retaining a and b](op_specs/GRD-20J_set_oklab_lightness.md) | primitive / tile / D1_draft | `grade.set_oklab_lightness` | not_implemented |
+| [GRD-20A Periodic feature curve](op_specs/GRD-20A_feature_curve_periodic.md) | primitive / tile / D1_draft | `grade.feature_curve_periodic` | implemented_cpu_fixed_abi_9 |
+| [GRD-20B Nonperiodic feature curve](op_specs/GRD-20B_feature_curve_linear.md) | primitive / tile / D1_draft | `grade.feature_curve_linear` | implemented_cpu_fixed_abi_9 |
+| [GRD-20C Apply a hue-increment field](op_specs/GRD-20C_apply_hue_delta.md) | primitive / tile / D1_draft | `grade.apply_hue_delta` | implemented_cpu_fixed_abi_9 |
+| [GRD-20D Apply a chroma-scale field](op_specs/GRD-20D_apply_chroma_scale.md) | primitive / tile / D1_draft | `grade.apply_chroma_scale` | implemented_cpu_fixed_abi_9 |
+| [GRD-20E Apply a native lightness-increment field](op_specs/GRD-20E_apply_lightness_delta.md) | primitive / tile / D1_draft | `grade.apply_lightness_delta` | implemented_cpu_fixed_abi_9 |
+| [GRD-20F Set luminance by proportional RGB scaling](op_specs/GRD-20F_reconstruct_luminance.md) | primitive / tile / D1_draft | `grade.reconstruct_luminance` | implemented_cpu_fixed_abi_9 |
+| [GRD-20G Apply an HSL/HSV saturation-scale field](op_specs/GRD-20G_apply_saturation_scale.md) | primitive / tile / D1_draft | `grade.apply_saturation_scale` | implemented_cpu_fixed_abi_9 |
+| [GRD-20H Set XYZ Y while retaining X and Z](op_specs/GRD-20H_set_xyz_y.md) | primitive / tile / D1_draft | `grade.set_xyz_y` | implemented_cpu_fixed_abi_9 |
+| [GRD-20I Set CIELAB lightness while retaining a and b](op_specs/GRD-20I_set_cielab_lightness.md) | primitive / tile / D1_draft | `grade.set_cielab_lightness` | implemented_cpu_fixed_abi_9 |
+| [GRD-20J Set OKLab lightness while retaining a and b](op_specs/GRD-20J_set_oklab_lightness.md) | primitive / tile / D1_draft | `grade.set_oklab_lightness` | implemented_cpu_fixed_abi_9 |
 | [GRD-21A Linear-RGB saturation](op_specs/GRD-21A_saturation_linear.md) | primitive / tile / D1_draft | `grade.saturation_linear` | not_implemented |
 | [GRD-21B Opponent-space saturation](op_specs/GRD-21B_saturation_opponent.md) | primitive / tile / D1_draft | `grade.saturation_opponent` | not_implemented |
 | [GRD-21C OKLab vibrance](op_specs/GRD-21C_vibrance_oklab.md) | primitive / tile / D1_draft | `grade.vibrance_oklab` | not_implemented |

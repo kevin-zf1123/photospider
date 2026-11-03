@@ -7,7 +7,7 @@ kind: primitive
 category: 07-grade
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented_cpu_fixed_abi_9
 clarification_status: complete
 execution: tile
 proposed_operation_keys:
@@ -29,6 +29,10 @@ Port ordering, tensor members, calculation dtype, channel selection, static para
 ## Mathematics
 
 Copy l/L; multiply a and b by scale. scale=1 copies the corresponding tuple.
+
+### Current native algorithm/profile
+
+The selected a and b coordinates are independently widened to binary64, multiplied by their matching dynamic scale, and converted once to T. Scale one copies original bits; l/L and other components copy independently. The required consumer unit is `modulation_unit="chroma_scale"`. Other current parameters and the native numerical profile are specified by the [family](GRD-20_feature_curve_contract.md#current-parameters).
 
 ## Behavior
 

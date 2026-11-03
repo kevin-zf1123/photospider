@@ -7,7 +7,7 @@ kind: primitive
 category: 07-grade
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented_cpu_fixed_abi_9
 clarification_status: complete
 execution: tile
 proposed_operation_keys:
@@ -29,6 +29,10 @@ Port ordering, tensor members, calculation dtype, channel selection, static para
 ## Mathematics
 
 When source saturation/chroma is zero, copy h; otherwise h_out=h+delta. All other components copy independently. Stored hue retains winding.
+
+### Current native algorithm/profile
+
+The source hue and dynamic delta are evaluated in binary64 in their shared declared unit. Zero delta or zero original saturation/chroma selects the stored hue bits; otherwise one addition retains the hue winding. The required consumer unit is `modulation_unit="delta_h"`. Other current parameters and the native numerical profile are specified by the [family](GRD-20_feature_curve_contract.md#current-parameters).
 
 ## Behavior
 

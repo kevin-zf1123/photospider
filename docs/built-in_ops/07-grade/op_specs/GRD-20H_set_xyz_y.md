@@ -7,7 +7,7 @@ kind: primitive
 category: 07-grade
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented_cpu_fixed_abi_9
 clarification_status: complete
 execution: tile
 proposed_operation_keys:
@@ -29,6 +29,10 @@ Port ordering, tensor members, calculation dtype, channel selection, static para
 ## Mathematics
 
 Convert the original RGB through the `xyz_y` route in Float64, replace only the designated coordinate by target, retain the other two coordinates, then convert back. When target equals the extracted coordinate, copy the original RGB.
+
+### Current native algorithm/profile
+
+The current native algorithm uses `rgb'[c]=fma(inverse(M)[c,1],target-dot(M[1],rgb),rgb[c])`, after the exact-identity copy check. This is the algebraic retained-X/Z reconstruction in the [family profile](GRD-20_feature_curve_contract.md#complete-rgb-brightness-edits). Current parameters and the explicit basis codec follow the [family parameter profile](GRD-20_feature_curve_contract.md#current-parameters).
 
 ## Behavior
 

@@ -7,7 +7,7 @@ kind: primitive
 category: 07-grade
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented_cpu_fixed_abi_9
 clarification_status: complete
 execution: tile
 proposed_operation_keys:
@@ -29,6 +29,10 @@ Port ordering, tensor members, calculation dtype, channel selection, static para
 ## Mathematics
 
 S_out=clamp(S*scale,0,1). Copy hue and L/V independently. scale=1 copies S.
+
+### Current native algorithm/profile
+
+The selected saturation is widened to binary64, multiplied by the matching dynamic scale and clamped to [0,1] before conversion to T. Scale one copies original saturation bits; hue and L/V copy independently. The required consumer unit is `modulation_unit="saturation_scale"`. Other current parameters and the native profile are specified by the [family](GRD-20_feature_curve_contract.md#current-parameters).
 
 ## Behavior
 

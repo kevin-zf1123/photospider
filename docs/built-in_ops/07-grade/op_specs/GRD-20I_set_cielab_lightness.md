@@ -7,7 +7,7 @@ kind: primitive
 category: 07-grade
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented_cpu_fixed_abi_9
 clarification_status: complete
 execution: tile
 proposed_operation_keys:
@@ -29,6 +29,10 @@ Port ordering, tensor members, calculation dtype, channel selection, static para
 ## Mathematics
 
 Convert the original RGB through the `cielab_l` route in Float64, replace only the designated coordinate by target, retain the other two coordinates, then convert back. When target equals the extracted coordinate, copy the original RGB.
+
+### Current native algorithm/profile
+
+The current native algorithm uses the working-white CIE functions and either an explicit CIELAB conversion or the equivalent common displacement of the three CIE f coordinates. The approximation neighborhood is reevaluated with the scalar extraction sequence before an exact-identity decision. Equations, current parameters and basis interpretation are specified by the [family profile](GRD-20_feature_curve_contract.md#current-native-mathematical-profile).
 
 ## Behavior
 

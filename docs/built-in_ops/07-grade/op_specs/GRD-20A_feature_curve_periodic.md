@@ -7,7 +7,7 @@ kind: primitive
 category: 07-grade
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented_cpu_fixed_abi_9
 clarification_status: complete
 execution: tile
 proposed_operation_keys:
@@ -29,6 +29,10 @@ Port ordering, tensor members, calculation dtype, channel selection, static para
 ## Mathematics
 
 Reduce f modulo period into [0,period), then interpolate linearly including the closing segment from the last knot to (period,ordinates[0]). delta_h values are ordinary unwrapped increments. A hue in pi_multiple units has period 2.
+
+### Current native algorithm/profile
+
+This operation uses the periodic reduction, closing segment and exact-knot interpolation in the [current family mathematical profile](GRD-20_feature_curve_contract.md#current-native-mathematical-profile). For `chroma_scale` and `saturation_scale`, ordinary interpolation anchors at the smaller ordinate as specified by that profile, preserving nonnegative finite results and stored knot/edge zero signs. The current parameters and selector encoding are specified in the [family parameter profile](GRD-20_feature_curve_contract.md#current-parameters).
 
 ## Behavior
 
