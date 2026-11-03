@@ -59,6 +59,7 @@ set(PHOTOSPIDER_OPERATION_SOURCES
   plugins/ops/07-grade/threshold.cpp
   plugins/ops/07-grade/channel_mixer.cpp
   plugins/ops/07-grade/color_balance.cpp
+  plugins/ops/07-grade/invert.cpp
   plugins/ops/01-numeric/vector_lut.cpp
   plugins/ops/01-numeric/fast_curves.cpp
   plugins/ops/01-numeric/fast_sampling.cpp
@@ -231,8 +232,10 @@ set(PHOTOSPIDER_OPERATION_SOURCES
 set_property(SOURCE plugins/ops/01-numeric/numeric_matrix.cpp APPEND PROPERTY
   COMPILE_DEFINITIONS "PHOTOSPIDER_MATRIX_BACKEND_${PHOTOSPIDER_MATRIX_BACKEND}=1")
 if(APPLE AND PHOTOSPIDER_ENABLE_ACCELERATE)
-  set_property(SOURCE plugins/ops/01-numeric/accelerated_matrix_apple.cpp APPEND PROPERTY
-    COMPILE_DEFINITIONS PHOTOSPIDER_HAS_ACCELERATE=1)
+  set_property(SOURCE
+    plugins/ops/01-numeric/accelerated_matrix_apple.cpp
+    plugins/ops/07-grade/invert.cpp
+    APPEND PROPERTY COMPILE_DEFINITIONS PHOTOSPIDER_HAS_ACCELERATE=1)
 endif()
 if(PHOTOSPIDER_ENABLE_MATRIX_SME)
   list(APPEND PHOTOSPIDER_OPERATION_SOURCES plugins/ops/01-numeric/accelerated_matrix_sme.cpp)
