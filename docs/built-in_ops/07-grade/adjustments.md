@@ -13,6 +13,7 @@
 - 效果强度、软 mask 混合与色域映射通过显式算子组合。
 - [GRD-06C](op_specs/GRD-06C_gradient_map_channels.md)直接选择输入通道作为 query，在目标模型坐标中分别生成各通道 LUT，输出新图像；色相保留完整浮点 radian 或 pi_multiple 数值。`combined` 与 `compiled` 共享契约；所需新增 fast 入口及复用依赖见该规格。
 - [GRD-18A](op_specs/GRD-18A_tonal_zone_masks.md) 与 [GRD-18B](op_specs/GRD-18B_tonal_zone_grade.md) 的组件轴按 cell 编号，排除 batch 前缀；空间输入必须声明 `layout.channel_axis`，原始 `axis` 或描述中的组件轴须与其一致。GRD-18B 的仅旁路依赖保证适用于整个执行 tile：RGBA 选中 RGB 时，仅请求 alpha 的 ROI 仍需要所在空间 tile 的 zones 和 controls，alpha 保持原始位。全零 controls 跳过算子内部的权重读取，Plan 依赖及已调度的上游生产者仍然保留。
+- [GRD-19 局部阴影高光](op_specs/GRD-19_shadow_highlight_local_contract.md) 的 B/C/D 仅旁路依赖保证适用于完整执行 tile。空间 RGBA 的 alpha-only ROI 仍需所在 tile 的基底或 RGB halo 及动态控制，alpha/AOV 保持原始位；恒等控制保留 Plan 已声明的依赖。相对线性 Gray 接受 `relative_luminance` 单位。
 
 ## 族目录
 
@@ -98,10 +99,10 @@
 | [GRD-17A Reflect a numeric range](op_specs/GRD-17A_invert.md) | primitive / tile / D1_draft | `grade.invert` | implemented_cpu_fixed_abi_9 |
 | [GRD-18A Soft tonal-zone weights](op_specs/GRD-18A_tonal_zone_masks.md) | primitive / tile / D1_draft | `grade.tonal_zone_masks` | implemented_cpu_fixed_abi_9 |
 | [GRD-18B Exposure and offset by tonal zone](op_specs/GRD-18B_tonal_zone_grade.md) | primitive / tile / D1_draft | `grade.tonal_zone_grade` | implemented_cpu_fixed_abi_9 |
-| [GRD-19A Bilateral base of log luminance](op_specs/GRD-19A_bilateral_log_base.md) | primitive / tile / D1_draft | `grade.bilateral_log_base` | not_implemented |
-| [GRD-19B Adjust a supplied local tonal base](op_specs/GRD-19B_local_base_grade.md) | primitive / tile / D1_draft | `grade.local_base_grade` | not_implemented |
-| [GRD-19C Local shadows, highlights and detail](op_specs/GRD-19C_shadow_highlight_local.md) | primitive / tile / D1_draft | `grade.shadow_highlight_local` | not_implemented |
-| [GRD-19D Independent local detail strength](op_specs/GRD-19D_local_detail.md) | primitive / tile / D1_draft | `grade.local_detail` | not_implemented |
+| [GRD-19A Bilateral base of log luminance](op_specs/GRD-19A_bilateral_log_base.md) | primitive / tile / D1_draft | `grade.bilateral_log_base` | implemented_cpu_fixed_abi_9 |
+| [GRD-19B Adjust a supplied local tonal base](op_specs/GRD-19B_local_base_grade.md) | primitive / tile / D1_draft | `grade.local_base_grade` | implemented_cpu_fixed_abi_9 |
+| [GRD-19C Local shadows, highlights and detail](op_specs/GRD-19C_shadow_highlight_local.md) | primitive / tile / D1_draft | `grade.shadow_highlight_local` | implemented_cpu_fixed_abi_9 |
+| [GRD-19D Independent local detail strength](op_specs/GRD-19D_local_detail.md) | primitive / tile / D1_draft | `grade.local_detail` | implemented_cpu_fixed_abi_9 |
 | [GRD-20A Periodic feature curve](op_specs/GRD-20A_feature_curve_periodic.md) | primitive / tile / D1_draft | `grade.feature_curve_periodic` | not_implemented |
 | [GRD-20B Nonperiodic feature curve](op_specs/GRD-20B_feature_curve_linear.md) | primitive / tile / D1_draft | `grade.feature_curve_linear` | not_implemented |
 | [GRD-20C Apply a hue-increment field](op_specs/GRD-20C_apply_hue_delta.md) | primitive / tile / D1_draft | `grade.apply_hue_delta` | not_implemented |

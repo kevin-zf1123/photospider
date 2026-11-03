@@ -5,7 +5,7 @@ kind: shared_operator_contract
 category: 07-grade
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented_cpu_fixed_abi_9
 clarification_status: complete
 ---
 
@@ -25,6 +25,14 @@ Inherit [GRD common](GRD_common_contract.md) for port representation, native flo
 ## Shared mathematics and behavior
 
 A generates the Float64 log base; B adjusts a supplied base; C exposes complete local shadow/highlight and detail controls; D exposes detail strength alone. Detail is z-base in log2 luminance. Detail gain 1 retains it, 0 removes it, and larger gains enhance it. The square support crops at the full-image edge. Source hidden colors participate in the luminance base.
+
+## Execution-tile dependencies
+
+For B/C/D, the common bypass-only dependency guarantee applies to complete execution tiles. Empty requests consume no payload. A tile containing only unselected components depends solely on the corresponding source coordinates.
+
+Spatial tiles cover every component slot. An alpha-only ROI in an RGBA image with selected RGB therefore requires the inputs of its enclosing execution tile: B requires the supplied base, controls and edges; C/D require the selected source colors over the cropped halo and their dynamic controls. Alpha and unselected AOVs retain their original bits.
+
+Identity controls may skip feature and grading arithmetic inside the operator. The Plan retains its declared dependencies and any scheduled upstream producers.
 
 ## References and acceptance
 
