@@ -16,6 +16,22 @@
 #include "rempitab.c"  // NOLINT(build/include): compile private upstream adapter.
 #include "sleefsimddp.c"  // NOLINT(build/include): compile private upstream adapter.
 
+/* Native exp2 for operator-owned bounded batches. Same ISA admission and
+   duplicated-tail rules as the evaluator; no change to its kind vocabulary. */
+void photospider_sleef_exp2(const double* input, double* output, size_t count) {
+  for (size_t offset = 0; offset < count; offset += VECTLENDP) {
+    double lanes[VECTLENDP], result[VECTLENDP];
+    size_t n = count - offset < VECTLENDP ? count - offset : VECTLENDP;
+    for (size_t lane = 0; lane < VECTLENDP; ++lane) {
+      lanes[lane] = input[offset + (lane < n ? lane : 0)];
+    }
+    vstoreu_v_p_vd(result, xexp2(vloadu_vd_p(lanes)));
+    for (size_t lane = 0; lane < n; ++lane) {
+      output[offset + lane] = result[lane];
+    }
+  }
+}
+
 /* Call only after ISA admission. Tail lanes duplicate a requested operand;
    they cannot introduce a source read, exception, or logical evaluation. */
 void photospider_sleef_evaluate(unsigned kind, const double* a, const double* b,

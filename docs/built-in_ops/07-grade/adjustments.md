@@ -12,6 +12,7 @@
 - 统计默认使用二值选区，完整图像自动调整默认排除 alpha=0；软选区及 alpha 加权显式启用。统计选区与效果混合 mask 独立。
 - 效果强度、软 mask 混合与色域映射通过显式算子组合。
 - [GRD-06C](op_specs/GRD-06C_gradient_map_channels.md)直接选择输入通道作为 query，在目标模型坐标中分别生成各通道 LUT，输出新图像；色相保留完整浮点 radian 或 pi_multiple 数值。`combined` 与 `compiled` 共享契约；所需新增 fast 入口及复用依赖见该规格。
+- [GRD-18A](op_specs/GRD-18A_tonal_zone_masks.md) 与 [GRD-18B](op_specs/GRD-18B_tonal_zone_grade.md) 的组件轴按 cell 编号，排除 batch 前缀；空间输入必须声明 `layout.channel_axis`，原始 `axis` 或描述中的组件轴须与其一致。GRD-18B 的仅旁路依赖保证适用于整个执行 tile：RGBA 选中 RGB 时，仅请求 alpha 的 ROI 仍需要所在空间 tile 的 zones 和 controls，alpha 保持原始位。全零 controls 跳过算子内部的权重读取，Plan 依赖及已调度的上游生产者仍然保留。
 
 ## 族目录
 
@@ -95,8 +96,8 @@
 | [GRD-16A Tonal RGB color balance](op_specs/GRD-16A_color_balance_rgb.md) | primitive / tile / D1_draft | `grade.color_balance_rgb` | implemented_cpu_fixed_abi_9 |
 | [GRD-16B Tonal opponent-color balance](op_specs/GRD-16B_color_balance_opponent.md) | primitive / tile / D1_draft | `grade.color_balance_opponent` | implemented_cpu_fixed_abi_9 |
 | [GRD-17A Reflect a numeric range](op_specs/GRD-17A_invert.md) | primitive / tile / D1_draft | `grade.invert` | implemented_cpu_fixed_abi_9 |
-| [GRD-18A Soft tonal-zone weights](op_specs/GRD-18A_tonal_zone_masks.md) | primitive / tile / D1_draft | `grade.tonal_zone_masks` | not_implemented |
-| [GRD-18B Exposure and offset by tonal zone](op_specs/GRD-18B_tonal_zone_grade.md) | primitive / tile / D1_draft | `grade.tonal_zone_grade` | not_implemented |
+| [GRD-18A Soft tonal-zone weights](op_specs/GRD-18A_tonal_zone_masks.md) | primitive / tile / D1_draft | `grade.tonal_zone_masks` | implemented_cpu_fixed_abi_9 |
+| [GRD-18B Exposure and offset by tonal zone](op_specs/GRD-18B_tonal_zone_grade.md) | primitive / tile / D1_draft | `grade.tonal_zone_grade` | implemented_cpu_fixed_abi_9 |
 | [GRD-19A Bilateral base of log luminance](op_specs/GRD-19A_bilateral_log_base.md) | primitive / tile / D1_draft | `grade.bilateral_log_base` | not_implemented |
 | [GRD-19B Adjust a supplied local tonal base](op_specs/GRD-19B_local_base_grade.md) | primitive / tile / D1_draft | `grade.local_base_grade` | not_implemented |
 | [GRD-19C Local shadows, highlights and detail](op_specs/GRD-19C_shadow_highlight_local.md) | primitive / tile / D1_draft | `grade.shadow_highlight_local` | not_implemented |
