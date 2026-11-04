@@ -19,6 +19,7 @@ Status register_grade_invert(OperationRegistry* registry);
 Status register_grade_tonal_zones(OperationRegistry* registry);
 Status register_grade_local(OperationRegistry* registry);
 Status register_grade_feature_curves(OperationRegistry* registry);
+Status register_grade_chromatic(OperationRegistry* registry);
 Status register_vector_lut(OperationRegistry* registry);
 Status register_fast_curves(OperationRegistry* registry);
 Status register_fast_sampling(OperationRegistry* registry);

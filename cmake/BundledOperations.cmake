@@ -63,6 +63,7 @@ set(PHOTOSPIDER_OPERATION_SOURCES
   plugins/ops/07-grade/tonal_zones.cpp
   plugins/ops/07-grade/local_grade.cpp
   plugins/ops/07-grade/feature_curves.cpp
+  plugins/ops/07-grade/chromatic.cpp
   plugins/ops/01-numeric/vector_lut.cpp
   plugins/ops/01-numeric/fast_curves.cpp
   plugins/ops/01-numeric/fast_sampling.cpp
