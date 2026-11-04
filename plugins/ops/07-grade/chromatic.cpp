@@ -551,7 +551,7 @@ OperationDefinition operation(unsigned kind) {
 }  // namespace ps::plugin_internal::grade::chromatic
 namespace ps::plugin_internal {
 Status register_grade_chromatic(OperationRegistry* registry) {
-  for (unsigned k = 0; k < 3; ++k) {
+  for (unsigned k = 0; k < 5; ++k) {
     const auto s = registry->register_operation(grade::chromatic::operation(k));
     if (!s.ok()) {
       return s;

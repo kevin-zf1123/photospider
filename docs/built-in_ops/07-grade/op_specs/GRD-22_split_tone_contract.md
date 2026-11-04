@@ -5,7 +5,7 @@ kind: shared_operator_contract
 category: 07-grade
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented_cpu_fixed_abi_9
 clarification_status: complete
 ---
 
@@ -19,6 +19,10 @@ Inherit [GRD common](GRD_common_contract.md) for port representation, native flo
 | --- | --- | --- |
 | [GRD-22A](GRD-22A_split_tone_opponent.md) | Tonal opponent-color tinting | `grade.split_tone_opponent` |
 | [GRD-22B](GRD-22B_color_wheels_rgb.md) | RGB tonal wheels | `grade.color_wheels_rgb` |
+
+## Static parameter encoding
+
+Color selectors and `max_work` use the [GRD-21 parameter encoding](GRD-21_saturation_contract.md#static-parameter-encoding). Zone fields, colors, strengths and wheel controls remain dynamic tensor ports.
 
 ## Shared mathematics and behavior
 

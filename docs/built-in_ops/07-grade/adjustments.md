@@ -11,6 +11,7 @@
 - CIELAB 明度存储为 l=L*/100，OKLab 使用原生 L。线性 Y、l、L 是不同坐标；亮度调整有 RGB 同比缩放、XYZ 只改 Y、CIELAB 只改 l、OKLab 只改 L 四个独立路径。
 - 统计默认使用二值选区，完整图像自动调整默认排除 alpha=0；软选区及 alpha 加权显式启用。统计选区与效果混合 mask 独立。
 - [GRD-21A 当前原生 profile](op_specs/GRD-21A_saturation_linear.md#mathematics)允许在保守控制系数界内预计算 Float64 饱和度的显式 FMA 序列，scale=1、中性三元组和旁路组件仍逐位复制；连续值沿用共享容差。
+- [GRD-22B RGB 色轮](op_specs/GRD-22B_color_wheels_rgb.md#mathematics)仅在原始加权 EV 和 offset 两个和都为零时位复制；归一化下溢为零仍执行 gain、乘法、加法。批量原生 gain 沿用公共容差，极端值和强抵消按原顺序回退。
 - 效果强度、软 mask 混合与色域映射通过显式算子组合。
 - [GRD-06C](op_specs/GRD-06C_gradient_map_channels.md)直接选择输入通道作为 query，在目标模型坐标中分别生成各通道 LUT，输出新图像；色相保留完整浮点 radian 或 pi_multiple 数值。`combined` 与 `compiled` 共享契约；所需新增 fast 入口及复用依赖见该规格。
 - [GRD-18A](op_specs/GRD-18A_tonal_zone_masks.md) 与 [GRD-18B](op_specs/GRD-18B_tonal_zone_grade.md) 的组件轴按 cell 编号，排除 batch 前缀；空间输入必须声明 `layout.channel_axis`，原始 `axis` 或描述中的组件轴须与其一致。GRD-18B 的仅旁路依赖保证适用于整个执行 tile：RGBA 选中 RGB 时，仅请求 alpha 的 ROI 仍需要所在空间 tile 的 zones 和 controls，alpha 保持原始位。全零 controls 跳过算子内部的权重读取，Plan 依赖及已调度的上游生产者仍然保留。
@@ -117,8 +118,8 @@
 | [GRD-21A Linear-RGB saturation](op_specs/GRD-21A_saturation_linear.md) | primitive / tile / D1_draft | `grade.saturation_linear` | implemented_cpu_fixed_abi_9 |
 | [GRD-21B Opponent-space saturation](op_specs/GRD-21B_saturation_opponent.md) | primitive / tile / D1_draft | `grade.saturation_opponent` | implemented_cpu_fixed_abi_9 |
 | [GRD-21C OKLab vibrance](op_specs/GRD-21C_vibrance_oklab.md) | primitive / tile / D1_draft | `grade.vibrance_oklab` | implemented_cpu_fixed_abi_9 |
-| [GRD-22A Tonal opponent-color tinting](op_specs/GRD-22A_split_tone_opponent.md) | primitive / tile / D1_draft | `grade.split_tone_opponent` | not_implemented |
-| [GRD-22B RGB tonal wheels](op_specs/GRD-22B_color_wheels_rgb.md) | primitive / tile / D1_draft | `grade.color_wheels_rgb` | not_implemented |
+| [GRD-22A Tonal opponent-color tinting](op_specs/GRD-22A_split_tone_opponent.md) | primitive / tile / D1_draft | `grade.split_tone_opponent` | implemented_cpu_fixed_abi_9 |
+| [GRD-22B RGB tonal wheels](op_specs/GRD-22B_color_wheels_rgb.md) | primitive / tile / D1_draft | `grade.color_wheels_rgb` | implemented_cpu_fixed_abi_9 |
 | [GRD-23A Soft chromatic-region selection](op_specs/GRD-23A_select_color_region.md) | primitive / tile / D1_draft | `grade.select_color_region` | not_implemented |
 | [GRD-23B Adjust selected opponent colors](op_specs/GRD-23B_selective_opponent_adjust.md) | primitive / tile / D1_draft | `grade.selective_opponent_adjust` | not_implemented |
 | [GRD-23C Soft neutral-region selection](op_specs/GRD-23C_select_neutral_region.md) | primitive / tile / D1_draft | `grade.select_neutral_region` | not_implemented |
