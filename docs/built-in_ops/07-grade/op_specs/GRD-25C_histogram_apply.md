@@ -7,7 +7,7 @@ kind: primitive
 category: 07-grade
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented_cpu_fixed_abi_9
 clarification_status: complete
 execution: tile
 proposed_operation_keys:
@@ -22,7 +22,7 @@ Inherits the [family contract](GRD-25_histogram_equalize_contract.md) and [GRD c
 
 `feature: T[H,W]`, `map: Float64[B]`, `identity: UInt8[1]` -> `values: T[H,W]`.
 
-2<=B<=65536. Map is nondecreasing in [0,1]; identity is 0/1; edge=reject|clamp defaults clamp.
+2<=B<=65536 is inferred from map extent. Map is nondecreasing in [0,1]; identity is 0/1. Static `edge:String=reject|clamp` defaults clamp; `max_work:Int64` defaults to 9223372036854775807. There is no separate B parameter.
 
 Port ordering, tensor members, calculation dtype, channel selection, static parameter types and unchecked premises follow the common contract. Output shape and dtype are those in the signature.
 

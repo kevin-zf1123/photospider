@@ -7,7 +7,7 @@ kind: primitive
 category: 07-grade
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented_cpu_fixed_abi_9
 clarification_status: complete
 execution: tile
 proposed_operation_keys:
@@ -28,7 +28,7 @@ Port ordering, tensor members, calculation dtype, channel selection, static para
 
 ## Mathematics
 
-Calculate the histogram, CDF map and application using GRD-25A/B/C equations. Binary and weighted histograms retain their specified distinction.
+Calculate the histogram, CDF map and application using GRD-25A/B/C equations as `histogram -> histogram_cdf_map -> histogram_apply`. The statistical outputs and map are explicit temporary results reused by the requested application tiles in the same Run. Binary and weighted histograms retain their specified distinction.
 
 ## Behavior
 

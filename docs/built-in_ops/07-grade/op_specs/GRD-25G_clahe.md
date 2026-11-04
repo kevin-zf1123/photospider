@@ -7,7 +7,7 @@ kind: primitive
 category: 07-grade
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented_cpu_fixed_abi_9
 clarification_status: complete
 execution: tile
 proposed_operation_keys:
@@ -28,7 +28,7 @@ Port ordering, tensor members, calculation dtype, channel selection, static para
 
 ## Mathematics
 
-Generate local maps and apply them with GRD-25D/E equations. Both stages use the same declared logical cell geometry.
+Generate local maps and apply them with GRD-25D/E equations as `clahe_maps -> clahe_apply`. Maps and identity flags are explicit temporary results reused across requested application tiles in the same Run. Both stages use the same declared logical cell geometry; map generation has no metering-ROI parameters.
 
 ## Behavior
 

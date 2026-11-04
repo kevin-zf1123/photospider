@@ -7,7 +7,7 @@ kind: primitive
 category: 07-grade
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented_cpu_fixed_abi_9
 clarification_status: complete
 execution: tile
 proposed_operation_keys:
@@ -22,7 +22,7 @@ Inherits the [family contract](GRD-25_histogram_equalize_contract.md) and [GRD c
 
 `feature: T[H,W]`, `maps: Float64[Ty,Tx,B]`, `identity: UInt8[Ty,Tx]` -> `values: T[H,W]`.
 
-cell_width/cell_height, B and edge match GRD-25D. Shape extents obey its Tx/Ty formulas; maps are nondecreasing in [0,1], flags are 0/1.
+Static `cell_width:Int64=64`, `cell_height:Int64=64`, both >=1, and `edge:String=clamp|reject`, default clamp, match GRD-25D. B is inferred from the final maps extent, not supplied as a parameter. `max_work:Int64` defaults to 9223372036854775807. Shape extents obey GRD-25D Tx/Ty formulas; maps are nondecreasing in [0,1], flags are 0/1.
 
 Port ordering, tensor members, calculation dtype, channel selection, static parameter types and unchecked premises follow the common contract. Output shape and dtype are those in the signature.
 

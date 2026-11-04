@@ -133,13 +133,13 @@
 | [GRD-24G Automatic levels in CIELAB lightness](op_specs/GRD-24G_auto_levels_cielab_l.md) | primitive / tile / D1_draft | `grade.auto_levels_cielab_l`<br>`grade.auto_levels_cielab_l_statistics`<br>`grade.auto_levels_cielab_l_apply` | implemented_cpu_fixed_abi_9 |
 | [GRD-24H Automatic levels in OKLab lightness](op_specs/GRD-24H_auto_levels_oklab_l.md) | primitive / tile / D1_draft | `grade.auto_levels_oklab_l`<br>`grade.auto_levels_oklab_l_statistics`<br>`grade.auto_levels_oklab_l_apply` | implemented_cpu_fixed_abi_9 |
 | [GRD-24I Automatic per-channel levels](op_specs/GRD-24I_auto_levels_channels.md) | primitive / tile / D1_draft | `grade.auto_levels_channels`<br>`grade.auto_levels_channels_statistics`<br>`grade.auto_levels_channels_apply` | implemented_cpu_fixed_abi_9 |
-| [GRD-25A Selected histogram](op_specs/GRD-25A_histogram.md) | primitive / tile / D1_draft | `grade.histogram` | not_implemented |
-| [GRD-25B Histogram CDF mapping](op_specs/GRD-25B_histogram_cdf_map.md) | primitive / tile / D1_draft | `grade.histogram_cdf_map` | not_implemented |
-| [GRD-25C Apply a histogram map](op_specs/GRD-25C_histogram_apply.md) | primitive / tile / D1_draft | `grade.histogram_apply` | not_implemented |
-| [GRD-25D Generate local CLAHE maps](op_specs/GRD-25D_clahe_maps.md) | primitive / tile / D1_draft | `grade.clahe_maps` | not_implemented |
-| [GRD-25E Apply local CLAHE maps](op_specs/GRD-25E_clahe_apply.md) | primitive / tile / D1_draft | `grade.clahe_apply` | not_implemented |
-| [GRD-25F Complete histogram equalization](op_specs/GRD-25F_histogram_equalize.md) | primitive / tile / D1_draft | `grade.histogram_equalize` | not_implemented |
-| [GRD-25G Complete CLAHE](op_specs/GRD-25G_clahe.md) | primitive / tile / D1_draft | `grade.clahe` | not_implemented |
+| [GRD-25A Selected histogram](op_specs/GRD-25A_histogram.md) | primitive / tile / D1_draft | `grade.histogram` | implemented_cpu_fixed_abi_9 |
+| [GRD-25B Histogram CDF mapping](op_specs/GRD-25B_histogram_cdf_map.md) | primitive / tile / D1_draft | `grade.histogram_cdf_map` | implemented_cpu_fixed_abi_9 |
+| [GRD-25C Apply a histogram map](op_specs/GRD-25C_histogram_apply.md) | primitive / tile / D1_draft | `grade.histogram_apply` | implemented_cpu_fixed_abi_9 |
+| [GRD-25D Generate local CLAHE maps](op_specs/GRD-25D_clahe_maps.md) | primitive / tile / D1_draft | `grade.clahe_maps` | implemented_cpu_fixed_abi_9 |
+| [GRD-25E Apply local CLAHE maps](op_specs/GRD-25E_clahe_apply.md) | primitive / tile / D1_draft | `grade.clahe_apply` | implemented_cpu_fixed_abi_9 |
+| [GRD-25F Complete histogram equalization](op_specs/GRD-25F_histogram_equalize.md) | primitive / tile / D1_draft | `grade.histogram_equalize` | implemented_cpu_fixed_abi_9 |
+| [GRD-25G Complete CLAHE](op_specs/GRD-25G_clahe.md) | primitive / tile / D1_draft | `grade.clahe` | implemented_cpu_fixed_abi_9 |
 | [GRD-26A Generate an elliptical vignette EV field](op_specs/GRD-26A_vignette_ev.md) | primitive / tile / D1_draft | `grade.vignette_ev` | not_implemented |
 | [GRD-26B Apply an elliptical vignette](op_specs/GRD-26B_vignette.md) | primitive / tile / D1_draft | `grade.vignette` | not_implemented |
 | [GRD-27A ASC CDL forward with clamping](op_specs/GRD-27A_asc_cdl_fwd.md) | primitive / tile / D1_draft | `grade.asc_cdl_fwd` | not_implemented |

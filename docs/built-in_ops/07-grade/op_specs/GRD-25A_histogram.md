@@ -7,7 +7,7 @@ kind: primitive
 category: 07-grade
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented_cpu_fixed_abi_9
 clarification_status: complete
 execution: tile
 proposed_operation_keys:
@@ -22,7 +22,7 @@ Inherits the [family contract](GRD-25_histogram_equalize_contract.md) and [GRD c
 
 `feature: T[H,W]`, `selection: UInt8[H,W]` or `Float64[H,W]` -> `counts: Int64[B]` in binary mode or `Float64[B]` in weighted mode, `count: Int64[1]`, `mass: Float64[1]`.
 
-selection_mode=binary|weighted defaults binary. B:Int64 2..65536 default 256; ROI defaults full image; edge=reject|clamp defaults clamp. Selected feature domain is [0,1].
+selection_mode=binary|weighted defaults binary. B:Int64 2..65536 default 256; `roi_x0`, `roi_y0`, `roi_x1`, `roi_y1` are Int64 half-open coordinates defaulting to 0,0,W,H; `edge:String=reject|clamp` defaults clamp. `selection_mode` is String and `max_work:Int64` defaults to 9223372036854775807. Selected feature domain is [0,1].
 
 Port ordering, tensor members, calculation dtype, channel selection, static parameter types and unchecked premises follow the common contract. Output shape and dtype are those in the signature.
 

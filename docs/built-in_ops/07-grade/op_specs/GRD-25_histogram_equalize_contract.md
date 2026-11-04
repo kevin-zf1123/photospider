@@ -5,7 +5,7 @@ kind: shared_operator_contract
 category: 07-grade
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented_cpu_fixed_abi_9
 clarification_status: complete
 ---
 
@@ -28,6 +28,20 @@ Inherit [GRD common](GRD_common_contract.md) for port representation, native flo
 ## Shared mathematics and behavior
 
 Binary and weighted selection use [GRD-24](GRD-24_auto_adjust_contract.md). Feature inputs carry an explicit effective selection, including any alpha weighting constructed upstream. Binning is over [0,1] after the member edge rule. Output selection is independent of the statistical selection.
+
+### Static parameter vocabulary
+
+All members accept `max_work:Int64=9223372036854775807`. Their remaining static keys are:
+
+| Members | Static parameters |
+| --- | --- |
+| A/F | `selection_mode:String=binary|weighted`, default binary; `edge:String=clamp|reject`, default clamp; `B:Int64=256` in 2..65536; `roi_x0:Int64=0`, `roi_y0:Int64=0`, `roi_x1:Int64=W`, `roi_y1:Int64=H` |
+| B | `selection_mode:String=binary|weighted`, default binary |
+| C | `edge:String=clamp|reject`, default clamp |
+| D/G | `selection_mode`, `edge`, `B` as above; `cell_width:Int64=64`, `cell_height:Int64=64`, both >=1; `clip_factor:Float64=2`, >=1 |
+| E | `edge`, `cell_width`, `cell_height` as above |
+
+B/C/E infer B from the input vector/map extent. D/G have no metering-ROI parameters; each requested logical cell uses its complete source rectangle. A/F metering coordinates are half-open and may be empty.
 
 ### CLAHE clipping and redistribution
 

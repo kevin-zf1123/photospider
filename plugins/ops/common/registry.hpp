@@ -21,6 +21,7 @@ Status register_grade_local(OperationRegistry* registry);
 Status register_grade_feature_curves(OperationRegistry* registry);
 Status register_grade_chromatic(OperationRegistry* registry);
 Status register_grade_auto_adjust(OperationRegistry* registry);
+Status register_grade_histogram(OperationRegistry* registry);
 Status register_vector_lut(OperationRegistry* registry);
 Status register_fast_curves(OperationRegistry* registry);
 Status register_fast_sampling(OperationRegistry* registry);
