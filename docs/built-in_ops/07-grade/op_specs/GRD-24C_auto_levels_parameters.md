@@ -7,7 +7,7 @@ kind: primitive
 category: 07-grade
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented_cpu_fixed_abi_9
 clarification_status: complete
 execution: tile
 proposed_operation_keys:
@@ -22,7 +22,7 @@ Inherits the [family contract](GRD-24_auto_adjust_contract.md) and [GRD common c
 
 `quantiles: Float64[2]` [low,high], `count: Int64[1]` -> `controls: Float64[1,5]`, `state: UInt8[1]`.
 
-Static gamma:Float64>0 default 1; out0,out1:Float64 default 0,1. Quantiles are ordered low<=high.
+Static gamma:Float64>0 default 1; out0,out1:Float64 default 0,1. Quantiles are ordered low<=high. `max_work:Int64` defaults to 9223372036854775807.
 
 Port ordering, tensor members, calculation dtype, channel selection, static parameter types and unchecked premises follow the common contract. Output shape and dtype are those in the signature.
 

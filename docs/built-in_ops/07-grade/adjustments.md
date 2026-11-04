@@ -10,6 +10,7 @@
 - [GRD-05 亮度曲线](op_specs/GRD-05_curves_contract.md)的描述式输入要求相对线性 RGB，接受 `scene`、`display`、`scene_relative`、`display_relative` reference；单位为 `1` 或 `relative`，显式尺度须为 `relative`。
 - CIELAB 明度存储为 l=L*/100，OKLab 使用原生 L。线性 Y、l、L 是不同坐标；亮度调整有 RGB 同比缩放、XYZ 只改 Y、CIELAB 只改 l、OKLab 只改 L 四个独立路径。
 - 统计默认使用二值选区，完整图像自动调整默认排除 alpha=0；软选区及 alpha 加权显式启用。统计选区与效果混合 mask 独立。
+- [GRD-24 G/H 原生根 profile](op_specs/GRD-24_auto_adjust_contract.md#shared-mathematics-and-behavior)规定逐样本确定的立方根序列；特征、统计、坐标和独立 helper 使用相同序列，当前发布的 Float64 特征确定精确秩与行优先平局。连续误差标准、copy 位保留及其他族的数值 profile 保持各自定义。
 - [GRD-21A 当前原生 profile](op_specs/GRD-21A_saturation_linear.md#mathematics)允许在保守控制系数界内预计算 Float64 饱和度的显式 FMA 序列，scale=1、中性三元组和旁路组件仍逐位复制；连续值沿用共享容差。
 - [GRD-22B RGB 色轮](op_specs/GRD-22B_color_wheels_rgb.md#mathematics)仅在原始加权 EV 和 offset 两个和都为零时位复制；归一化下溢为零仍执行 gain、乘法、加法。批量原生 gain 沿用公共容差，极端值和强抵消按原顺序回退。
 - 效果强度、软 mask 混合与色域映射通过显式算子组合。
@@ -123,15 +124,15 @@
 | [GRD-23A Soft chromatic-region selection](op_specs/GRD-23A_select_color_region.md) | primitive / tile / D1_draft | `grade.select_color_region` | implemented_cpu_fixed_abi_9 |
 | [GRD-23B Adjust selected opponent colors](op_specs/GRD-23B_selective_opponent_adjust.md) | primitive / tile / D1_draft | `grade.selective_opponent_adjust` | implemented_cpu_fixed_abi_9 |
 | [GRD-23C Soft neutral-region selection](op_specs/GRD-23C_select_neutral_region.md) | primitive / tile / D1_draft | `grade.select_neutral_region` | implemented_cpu_fixed_abi_9 |
-| [GRD-24A Quantiles of a selected feature](op_specs/GRD-24A_selected_quantiles.md) | primitive / tile / D1_draft | `grade.selected_quantiles` | not_implemented |
-| [GRD-24B Derive automatic-exposure parameters](op_specs/GRD-24B_auto_exposure_parameters.md) | primitive / tile / D1_draft | `grade.auto_exposure_parameters` | not_implemented |
-| [GRD-24C Derive automatic-levels parameters](op_specs/GRD-24C_auto_levels_parameters.md) | primitive / tile / D1_draft | `grade.auto_levels_parameters` | not_implemented |
-| [GRD-24D Automatic exposure of a single image](op_specs/GRD-24D_auto_exposure.md) | primitive / tile / D1_draft | `grade.auto_exposure` | not_implemented |
-| [GRD-24E Automatic levels in Proportional RGB luminance](op_specs/GRD-24E_auto_levels.md) | primitive / tile / D1_draft | `grade.auto_levels` | not_implemented |
-| [GRD-24F Automatic levels in XYZ Y](op_specs/GRD-24F_auto_levels_xyz_y.md) | primitive / tile / D1_draft | `grade.auto_levels_xyz_y` | not_implemented |
-| [GRD-24G Automatic levels in CIELAB lightness](op_specs/GRD-24G_auto_levels_cielab_l.md) | primitive / tile / D1_draft | `grade.auto_levels_cielab_l` | not_implemented |
-| [GRD-24H Automatic levels in OKLab lightness](op_specs/GRD-24H_auto_levels_oklab_l.md) | primitive / tile / D1_draft | `grade.auto_levels_oklab_l` | not_implemented |
-| [GRD-24I Automatic per-channel levels](op_specs/GRD-24I_auto_levels_channels.md) | primitive / tile / D1_draft | `grade.auto_levels_channels` | not_implemented |
+| [GRD-24A Quantiles of a selected feature](op_specs/GRD-24A_selected_quantiles.md) | primitive / tile / D1_draft | `grade.selected_quantiles` | implemented_cpu_fixed_abi_9 |
+| [GRD-24B Derive automatic-exposure parameters](op_specs/GRD-24B_auto_exposure_parameters.md) | primitive / tile / D1_draft | `grade.auto_exposure_parameters` | implemented_cpu_fixed_abi_9 |
+| [GRD-24C Derive automatic-levels parameters](op_specs/GRD-24C_auto_levels_parameters.md) | primitive / tile / D1_draft | `grade.auto_levels_parameters` | implemented_cpu_fixed_abi_9 |
+| [GRD-24D Automatic exposure of a single image](op_specs/GRD-24D_auto_exposure.md) | primitive / tile / D1_draft | `grade.auto_exposure`<br>`grade.auto_exposure_statistics`<br>`grade.auto_exposure_apply` | implemented_cpu_fixed_abi_9 |
+| [GRD-24E Automatic levels in Proportional RGB luminance](op_specs/GRD-24E_auto_levels.md) | primitive / tile / D1_draft | `grade.auto_levels`<br>`grade.auto_levels_statistics`<br>`grade.auto_levels_apply` | implemented_cpu_fixed_abi_9 |
+| [GRD-24F Automatic levels in XYZ Y](op_specs/GRD-24F_auto_levels_xyz_y.md) | primitive / tile / D1_draft | `grade.auto_levels_xyz_y`<br>`grade.auto_levels_xyz_y_statistics`<br>`grade.auto_levels_xyz_y_apply` | implemented_cpu_fixed_abi_9 |
+| [GRD-24G Automatic levels in CIELAB lightness](op_specs/GRD-24G_auto_levels_cielab_l.md) | primitive / tile / D1_draft | `grade.auto_levels_cielab_l`<br>`grade.auto_levels_cielab_l_statistics`<br>`grade.auto_levels_cielab_l_apply` | implemented_cpu_fixed_abi_9 |
+| [GRD-24H Automatic levels in OKLab lightness](op_specs/GRD-24H_auto_levels_oklab_l.md) | primitive / tile / D1_draft | `grade.auto_levels_oklab_l`<br>`grade.auto_levels_oklab_l_statistics`<br>`grade.auto_levels_oklab_l_apply` | implemented_cpu_fixed_abi_9 |
+| [GRD-24I Automatic per-channel levels](op_specs/GRD-24I_auto_levels_channels.md) | primitive / tile / D1_draft | `grade.auto_levels_channels`<br>`grade.auto_levels_channels_statistics`<br>`grade.auto_levels_channels_apply` | implemented_cpu_fixed_abi_9 |
 | [GRD-25A Selected histogram](op_specs/GRD-25A_histogram.md) | primitive / tile / D1_draft | `grade.histogram` | not_implemented |
 | [GRD-25B Histogram CDF mapping](op_specs/GRD-25B_histogram_cdf_map.md) | primitive / tile / D1_draft | `grade.histogram_cdf_map` | not_implemented |
 | [GRD-25C Apply a histogram map](op_specs/GRD-25C_histogram_apply.md) | primitive / tile / D1_draft | `grade.histogram_apply` | not_implemented |

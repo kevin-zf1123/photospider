@@ -29,6 +29,7 @@ Status register_builtin_operations(OperationRegistry* registry) {
                               register_grade_local,
                               register_grade_feature_curves,
                               register_grade_chromatic,
+                              register_grade_auto_adjust,
                               register_vector_lut,
                               register_fast_curves,
                               register_fast_sampling,

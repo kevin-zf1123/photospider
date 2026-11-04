@@ -7,7 +7,7 @@ kind: primitive
 category: 07-grade
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented_cpu_fixed_abi_9
 clarification_status: complete
 execution: tile
 proposed_operation_keys:
@@ -22,7 +22,7 @@ Inherits the [family contract](GRD-24_auto_adjust_contract.md) and [GRD common c
 
 `feature: T[H,W]`, `selection: UInt8[H,W]` in binary mode or `Float64[H,W]` in weighted mode, `probabilities: Float64[K]` -> `quantiles: Float64[K]`, `count: Int64[1]`, `mass: Float64[1]`.
 
-1<=K<=64; probabilities in [0,1]. Static selection_mode=binary|weighted defaults binary; ROI defaults the full image. Selected weights follow the family contract.
+1<=K<=64; probabilities in [0,1]. Static `selection_mode:String=binary|weighted` defaults binary; `roi_x0`, `roi_y0`, `roi_x1`, `roi_y1` are Int64 half-open coordinates defaulting to 0,0,W,H. `max_work:Int64` defaults to 9223372036854775807. Selected weights follow the family contract.
 
 Port ordering, tensor members, calculation dtype, channel selection, static parameter types and unchecked premises follow the common contract. Output shape and dtype are those in the signature.
 
