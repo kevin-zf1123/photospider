@@ -120,9 +120,9 @@
 | [GRD-21C OKLab vibrance](op_specs/GRD-21C_vibrance_oklab.md) | primitive / tile / D1_draft | `grade.vibrance_oklab` | implemented_cpu_fixed_abi_9 |
 | [GRD-22A Tonal opponent-color tinting](op_specs/GRD-22A_split_tone_opponent.md) | primitive / tile / D1_draft | `grade.split_tone_opponent` | implemented_cpu_fixed_abi_9 |
 | [GRD-22B RGB tonal wheels](op_specs/GRD-22B_color_wheels_rgb.md) | primitive / tile / D1_draft | `grade.color_wheels_rgb` | implemented_cpu_fixed_abi_9 |
-| [GRD-23A Soft chromatic-region selection](op_specs/GRD-23A_select_color_region.md) | primitive / tile / D1_draft | `grade.select_color_region` | not_implemented |
-| [GRD-23B Adjust selected opponent colors](op_specs/GRD-23B_selective_opponent_adjust.md) | primitive / tile / D1_draft | `grade.selective_opponent_adjust` | not_implemented |
-| [GRD-23C Soft neutral-region selection](op_specs/GRD-23C_select_neutral_region.md) | primitive / tile / D1_draft | `grade.select_neutral_region` | not_implemented |
+| [GRD-23A Soft chromatic-region selection](op_specs/GRD-23A_select_color_region.md) | primitive / tile / D1_draft | `grade.select_color_region` | implemented_cpu_fixed_abi_9 |
+| [GRD-23B Adjust selected opponent colors](op_specs/GRD-23B_selective_opponent_adjust.md) | primitive / tile / D1_draft | `grade.selective_opponent_adjust` | implemented_cpu_fixed_abi_9 |
+| [GRD-23C Soft neutral-region selection](op_specs/GRD-23C_select_neutral_region.md) | primitive / tile / D1_draft | `grade.select_neutral_region` | implemented_cpu_fixed_abi_9 |
 | [GRD-24A Quantiles of a selected feature](op_specs/GRD-24A_selected_quantiles.md) | primitive / tile / D1_draft | `grade.selected_quantiles` | not_implemented |
 | [GRD-24B Derive automatic-exposure parameters](op_specs/GRD-24B_auto_exposure_parameters.md) | primitive / tile / D1_draft | `grade.auto_exposure_parameters` | not_implemented |
 | [GRD-24C Derive automatic-levels parameters](op_specs/GRD-24C_auto_levels_parameters.md) | primitive / tile / D1_draft | `grade.auto_levels_parameters` | not_implemented |

@@ -7,7 +7,7 @@ kind: primitive
 category: 07-grade
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented_cpu_fixed_abi_9
 clarification_status: complete
 execution: tile
 proposed_operation_keys:
@@ -29,6 +29,8 @@ Port ordering, tensor members, calculation dtype, channel selection, static para
 ## Mathematics
 
 C=hypot(a,b). c_weight=1-smooth((C-c_inner)/(c_outer-c_inner)); l_weight=smooth((L-l0)/(l1-l0))*(1-smooth((L-l2)/(l3-l2))). Return c_weight*l_weight. Setting the lightness plateau around dark, middle or bright values selects black, gray or white regions respectively.
+
+The native profile compares exact binary64 squared chroma with squared thresholds near endpoints and in narrow transitions. Interior transition coordinates use the rationalized difference `(a*a+b*b-c_inner*c_inner)/((hypot(a,b)+c_inner)*(c_outer-c_inner))` with scaled evaluation. This preserves mathematical inner/outer endpoints without magnifying a rounded hypot error into a full mask transition.
 
 ## Behavior
 

@@ -7,7 +7,7 @@ kind: primitive
 category: 07-grade
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented_cpu_fixed_abi_9
 clarification_status: complete
 execution: tile
 proposed_operation_keys:
@@ -22,7 +22,7 @@ Inherits the [family contract](GRD-23_selective_color_contract.md) and [GRD comm
 
 `input: T[S,C]`, `weights: Float64[S,K]`, `deltas: Float64[K,3]` [dL,da,db] -> `values: T[S,C]`.
 
-Select CIELAB or OKLab. 1<=K<=256; weights in [0,1]. overlap=sum|normalize, default normalize.
+Select CIELAB or OKLab. 1<=K<=256; weights in [0,1]. overlap:String=sum|normalize, default normalize.
 
 Port ordering, tensor members, calculation dtype, channel selection, static parameter types and unchecked premises follow the common contract. Output shape and dtype are those in the signature.
 

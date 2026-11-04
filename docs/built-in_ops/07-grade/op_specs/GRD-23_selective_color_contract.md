@@ -5,7 +5,7 @@ kind: shared_operator_contract
 category: 07-grade
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented_cpu_fixed_abi_9
 clarification_status: complete
 ---
 
@@ -20,6 +20,10 @@ Inherit [GRD common](GRD_common_contract.md) for port representation, native flo
 | [GRD-23A](GRD-23A_select_color_region.md) | Soft chromatic-region selection | `grade.select_color_region` |
 | [GRD-23B](GRD-23B_selective_opponent_adjust.md) | Adjust selected opponent colors | `grade.selective_opponent_adjust` |
 | [GRD-23C](GRD-23C_select_neutral_region.md) | Soft neutral-region selection | `grade.select_neutral_region` |
+
+## Static parameter encoding
+
+Color selectors and `max_work` use the [GRD-21 parameter encoding](GRD-21_saturation_contract.md#static-parameter-encoding). GRD-23B additionally accepts `overlap:String=normalize|sum`, default `normalize`. Hue units for GRD-23A may be resolved from the selected description; an explicit `hue_unit` asserts agreement. Raw polar coordinates require explicit `hue_unit=pi_multiple`.
 
 ## Shared mathematics and behavior
 
