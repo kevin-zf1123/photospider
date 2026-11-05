@@ -109,8 +109,8 @@
 | [CMP-06B Destination atop in linear RGB/Gray](op_specs/CMP-06B_destination_atop_linear.md) | primitive / tile / D1_draft | `composite.destination_atop_linear` | implemented |
 | [CMP-06C Source atop in encoded RGB/Gray](op_specs/CMP-06C_source_atop_encoded.md) | primitive / tile / D1_draft | `composite.source_atop_encoded` | implemented |
 | [CMP-06D Destination atop in encoded RGB/Gray](op_specs/CMP-06D_destination_atop_encoded.md) | primitive / tile / D1_draft | `composite.destination_atop_encoded` | implemented |
-| [CMP-07A Xor in linear RGB/Gray](op_specs/CMP-07A_xor_linear.md) | primitive / tile / D1_draft | `composite.xor_linear` | not_implemented |
-| [CMP-07B Xor in encoded RGB/Gray](op_specs/CMP-07B_xor_encoded.md) | primitive / tile / D1_draft | `composite.xor_encoded` | not_implemented |
+| [CMP-07A Xor in linear RGB/Gray](op_specs/CMP-07A_xor_linear.md) | primitive / tile / D1_draft | `composite.xor_linear` | implemented |
+| [CMP-07B Xor in encoded RGB/Gray](op_specs/CMP-07B_xor_encoded.md) | primitive / tile / D1_draft | `composite.xor_encoded` | implemented |
 | [CMP-08A Plus raw in linear RGB/Gray](op_specs/CMP-08A_plus_raw_linear.md) | primitive / tile / D1_draft | `composite.plus_raw_linear` | not_implemented |
 | [CMP-08B Plus lighter bounded in linear RGB/Gray](op_specs/CMP-08B_plus_lighter_bounded_linear.md) | primitive / tile / D1_draft | `composite.plus_lighter_bounded_linear` | not_implemented |
 | [CMP-08C Plus raw in encoded RGB/Gray](op_specs/CMP-08C_plus_raw_encoded.md) | primitive / tile / D1_draft | `composite.plus_raw_encoded` | not_implemented |
