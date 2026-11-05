@@ -451,10 +451,17 @@ namespace ps::plugin_internal {
 Status register_coverage(OperationRegistry* registry) {
   using coverage::Kind;
   using coverage::operation;
-  for (auto op : {
-      operation<Kind::Clear>("composite.clear"),
-      operation<Kind::Source>("composite.source"),
-      operation<Kind::Destination>("composite.destination")}) {
+  for (auto op :
+       {operation<Kind::Clear>("composite.clear"),
+        operation<Kind::Source>("composite.source"),
+        operation<Kind::Destination>("composite.destination"),
+#define PS_CMP(K, KEY)                            \
+  operation<Kind::K>("composite." KEY "_linear"), \
+      operation<Kind::K>("composite." KEY "_encoded", true)
+        PS_CMP(SourceOver, "source_over"),
+        PS_CMP(DestinationOver, "destination_over"),
+        PS_CMP(BlendedOver, "source_over_blended_color")}) {
+#undef PS_CMP
     const auto status = registry->register_operation(std::move(op));
     if (!status.ok())
       return status;
