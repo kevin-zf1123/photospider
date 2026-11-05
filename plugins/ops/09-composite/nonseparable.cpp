@@ -360,8 +360,10 @@ Status register_nonseparable(OperationRegistry* registry) {
         operation<Kind::ChromaPreserve>(false,
                                         "blend.chroma_oklab_preserve_gray"),
         operation<Kind::ChromaSource>(true, "blend.chroma_lab_source_hue"),
-        operation<Kind::ChromaSource>(false,
-                                      "blend.chroma_oklab_source_hue")}) {
+        operation<Kind::ChromaSource>(false, "blend.chroma_oklab_source_hue"),
+        operation<Kind::Color>(true, "blend.color_lab"),
+        operation<Kind::Color>(false, "blend.color_oklab"),
+        operation<Kind::ColorW3c>(false, "blend.color_w3c")}) {
     const auto status = registry->register_operation(std::move(op));
     if (!status.ok())
       return status;
