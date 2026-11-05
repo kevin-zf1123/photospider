@@ -101,10 +101,10 @@
 | [CMP-04B Destination in in linear RGB/Gray](op_specs/CMP-04B_destination_in_linear.md) | primitive / tile / D1_draft | `composite.destination_in_linear` | implemented |
 | [CMP-04C Source in in encoded RGB/Gray](op_specs/CMP-04C_source_in_encoded.md) | primitive / tile / D1_draft | `composite.source_in_encoded` | implemented |
 | [CMP-04D Destination in in encoded RGB/Gray](op_specs/CMP-04D_destination_in_encoded.md) | primitive / tile / D1_draft | `composite.destination_in_encoded` | implemented |
-| [CMP-05A Source out in linear RGB/Gray](op_specs/CMP-05A_source_out_linear.md) | primitive / tile / D1_draft | `composite.source_out_linear` | not_implemented |
-| [CMP-05B Destination out in linear RGB/Gray](op_specs/CMP-05B_destination_out_linear.md) | primitive / tile / D1_draft | `composite.destination_out_linear` | not_implemented |
-| [CMP-05C Source out in encoded RGB/Gray](op_specs/CMP-05C_source_out_encoded.md) | primitive / tile / D1_draft | `composite.source_out_encoded` | not_implemented |
-| [CMP-05D Destination out in encoded RGB/Gray](op_specs/CMP-05D_destination_out_encoded.md) | primitive / tile / D1_draft | `composite.destination_out_encoded` | not_implemented |
+| [CMP-05A Source out in linear RGB/Gray](op_specs/CMP-05A_source_out_linear.md) | primitive / tile / D1_draft | `composite.source_out_linear` | implemented |
+| [CMP-05B Destination out in linear RGB/Gray](op_specs/CMP-05B_destination_out_linear.md) | primitive / tile / D1_draft | `composite.destination_out_linear` | implemented |
+| [CMP-05C Source out in encoded RGB/Gray](op_specs/CMP-05C_source_out_encoded.md) | primitive / tile / D1_draft | `composite.source_out_encoded` | implemented |
+| [CMP-05D Destination out in encoded RGB/Gray](op_specs/CMP-05D_destination_out_encoded.md) | primitive / tile / D1_draft | `composite.destination_out_encoded` | implemented |
 | [CMP-06A Source atop in linear RGB/Gray](op_specs/CMP-06A_source_atop_linear.md) | primitive / tile / D1_draft | `composite.source_atop_linear` | not_implemented |
 | [CMP-06B Destination atop in linear RGB/Gray](op_specs/CMP-06B_destination_atop_linear.md) | primitive / tile / D1_draft | `composite.destination_atop_linear` | not_implemented |
 | [CMP-06C Source atop in encoded RGB/Gray](op_specs/CMP-06C_source_atop_encoded.md) | primitive / tile / D1_draft | `composite.source_atop_encoded` | not_implemented |
