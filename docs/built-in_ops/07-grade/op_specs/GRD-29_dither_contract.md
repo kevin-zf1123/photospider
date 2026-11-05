@@ -5,7 +5,7 @@ kind: shared_operator_contract
 category: 07-grade
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented
 clarification_status: complete
 ---
 
@@ -43,6 +43,36 @@ For E/F consider each pair of indices i<j with distinct OKLab vectors P_i,P_j. C
 
 Palette generation, RNG generation, storage quantization and packed file output are independent operations. The color space and error-vector definitions here specify the image effect; they do not imply a particular search data structure.
 
+
+## Current parameter encoding
+
+Color selectors use `axis:Int64` with ordered, distinct `components:String` indices, or `input_description:String` with `group:String`. The axis is relative to the cell descriptor before any batch prefix. The shared work parameter is `max_work:Int64`, default 9223372036854775807. See [static selector encoding](GRD-21_saturation_contract.md#static-parameter-encoding).
+
+Fixed static arrays use comma-separated String values in the declared row-major order, without brackets. Float64 entries use decimal numeric text; Int64 entries use signed decimal integers. Their declared lengths are checked during static preparation. Dynamic tensors in member signatures remain required ordered input ports.
+
+These members process one two-dimensional image. The selected component axis may vary; explicit noise remains in logical y,x,selected-component order.
+
+| Member | Parameter | Current type and default |
+| --- | --- | --- |
+| All | origin_x / origin_y | Int64 / Int64, 0 / 0; global image origin |
+| A/B/C/D | levels | Int64, 2; legal range 2..65536 |
+| A/B/C/D | edge | String, clamp; clamp or reject |
+| A | order | Int64, 2; legal range 1..8 |
+| A/D/E | origin | String, 0,0; two Int64 pattern-origin coordinates |
+| A/D | channel_phase | String; 2*Csel Int64 entries, omitted means all zero |
+| C/G | scan | String, serpentine; serpentine or raster |
+
+Each channel-phase pair is phase_x,phase_y in selected-component order. Pattern coordinates are global image origin plus logical pixel coordinate minus pattern origin plus channel phase. E has no channel phase.
+
+E/F/G select complete relative linear RGB. Raw mode declares a resolvable source_basis:String; semantic mode resolves the basis and white from its description, and explicit basis assertions must agree. Palette is a dynamic matching-dtype T[K,3] tensor. Its original row order and source bits define output palette identity.
+
+## Current native arithmetic and prototype
+
+Uniform quantization follows the common calculation-dtype rule. Bayer and authored-map thresholds are Float64. B uses Float32 intermediates only when both source and noise are Float32; either Float64 operand promotes the arithmetic to Float64. The threshold comparison remains strict. C/G use the explicitly ordered Float64 recurrence, including reconstruction, residual, weighted contribution and error-state additions.
+
+C evaluates one canonical full-image recurrence for each requested selected component and publishes the retained output tiles. G prepares its Float64 OKLab palette once and evaluates one canonical vector-error recurrence for the retained request. Scan state is not reset at tile boundaries.
+
+E/F prepare the palette's Float64 OKLab tuples and ordered candidate segments once for the current evaluation and share them across retained output tiles. Their source dependence remains elementwise plus the palette and corresponding threshold/noise support. No dynamic palette state is retained for a later evaluation with different inputs. Selection preserves the specified pair/point tie order and copies original palette RGB bits.
 
 ## References and acceptance
 
