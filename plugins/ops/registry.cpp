@@ -32,6 +32,7 @@ Status register_builtin_operations(OperationRegistry* registry) {
                               register_grade_auto_adjust,
                               register_grade_histogram,
                               register_grade_vignette_cdl,
+                              register_grade_warper,
                               register_vector_lut,
                               register_fast_curves,
                               register_fast_sampling,

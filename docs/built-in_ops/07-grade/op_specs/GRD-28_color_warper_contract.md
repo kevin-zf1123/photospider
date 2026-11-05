@@ -5,7 +5,7 @@ kind: shared_operator_contract
 category: 07-grade
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented
 clarification_status: complete
 ---
 
@@ -27,6 +27,26 @@ Bilinear mesh displacement is added to the original coordinates. edge=clamp hold
 
 For topology=positive_jacobian, define the map F(q)=q+d(q) in each cell's physical coordinate units. Require det(dF/dq)>0 at all four corners of every cell. A bilinear displacement map has a determinant affine in the cell coordinates, so these corner conditions guarantee positive local orientation inside that cell. The periodic hue member includes the closing cell in an unwrapped hue coordinate. This is an input-mesh premise, not a required runtime validator. topology=allow is the default and permits local folding. Neither mode asserts global one-to-one mapping or an inverse operator.
 
+
+## Current parameter encoding
+
+Color selectors use `axis:Int64` with ordered, distinct `components:String` indices, or `input_description:String` with `group:String`. The axis is relative to the cell descriptor before any batch prefix. The shared work parameter is `max_work:Int64`, default 9223372036854775807. See [static selector encoding](GRD-21_saturation_contract.md#static-parameter-encoding).
+
+Fixed static arrays use comma-separated String values in the declared row-major order, without brackets. Float64 entries use decimal numeric text; Int64 entries use signed decimal integers. Their declared lengths are checked during static preparation. Dynamic tensors in member signatures remain required ordered input ports.
+
+| Parameter | Current type | Values / default |
+| --- | --- | --- |
+| model | String | Required in raw mode: cielab or oklab for A; cielch or oklch for B/C |
+| hue_unit | String | B requires pi_multiple; C preserves the original legal hue unit |
+| edge | String | clamp (default) or reject |
+| topology | String | allow (default) or positive_jacobian |
+| boundary | String | A only: free (default) or pinned_zero |
+
+Semantic model/unit assertions must agree with the selected group. Axis vectors and displacement remain the three ordered dynamic Float64 controls. The source follows the common rank and batch rules, with an arbitrary component axis.
+
+## Current native prototype
+
+Each query locates its cell on the declared axes and evaluates the two bilinear displacements from four vertices in Float64. Clamping changes lookup coordinates only. GRD-28B closes the last hue cell at two and adds displacement to the original hue, retaining its winding. Near chroma cancellation, the equivalent convex interpolation of mapped vertex chroma restores any clamped-coordinate excess. Zero displacement preserves source bits. A/B lightness and C hue remain independent bypass coordinates.
 
 ## References and acceptance
 
