@@ -77,12 +77,12 @@
 | [BLN-15B Exclusion](op_specs/BLN-15B_exclusion.md) | primitive / tile / D1_draft | `blend.exclusion` | implemented |
 | [BLN-16A Hard mix vivid](op_specs/BLN-16A_hard_mix_vivid.md) | primitive / tile / D1_draft | `blend.hard_mix_vivid` | implemented |
 | [BLN-16B Hard mix sum](op_specs/BLN-16B_hard_mix_sum.md) | primitive / tile / D1_draft | `blend.hard_mix_sum` | implemented |
-| [BLN-17A Darker whole color by linear_y](op_specs/BLN-17A_darker_color_linear_y.md) | primitive / tile / D1_draft | `blend.darker_color_linear_y` | not_implemented |
-| [BLN-17B Lighter whole color by linear_y](op_specs/BLN-17B_lighter_color_linear_y.md) | primitive / tile / D1_draft | `blend.lighter_color_linear_y` | not_implemented |
-| [BLN-17C Darker whole color by oklab_l](op_specs/BLN-17C_darker_color_oklab_l.md) | primitive / tile / D1_draft | `blend.darker_color_oklab_l` | not_implemented |
-| [BLN-17D Lighter whole color by oklab_l](op_specs/BLN-17D_lighter_color_oklab_l.md) | primitive / tile / D1_draft | `blend.lighter_color_oklab_l` | not_implemented |
-| [BLN-17E Darker whole color by cielab_l](op_specs/BLN-17E_darker_color_cielab_l.md) | primitive / tile / D1_draft | `blend.darker_color_cielab_l` | not_implemented |
-| [BLN-17F Lighter whole color by cielab_l](op_specs/BLN-17F_lighter_color_cielab_l.md) | primitive / tile / D1_draft | `blend.lighter_color_cielab_l` | not_implemented |
+| [BLN-17A Darker whole color by linear_y](op_specs/BLN-17A_darker_color_linear_y.md) | primitive / tile / D1_draft | `blend.darker_color_linear_y` | implemented |
+| [BLN-17B Lighter whole color by linear_y](op_specs/BLN-17B_lighter_color_linear_y.md) | primitive / tile / D1_draft | `blend.lighter_color_linear_y` | implemented |
+| [BLN-17C Darker whole color by oklab_l](op_specs/BLN-17C_darker_color_oklab_l.md) | primitive / tile / D1_draft | `blend.darker_color_oklab_l` | implemented |
+| [BLN-17D Lighter whole color by oklab_l](op_specs/BLN-17D_lighter_color_oklab_l.md) | primitive / tile / D1_draft | `blend.lighter_color_oklab_l` | implemented |
+| [BLN-17E Darker whole color by cielab_l](op_specs/BLN-17E_darker_color_cielab_l.md) | primitive / tile / D1_draft | `blend.darker_color_cielab_l` | implemented |
+| [BLN-17F Lighter whole color by cielab_l](op_specs/BLN-17F_lighter_color_cielab_l.md) | primitive / tile / D1_draft | `blend.lighter_color_cielab_l` | implemented |
 | [BLN-18A Seeded coverage dissolve](op_specs/BLN-18A_dissolve_counter64.md) | primitive / tile / D1_draft | `blend.dissolve_counter64` | not_implemented |
 | [BLN-19A Add a linear color signal with retained alpha](op_specs/BLN-19A_emission_add_straight.md) | primitive / tile / D1_draft | `blend.emission_add_straight` | not_implemented |
 | [BLN-20A Coverage-weighted image interpolation in linear coordinates](op_specs/BLN-20A_premul_mix_straight_linear.md) | primitive / tile / D1_draft | `blend.premul_mix_straight_linear` | not_implemented |

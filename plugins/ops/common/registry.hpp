@@ -4,6 +4,7 @@
 
 namespace ps::plugin_internal {
 Status register_blend(OperationRegistry* registry);
+Status register_blend_composite(OperationRegistry* registry);
 Status register_grade_exposure(OperationRegistry* registry);
 Status register_grade_affine(OperationRegistry* registry);
 Status register_grade_contrast(OperationRegistry* registry);

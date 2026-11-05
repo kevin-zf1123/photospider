@@ -5,7 +5,7 @@ kind: primitive
 category: 09-composite
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented
 clarification_status: complete
 parent_id: BLN-17
 function: darker_color_oklab_l
@@ -29,6 +29,9 @@ Port order, tensor members, static selectors and output representation follow CO
 ## Mathematics
 
 Use the stored first coordinate of each native model tuple. Select the complete background tuple when its measure is <= the source measure; otherwise select the complete source tuple. Ties select background. Selection copies the original tuple bits.
+
+The [current implementation profile](BLN_color_function_contract.md#current-bln-11-through-bln-20-profile)
+specifies the native arithmetic stages, exact decisions, parameters and prototype.
 
 ## Behavior
 

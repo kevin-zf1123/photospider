@@ -47,6 +47,7 @@ endif()
 
 set(PHOTOSPIDER_OPERATION_SOURCES
   plugins/ops/09-composite/blend.cpp
+  plugins/ops/09-composite/blend_composite.cpp
   plugins/ops/07-grade/exposure.cpp
   plugins/ops/07-grade/affine.cpp
   plugins/ops/07-grade/contrast.cpp
@@ -315,12 +316,14 @@ int main() { return 0; }" PHOTOSPIDER_COMPILER_HAS_BLEND_SME_F64)
     set_source_files_properties(plugins/ops/09-composite/blend_sme.cpp PROPERTIES
       COMPILE_OPTIONS "-march=armv8-a+sme;-fno-fast-math;-frounding-math;-ffp-contract=off")
     set_property(SOURCE plugins/ops/09-composite/blend.cpp
+      plugins/ops/09-composite/blend_composite.cpp
       plugins/ops/09-composite/blend_sme.cpp APPEND PROPERTY
       COMPILE_DEFINITIONS PHOTOSPIDER_HAS_BLEND_SME=1)
     if(PHOTOSPIDER_COMPILER_HAS_BLEND_SME_F64)
       set_property(SOURCE plugins/ops/09-composite/blend_sme.cpp APPEND PROPERTY
         COMPILE_OPTIONS "-march=armv8-a+sme+sme-f64f64")
       set_property(SOURCE plugins/ops/09-composite/blend.cpp
+        plugins/ops/09-composite/blend_composite.cpp
         plugins/ops/09-composite/blend_sme.cpp APPEND PROPERTY
         COMPILE_DEFINITIONS PHOTOSPIDER_HAS_BLEND_SME_F64=1)
     endif()
