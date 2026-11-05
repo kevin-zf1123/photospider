@@ -5,7 +5,7 @@ kind: primitive
 category: 09-composite
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented
 clarification_status: complete
 parent_id: BLN-20
 function: premul_mix_straight_linear
@@ -29,6 +29,9 @@ Port order, tensor members, static selectors and output representation follow CO
 ## Mathematics
 
 For t=mix, t=0 copies first and t=1 selects second color/alpha. Otherwise A=(1-t)*a+t*b and P=(1-t)*a*C_first+t*b*C_second. Return P/A for A>0, otherwise +0 color, with A. Alpha and color coordinates use the member working domain.
+
+The [current implementation profile](BLN_color_function_contract.md#current-bln-11-through-bln-20-profile)
+specifies the native arithmetic stages, exact decisions, parameters and prototype.
 
 ## Behavior
 

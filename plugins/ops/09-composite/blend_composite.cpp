@@ -607,7 +607,11 @@ Status register_blend_composite(OperationRegistry* registry) {
                   composite_operation(CompositeKind::Dissolve,
                                       "blend.dissolve_counter64"),
                   composite_operation(CompositeKind::Emission,
-                                      "blend.emission_add_straight")}) {
+                                      "blend.emission_add_straight"),
+                  composite_operation(CompositeKind::MixLinear,
+                                      "blend.premul_mix_straight_linear"),
+                  composite_operation(CompositeKind::MixEncoded,
+                                      "blend.premul_mix_straight_encoded")}) {
     const auto status = registry->register_operation(std::move(op));
     if (!status.ok())
       return status;
