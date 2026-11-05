@@ -84,7 +84,7 @@
 | [BLN-17E Darker whole color by cielab_l](op_specs/BLN-17E_darker_color_cielab_l.md) | primitive / tile / D1_draft | `blend.darker_color_cielab_l` | implemented |
 | [BLN-17F Lighter whole color by cielab_l](op_specs/BLN-17F_lighter_color_cielab_l.md) | primitive / tile / D1_draft | `blend.lighter_color_cielab_l` | implemented |
 | [BLN-18A Seeded coverage dissolve](op_specs/BLN-18A_dissolve_counter64.md) | primitive / tile / D1_draft | `blend.dissolve_counter64` | implemented |
-| [BLN-19A Add a linear color signal with retained alpha](op_specs/BLN-19A_emission_add_straight.md) | primitive / tile / D1_draft | `blend.emission_add_straight` | not_implemented |
+| [BLN-19A Add a linear color signal with retained alpha](op_specs/BLN-19A_emission_add_straight.md) | primitive / tile / D1_draft | `blend.emission_add_straight` | implemented |
 | [BLN-20A Coverage-weighted image interpolation in linear coordinates](op_specs/BLN-20A_premul_mix_straight_linear.md) | primitive / tile / D1_draft | `blend.premul_mix_straight_linear` | not_implemented |
 | [BLN-20B Coverage-weighted image interpolation in encoded coordinates](op_specs/BLN-20B_premul_mix_straight_encoded.md) | primitive / tile / D1_draft | `blend.premul_mix_straight_encoded` | not_implemented |
 | [CMP-01A Clear an image](op_specs/CMP-01A_clear.md) | primitive / tile / D1_draft | `composite.clear` | not_implemented |
