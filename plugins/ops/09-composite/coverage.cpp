@@ -465,7 +465,9 @@ Status register_coverage(OperationRegistry* registry) {
         PS_CMP(SourceOut, "source_out"),
         PS_CMP(DestinationOut, "destination_out"),
         PS_CMP(SourceAtop, "source_atop"),
-        PS_CMP(DestinationAtop, "destination_atop"), PS_CMP(Xor, "xor")}) {
+        PS_CMP(DestinationAtop, "destination_atop"), PS_CMP(Xor, "xor"),
+        PS_CMP(PlusRaw, "plus_raw"),
+        PS_CMP(PlusBounded, "plus_lighter_bounded")}) {
 #undef PS_CMP
     const auto status = registry->register_operation(std::move(op));
     if (!status.ok())
