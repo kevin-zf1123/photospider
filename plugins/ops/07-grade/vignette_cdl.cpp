@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "07-grade/artistic_common.hpp"
+#include "07-grade/cdl_math.hpp"
 #include "07-grade/vignette_math.hpp"
 #include "common/registry.hpp"
 
@@ -201,6 +202,98 @@ struct Vignette final : Program {
       compute<double>(k, i.views, Work{i.views, work_limit, 0, i.work});
   }
 };
+struct Cdl final : Program {
+  Image image;
+  unsigned style;
+  Cdl(unsigned kind, const std::vector<OperationMetadata>& in,
+      const Parameters& p)
+      : image(in.at(0), p, {"red", "green", "blue"}), style(kind) {
+    require(!image.selection.semantic ||
+                image.selection.interpretation.model == "rgb",
+            "CDL requires RGB coordinates");
+    typed(in.at(1), ElementType::Float64, {3, 3});
+    typed(in.at(2), ElementType::Float64, {1});
+    add_output(this, output_like(in[0]));
+  }
+  std::vector<ReadRegion> support(unsigned, const Region& r) const override {
+    auto out = image.support(r, true);
+    if (image.active(r)) {
+      out.push_back({1, 0, whole({3, 3})});
+      out.push_back({2, 0, whole({1})});
+    }
+    return out;
+  }
+  template <class T>
+  void compute(const Kernel& k, const ps_kernel_invocation_v8& inv,
+               const Work& work) const {
+    const mask::Reader r{k, inv};
+    for (unsigned o = 0; o < inv.output_count; ++o) {
+      const auto& out = inv.outputs[o];
+      const bool active = image.active(region(*out.layout));
+      work.poll(count(*out.layout) * 128);
+      cdl::Transform transform;
+      transform.reverse = style & 1U;
+      transform.clamp = style < 2;
+      if (active) {
+        for (unsigned c = 0; c < 3; ++c) {
+          transform.slope[c] = r.value(1, 0, Coordinate{c, 0});
+          transform.offset[c] = r.value(1, 0, Coordinate{c, 1});
+          transform.power[c] = r.value(1, 0, Coordinate{c, 2});
+        }
+        transform.saturation = r.value(2, 0, {});
+        transform.prepare(count(*out.layout) / image.dims[image.axis]);
+      }
+      std::array<unsigned, 3> selected{};
+      for (unsigned c = 0; c < 3; ++c)
+        selected[c] = image.selected[c];
+      image_runs<T>(
+          image, r, inv, out,
+          [&](const T* src, T* dst, std::uint64_t n, const Coordinate&) {
+            transform.span(src, dst, n, image.dims[image.axis],
+                           selected.data());
+            return true;
+          },
+          [&](Coordinate at, std::uint64_t j) {
+            if ((j & 127U) == 0)
+              cancel(inv);
+            cdl::Triple result{};
+            if (active && !(transform.identity && !transform.clamp)) {
+              for (unsigned c = 0; c < 3; ++c) {
+                auto q = at;
+                q[image.axis] = image.selected[c];
+                result[c] = r.value(0, 0, q);
+              }
+              result = transform.apply(result);
+            }
+            for (at[image.axis] = out.layout->origin[image.axis];
+                 at[image.axis] <
+                 out.layout->origin[image.axis] + out.layout->shape[image.axis];
+                 ++at[image.axis]) {
+              const auto c = image.component(at[image.axis]);
+              store(out, at,
+                    c < 0 || (transform.identity && !transform.clamp)
+                        ? r.raw(0, 0, at)
+                        : convert(result[c], sizeof(T) == 4));
+            }
+          },
+          true);
+    }
+    cancel(inv);
+  }
+  void run(const Kernel& k, const ps_kernel_invocation_v8& i) const override {
+    if (image.type == ElementType::Float32)
+      compute<float>(k, i, Work{i, work_limit});
+    else
+      compute<double>(k, i, Work{i, work_limit});
+  }
+  void run_v9(const Kernel& k,
+              const ps_kernel_invocation_v9& i) const override {
+    if (image.type == ElementType::Float32)
+      compute<float>(k, i.views, Work{i.views, work_limit, 0, i.work});
+    else
+      compute<double>(k, i.views, Work{i.views, work_limit, 0, i.work});
+  }
+};
 OperationDefinition vignette_operation(bool apply) {
   auto p = apply ? selectors() : std::vector<OperationParameterSpec>{};
   append(&p, {{"center", P::String, true},
@@ -218,12 +311,24 @@ OperationDefinition vignette_operation(bool apply) {
         return std::make_shared<Vignette>(apply, in, p);
       }));
 }
+OperationDefinition cdl_operation(unsigned kind) {
+  constexpr const char* names[]{"grade.asc_cdl_fwd", "grade.asc_cdl_rev",
+                                "grade.asc_cdl_fwd_no_clamp",
+                                "grade.asc_cdl_rev_no_clamp"};
+  return budgeted_operation(generation::operation(
+      names[kind], 3, selectors(),
+      {{"values", tensor_schema(ElementType::Float64, {1})}},
+      [kind](const auto& in, const auto& p) {
+        return std::make_shared<Cdl>(kind, in, p);
+      }));
+}
 }  // namespace ps::plugin_internal::grade::artistic
 namespace ps::plugin_internal {
 Status register_grade_vignette_cdl(OperationRegistry* registry) {
-  for (unsigned kind = 0; kind < 2; ++kind) {
+  for (unsigned kind = 0; kind < 6; ++kind) {
     const auto status = registry->register_operation(
-        grade::artistic::vignette_operation(kind != 0));
+        kind < 2 ? grade::artistic::vignette_operation(kind != 0)
+                 : grade::artistic::cdl_operation(kind - 2));
     if (!status.ok())
       return status;
   }
