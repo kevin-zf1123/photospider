@@ -247,7 +247,9 @@ Status register_blend(OperationRegistry* registry) {
         operation<Kind::HardLight>("blend.hard_light"),
         operation<Kind::SoftLight>("blend.soft_light_w3c"),
         operation<Kind::ColorDodge>("blend.color_dodge"),
-        operation<Kind::ColorBurn>("blend.color_burn")}) {
+        operation<Kind::ColorBurn>("blend.color_burn"),
+        operation<Kind::LinearDodge>("blend.linear_dodge"),
+        operation<Kind::LinearBurn>("blend.linear_burn")}) {
     const auto status = registry->register_operation(std::move(definition));
     if (!status.ok())
       return status;
