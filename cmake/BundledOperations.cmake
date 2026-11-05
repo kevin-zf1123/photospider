@@ -365,7 +365,11 @@ int main() { return 0; }" PHOTOSPIDER_COMPILER_HAS_FRQ_SME_ACLE)
 endif()
 
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
-  list(APPEND PHOTOSPIDER_OPERATION_SOURCES plugins/ops/01-numeric/fast_compute_avx2.cpp)
+  list(APPEND PHOTOSPIDER_OPERATION_SOURCES
+    plugins/ops/01-numeric/fast_compute_avx2.cpp
+    plugins/ops/09-composite/coverage_avx2.cpp)
+  set_property(SOURCE plugins/ops/09-composite/coverage_avx2.cpp APPEND PROPERTY
+    COMPILE_OPTIONS "-mavx2")
   set_property(SOURCE plugins/ops/01-numeric/fast_compute_avx2.cpp APPEND PROPERTY
     COMPILE_OPTIONS "-mavx2" "-mfma")
 endif()

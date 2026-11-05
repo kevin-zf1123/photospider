@@ -6,6 +6,7 @@
 
 - 全部成员为 tile 算子；数学依赖仍区分逐像素、有限邻域、全图与显式帧组。ROI／tile 边界不改变算法问题。
 - 生产计算采用原生 FP32/FP64；严格舍入 oracle 用于数值比较，复制、标签和离散选择单独检查。
+- CMP 按 [COM 数值规则](op_specs/COM_common_contract.md#numerical-target-and-strict-reference)允许容差范围内的 FMA 与等价重排，并满足 [CMP 契约](op_specs/CMP_coverage_contract.md#native-arithmetic-and-exact-behavior)的精确复制、零值、alpha 保留、读取依赖及布局／tile 一致性要求。
 - 颜色解释是显式静态参数，数值域遵循[公共 unchecked 契约](../00-foundation/contracts.md)。
 - 线性光与编码 RGB 的覆盖合成使用独立成员；颜色混合、alpha 合成和 mask 应用分别组合。
 - CIELAB 明度为 l=L*/100，OKLab 使用原生 L；两者色度单位不同。
@@ -134,6 +135,7 @@
 ## 相关入口
 
 - [共通规格](op_specs/COM_common_contract.md)
+- [CMP 接口、数学与行为契约](op_specs/CMP_coverage_contract.md)
 - [研究来源](research-sources.md)
 - [严格舍入 oracle](../../../oracle/ops/09-composite/README.md)
 - [抠像与 matte 基础算子](keying.md)
