@@ -5,7 +5,7 @@ kind: primitive
 category: 09-composite
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented
 clarification_status: complete
 parent_id: BLN-07
 function: hard_light
@@ -27,6 +27,8 @@ K=1 for Gray or 3 for RGB, with matching explicit linear or encoded interpretati
 Port order, tensor members, static selectors and output representation follow COM. Shapes and dtypes are inferred from the stated signatures before payload evaluation.
 
 ## Mathematics
+
+Current parameters and native arithmetic stages follow the [BLN-01 through BLN-10 profile](BLN_color_function_contract.md#current-bln-01-through-bln-10-profile).
 
 2*B*S when S<=0.5; otherwise 1-2*(1-B)*(1-S).
 
