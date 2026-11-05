@@ -254,7 +254,9 @@ Status register_blend(OperationRegistry* registry) {
         operation<Kind::VividLight>("blend.vivid_light"),
         operation<Kind::PinLight>("blend.pin_light"),
         operation<Kind::Difference>("blend.difference"),
-        operation<Kind::Exclusion>("blend.exclusion")}) {
+        operation<Kind::Exclusion>("blend.exclusion"),
+        operation<Kind::HardMixVivid>("blend.hard_mix_vivid"),
+        operation<Kind::HardMixSum>("blend.hard_mix_sum")}) {
     const auto status = registry->register_operation(std::move(definition));
     if (!status.ok())
       return status;

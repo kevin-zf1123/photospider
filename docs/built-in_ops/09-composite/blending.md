@@ -75,8 +75,8 @@
 | [BLN-14A Pin light](op_specs/BLN-14A_pin_light.md) | primitive / tile / D1_draft | `blend.pin_light` | implemented |
 | [BLN-15A Difference](op_specs/BLN-15A_difference.md) | primitive / tile / D1_draft | `blend.difference` | implemented |
 | [BLN-15B Exclusion](op_specs/BLN-15B_exclusion.md) | primitive / tile / D1_draft | `blend.exclusion` | implemented |
-| [BLN-16A Hard mix vivid](op_specs/BLN-16A_hard_mix_vivid.md) | primitive / tile / D1_draft | `blend.hard_mix_vivid` | not_implemented |
-| [BLN-16B Hard mix sum](op_specs/BLN-16B_hard_mix_sum.md) | primitive / tile / D1_draft | `blend.hard_mix_sum` | not_implemented |
+| [BLN-16A Hard mix vivid](op_specs/BLN-16A_hard_mix_vivid.md) | primitive / tile / D1_draft | `blend.hard_mix_vivid` | implemented |
+| [BLN-16B Hard mix sum](op_specs/BLN-16B_hard_mix_sum.md) | primitive / tile / D1_draft | `blend.hard_mix_sum` | implemented |
 | [BLN-17A Darker whole color by linear_y](op_specs/BLN-17A_darker_color_linear_y.md) | primitive / tile / D1_draft | `blend.darker_color_linear_y` | not_implemented |
 | [BLN-17B Lighter whole color by linear_y](op_specs/BLN-17B_lighter_color_linear_y.md) | primitive / tile / D1_draft | `blend.lighter_color_linear_y` | not_implemented |
 | [BLN-17C Darker whole color by oklab_l](op_specs/BLN-17C_darker_color_oklab_l.md) | primitive / tile / D1_draft | `blend.darker_color_oklab_l` | not_implemented |

@@ -5,7 +5,7 @@ kind: primitive
 category: 09-composite
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented
 clarification_status: complete
 parent_id: BLN-16
 function: hard_mix_vivid
@@ -29,6 +29,9 @@ Port order, tensor members, static selectors and output representation follow CO
 ## Mathematics
 
 Return 1 iff the BLN-13 vivid-light value is >=0.5, otherwise 0.
+
+The [current implementation profile](BLN_color_function_contract.md#current-bln-11-through-bln-20-profile)
+specifies the native arithmetic stages, exact decisions, parameters and prototype.
 
 ## Behavior
 
