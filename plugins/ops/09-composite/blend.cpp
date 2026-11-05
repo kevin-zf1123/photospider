@@ -233,7 +233,10 @@ Status register_blend(OperationRegistry* registry) {
   using blend::Kind;
   using blend::operation;
   for (auto definition :
-       {operation<Kind::Normal>("blend.normal")}) {
+       {operation<Kind::Normal>("blend.normal"),
+        operation<Kind::Add>("blend.add"),
+        operation<Kind::Subtract>("blend.subtract"),
+        operation<Kind::Divide>("blend.divide")}) {
     const auto status = registry->register_operation(std::move(definition));
     if (!status.ok())
       return status;

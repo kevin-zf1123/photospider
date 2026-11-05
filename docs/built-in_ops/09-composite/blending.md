@@ -54,9 +54,9 @@
 | 成员 | 类别／执行／成熟度 | 提议注册 key | 实现状态 |
 | --- | --- | --- | --- |
 | [BLN-01A Normal](op_specs/BLN-01A_normal.md) | primitive / tile / D1_draft | `blend.normal` | implemented |
-| [BLN-02A Add](op_specs/BLN-02A_add.md) | primitive / tile / D1_draft | `blend.add` | not_implemented |
-| [BLN-02B Subtract](op_specs/BLN-02B_subtract.md) | primitive / tile / D1_draft | `blend.subtract` | not_implemented |
-| [BLN-02C Divide](op_specs/BLN-02C_divide.md) | primitive / tile / D1_draft | `blend.divide` | not_implemented |
+| [BLN-02A Add](op_specs/BLN-02A_add.md) | primitive / tile / D1_draft | `blend.add` | implemented |
+| [BLN-02B Subtract](op_specs/BLN-02B_subtract.md) | primitive / tile / D1_draft | `blend.subtract` | implemented |
+| [BLN-02C Divide](op_specs/BLN-02C_divide.md) | primitive / tile / D1_draft | `blend.divide` | implemented |
 | [BLN-03A Multiply](op_specs/BLN-03A_multiply.md) | primitive / tile / D1_draft | `blend.multiply` | not_implemented |
 | [BLN-03B Multiply unbounded](op_specs/BLN-03B_multiply_unbounded.md) | primitive / tile / D1_draft | `blend.multiply_unbounded` | not_implemented |
 | [BLN-04A Darken](op_specs/BLN-04A_darken.md) | primitive / tile / D1_draft | `blend.darken` | not_implemented |
