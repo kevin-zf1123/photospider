@@ -313,7 +313,14 @@ __arm_locally_streaming void probe64(double* p) {
 int main() { return 0; }" PHOTOSPIDER_COMPILER_HAS_BLEND_SME_F64)
   set(CMAKE_REQUIRED_FLAGS "${_bln_required_flags}")
   if(PHOTOSPIDER_COMPILER_HAS_BLEND_SME_ACLE)
-    list(APPEND PHOTOSPIDER_OPERATION_SOURCES plugins/ops/09-composite/blend_sme.cpp)
+    list(APPEND PHOTOSPIDER_OPERATION_SOURCES
+      plugins/ops/09-composite/blend_sme.cpp
+      plugins/ops/09-composite/nonseparable_sme.cpp)
+    set_source_files_properties(plugins/ops/09-composite/nonseparable_sme.cpp PROPERTIES
+      COMPILE_OPTIONS "-march=armv8-a+sme;-fno-fast-math;-frounding-math;-ffp-contract=off")
+    set_property(SOURCE plugins/ops/09-composite/nonseparable.cpp
+      plugins/ops/09-composite/nonseparable_sme.cpp APPEND PROPERTY
+      COMPILE_DEFINITIONS PHOTOSPIDER_HAS_NBL_SME=1)
     set_source_files_properties(plugins/ops/09-composite/blend_sme.cpp PROPERTIES
       COMPILE_OPTIONS "-march=armv8-a+sme;-fno-fast-math;-frounding-math;-ffp-contract=off")
     set_property(SOURCE plugins/ops/09-composite/blend.cpp
@@ -368,7 +375,10 @@ endif()
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
   list(APPEND PHOTOSPIDER_OPERATION_SOURCES
     plugins/ops/01-numeric/fast_compute_avx2.cpp
-    plugins/ops/09-composite/coverage_avx2.cpp)
+    plugins/ops/09-composite/coverage_avx2.cpp
+    plugins/ops/09-composite/nonseparable_avx2.cpp)
+  set_property(SOURCE plugins/ops/09-composite/nonseparable_avx2.cpp APPEND PROPERTY
+    COMPILE_OPTIONS "-mavx2")
   set_property(SOURCE plugins/ops/09-composite/coverage_avx2.cpp APPEND PROPERTY
     COMPILE_OPTIONS "-mavx2")
   set_property(SOURCE plugins/ops/01-numeric/fast_compute_avx2.cpp APPEND PROPERTY

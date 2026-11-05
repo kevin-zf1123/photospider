@@ -136,6 +136,7 @@
 
 - [共通规格](op_specs/COM_common_contract.md)
 - [CMP 接口、数学与行为契约](op_specs/CMP_coverage_contract.md)
+- [NBL 原生模型与 W3C 属性契约](op_specs/NBL_nonseparable_contract.md)
 - [研究来源](research-sources.md)
 - [严格舍入 oracle](../../../oracle/ops/09-composite/README.md)
 - [抠像与 matte 基础算子](keying.md)
