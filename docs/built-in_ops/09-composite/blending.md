@@ -57,8 +57,8 @@
 | [BLN-02A Add](op_specs/BLN-02A_add.md) | primitive / tile / D1_draft | `blend.add` | implemented |
 | [BLN-02B Subtract](op_specs/BLN-02B_subtract.md) | primitive / tile / D1_draft | `blend.subtract` | implemented |
 | [BLN-02C Divide](op_specs/BLN-02C_divide.md) | primitive / tile / D1_draft | `blend.divide` | implemented |
-| [BLN-03A Multiply](op_specs/BLN-03A_multiply.md) | primitive / tile / D1_draft | `blend.multiply` | not_implemented |
-| [BLN-03B Multiply unbounded](op_specs/BLN-03B_multiply_unbounded.md) | primitive / tile / D1_draft | `blend.multiply_unbounded` | not_implemented |
+| [BLN-03A Multiply](op_specs/BLN-03A_multiply.md) | primitive / tile / D1_draft | `blend.multiply` | implemented |
+| [BLN-03B Multiply unbounded](op_specs/BLN-03B_multiply_unbounded.md) | primitive / tile / D1_draft | `blend.multiply_unbounded` | implemented |
 | [BLN-04A Darken](op_specs/BLN-04A_darken.md) | primitive / tile / D1_draft | `blend.darken` | not_implemented |
 | [BLN-04B Lighten](op_specs/BLN-04B_lighten.md) | primitive / tile / D1_draft | `blend.lighten` | not_implemented |
 | [BLN-05A Screen](op_specs/BLN-05A_screen.md) | primitive / tile / D1_draft | `blend.screen` | not_implemented |
