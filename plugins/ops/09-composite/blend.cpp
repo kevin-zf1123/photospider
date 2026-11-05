@@ -252,7 +252,9 @@ Status register_blend(OperationRegistry* registry) {
         operation<Kind::LinearBurn>("blend.linear_burn"),
         operation<Kind::LinearLight>("blend.linear_light"),
         operation<Kind::VividLight>("blend.vivid_light"),
-        operation<Kind::PinLight>("blend.pin_light")}) {
+        operation<Kind::PinLight>("blend.pin_light"),
+        operation<Kind::Difference>("blend.difference"),
+        operation<Kind::Exclusion>("blend.exclusion")}) {
     const auto status = registry->register_operation(std::move(definition));
     if (!status.ok())
       return status;
