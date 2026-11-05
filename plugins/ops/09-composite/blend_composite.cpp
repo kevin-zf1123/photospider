@@ -603,7 +603,9 @@ Status register_blend_composite(OperationRegistry* registry) {
                   composite_operation(CompositeKind::DarkerLab,
                                       "blend.darker_color_cielab_l"),
                   composite_operation(CompositeKind::LighterLab,
-                                      "blend.lighter_color_cielab_l")}) {
+                                      "blend.lighter_color_cielab_l"),
+                  composite_operation(CompositeKind::Dissolve,
+                                      "blend.dissolve_counter64")}) {
     const auto status = registry->register_operation(std::move(op));
     if (!status.ok())
       return status;

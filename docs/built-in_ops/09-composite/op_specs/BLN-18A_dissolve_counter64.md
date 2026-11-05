@@ -5,7 +5,7 @@ kind: primitive
 category: 09-composite
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented
 clarification_status: complete
 parent_id: BLN-18
 function: dissolve_counter64
@@ -29,6 +29,9 @@ Port order, tensor members, static selectors and output representation follow CO
 ## Mathematics
 
 Compute U=counter64(seed,x,y,frame) as defined in the BLN contract. If U/2^64 < source alpha, select source color and alpha 1; otherwise select background color and alpha. Compare the integer-rational threshold without an intervening floating RNG conversion.
+
+The [current implementation profile](BLN_color_function_contract.md#current-bln-11-through-bln-20-profile)
+specifies the native arithmetic stages, exact decisions, parameters and prototype.
 
 ## Behavior
 
