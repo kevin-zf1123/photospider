@@ -242,7 +242,8 @@ Status register_blend(OperationRegistry* registry) {
         operation<Kind::Darken>("blend.darken"),
         operation<Kind::Lighten>("blend.lighten"),
         operation<Kind::Screen>("blend.screen"),
-        operation<Kind::ScreenUnbounded>("blend.screen_unbounded")}) {
+        operation<Kind::ScreenUnbounded>("blend.screen_unbounded"),
+        operation<Kind::Overlay>("blend.overlay")}) {
     const auto status = registry->register_operation(std::move(definition));
     if (!status.ok())
       return status;
