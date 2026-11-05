@@ -61,8 +61,8 @@
 | [BLN-03B Multiply unbounded](op_specs/BLN-03B_multiply_unbounded.md) | primitive / tile / D1_draft | `blend.multiply_unbounded` | implemented |
 | [BLN-04A Darken](op_specs/BLN-04A_darken.md) | primitive / tile / D1_draft | `blend.darken` | implemented |
 | [BLN-04B Lighten](op_specs/BLN-04B_lighten.md) | primitive / tile / D1_draft | `blend.lighten` | implemented |
-| [BLN-05A Screen](op_specs/BLN-05A_screen.md) | primitive / tile / D1_draft | `blend.screen` | not_implemented |
-| [BLN-05B Screen unbounded](op_specs/BLN-05B_screen_unbounded.md) | primitive / tile / D1_draft | `blend.screen_unbounded` | not_implemented |
+| [BLN-05A Screen](op_specs/BLN-05A_screen.md) | primitive / tile / D1_draft | `blend.screen` | implemented |
+| [BLN-05B Screen unbounded](op_specs/BLN-05B_screen_unbounded.md) | primitive / tile / D1_draft | `blend.screen_unbounded` | implemented |
 | [BLN-06A Overlay](op_specs/BLN-06A_overlay.md) | primitive / tile / D1_draft | `blend.overlay` | not_implemented |
 | [BLN-07A Hard light](op_specs/BLN-07A_hard_light.md) | primitive / tile / D1_draft | `blend.hard_light` | not_implemented |
 | [BLN-08A Soft light w3c](op_specs/BLN-08A_soft_light_w3c.md) | primitive / tile / D1_draft | `blend.soft_light_w3c` | not_implemented |
