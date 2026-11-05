@@ -25,6 +25,7 @@ Status register_grade_histogram(OperationRegistry* registry);
 Status register_grade_vignette_cdl(OperationRegistry* registry);
 Status register_grade_warper(OperationRegistry* registry);
 Status register_grade_dither(OperationRegistry* registry);
+Status register_grade_halftone(OperationRegistry* registry);
 Status register_vector_lut(OperationRegistry* registry);
 Status register_fast_curves(OperationRegistry* registry);
 Status register_fast_sampling(OperationRegistry* registry);
