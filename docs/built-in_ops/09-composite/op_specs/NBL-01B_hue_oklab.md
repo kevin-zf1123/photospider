@@ -5,7 +5,7 @@ kind: primitive
 category: 09-composite
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented
 clarification_status: complete
 parent_id: NBL-01
 function: hue_oklab
@@ -36,6 +36,15 @@ E support at matching coordinates. Source descriptors are static dependencies; p
 
 ## Acceptance
 
-Check copied first/opponent coordinates, neutral source and neutral background. Swapping lightness copies source l/L and background a,b exactly.
+Evaluate these samples in the member's native coordinates. Bind `neutral_threshold=0` for every row.
 
-Use the common native-versus-strict comparison rules for finite arithmetic, and exact checks for explicit copies and discrete outputs. Compare identical coordinates across whole-image, nonzero ROI and tile requests. Mathematical sources are listed in [research sources](../research-sources.md).
+| Case | Background B | Source S | Expected output |
+| --- | --- | --- | --- |
+| Identity | (0.5,0.25,0.125) | (0.5,0.25,0.125) | (0.5,0.25,0.125) |
+| Property replacement | (0.5,3,4) | (0.25,0,2) | (0.5,0,5) |
+| Neutral source | (0.5,3,4) | (0.25,0,0) | (0.5,3,4) |
+| Zero background chroma | (0.5,0,0) | (0.25,0,2) | (0.5,+0,+0) |
+
+The output L coordinate copies background L. A neutral source copies both background opponents; a nonneutral source supplies hue while retaining background chroma. Generated opponents for zero background chroma are positive zero.
+
+Use the [COM comparison rules](COM_common_contract.md#numerical-target-and-strict-reference) for both Float32 and Float64. Fractions in the tables denote exact reference values before output rounding. Compare continuous results within the inherited tolerances; compare copied coordinates and discrete branch decisions exactly. Repeat at identical coordinates in whole-image, nonzero ROI and tile requests. Mathematical sources are listed in [research sources](../research-sources.md).

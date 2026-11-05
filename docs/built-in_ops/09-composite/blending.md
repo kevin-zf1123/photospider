@@ -115,9 +115,9 @@
 | [CMP-08B Plus lighter bounded in linear RGB/Gray](op_specs/CMP-08B_plus_lighter_bounded_linear.md) | primitive / tile / D1_draft | `composite.plus_lighter_bounded_linear` | implemented |
 | [CMP-08C Plus raw in encoded RGB/Gray](op_specs/CMP-08C_plus_raw_encoded.md) | primitive / tile / D1_draft | `composite.plus_raw_encoded` | implemented |
 | [CMP-08D Plus lighter bounded in encoded RGB/Gray](op_specs/CMP-08D_plus_lighter_bounded_encoded.md) | primitive / tile / D1_draft | `composite.plus_lighter_bounded_encoded` | implemented |
-| [NBL-01A Hue blend in lab](op_specs/NBL-01A_hue_lab.md) | primitive / tile / D1_draft | `blend.hue_lab` | not_implemented |
-| [NBL-01B Hue blend in oklab](op_specs/NBL-01B_hue_oklab.md) | primitive / tile / D1_draft | `blend.hue_oklab` | not_implemented |
-| [NBL-01C Hue blend in w3c](op_specs/NBL-01C_hue_w3c.md) | primitive / tile / D1_draft | `blend.hue_w3c` | not_implemented |
+| [NBL-01A Hue blend in lab](op_specs/NBL-01A_hue_lab.md) | primitive / tile / D1_draft | `blend.hue_lab` | implemented |
+| [NBL-01B Hue blend in oklab](op_specs/NBL-01B_hue_oklab.md) | primitive / tile / D1_draft | `blend.hue_oklab` | implemented |
+| [NBL-01C Hue blend in w3c](op_specs/NBL-01C_hue_w3c.md) | primitive / tile / D1_draft | `blend.hue_w3c` | implemented |
 | [NBL-02A Chroma blend in lab](op_specs/NBL-02A_chroma_lab_zero_hue.md) | primitive / tile / D1_draft | `blend.chroma_lab_zero_hue` | not_implemented |
 | [NBL-02B Chroma blend in oklab](op_specs/NBL-02B_chroma_oklab_zero_hue.md) | primitive / tile / D1_draft | `blend.chroma_oklab_zero_hue` | not_implemented |
 | [NBL-02C Chroma blend in w3c](op_specs/NBL-02C_saturation_w3c.md) | primitive / tile / D1_draft | `blend.saturation_w3c` | not_implemented |

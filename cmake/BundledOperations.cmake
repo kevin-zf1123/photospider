@@ -46,6 +46,7 @@ if(NOT PHOTOSPIDER_FMT10_SIMD)
 endif()
 
 set(PHOTOSPIDER_OPERATION_SOURCES
+  plugins/ops/09-composite/nonseparable.cpp
   plugins/ops/09-composite/coverage.cpp
   plugins/ops/09-composite/blend.cpp
   plugins/ops/09-composite/blend_composite.cpp
