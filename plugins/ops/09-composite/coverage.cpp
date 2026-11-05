@@ -460,7 +460,8 @@ Status register_coverage(OperationRegistry* registry) {
       operation<Kind::K>("composite." KEY "_encoded", true)
         PS_CMP(SourceOver, "source_over"),
         PS_CMP(DestinationOver, "destination_over"),
-        PS_CMP(BlendedOver, "source_over_blended_color")}) {
+        PS_CMP(BlendedOver, "source_over_blended_color"),
+        PS_CMP(SourceIn, "source_in"), PS_CMP(DestinationIn, "destination_in")}) {
 #undef PS_CMP
     const auto status = registry->register_operation(std::move(op));
     if (!status.ok())
