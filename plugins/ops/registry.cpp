@@ -12,7 +12,8 @@ Status register_builtin_operations(OperationRegistry* registry) {
   if (!diagnostics.ok()) {
     return diagnostics;
   }
-  for (const auto function : {register_grade_exposure,
+  for (const auto function : {register_blend,
+                              register_grade_exposure,
                               register_grade_affine,
                               register_grade_contrast,
                               register_grade_levels,

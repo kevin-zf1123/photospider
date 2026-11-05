@@ -3,6 +3,7 @@
 #include "photospider/plugin/operation_registry.hpp"
 
 namespace ps::plugin_internal {
+Status register_blend(OperationRegistry* registry);
 Status register_grade_exposure(OperationRegistry* registry);
 Status register_grade_affine(OperationRegistry* registry);
 Status register_grade_contrast(OperationRegistry* registry);

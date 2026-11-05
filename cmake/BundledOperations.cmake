@@ -46,6 +46,7 @@ if(NOT PHOTOSPIDER_FMT10_SIMD)
 endif()
 
 set(PHOTOSPIDER_OPERATION_SOURCES
+  plugins/ops/09-composite/blend.cpp
   plugins/ops/07-grade/exposure.cpp
   plugins/ops/07-grade/affine.cpp
   plugins/ops/07-grade/contrast.cpp
@@ -281,6 +282,53 @@ int main() { return 0; }" PHOTOSPIDER_COMPILER_HAS_CONVERSION_SME_ACLE)
     message(STATUS "Compiler lacks SME support; numeric conversion retains NEON")
   endif()
 endif()
+set(_bln_sme_default OFF)
+if(APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm64|aarch64)$")
+  set(_bln_sme_default ON)
+endif()
+option(PHOTOSPIDER_ENABLE_BLEND_SME "Enable runtime-dispatched SME blend spans" ${_bln_sme_default})
+if(PHOTOSPIDER_ENABLE_BLEND_SME)
+  if(NOT APPLE OR NOT CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm64|aarch64)$")
+    message(FATAL_ERROR "Blend SME requires Apple arm64")
+  endif()
+  include(CheckCXXSourceCompiles)
+  set(_bln_required_flags "${CMAKE_REQUIRED_FLAGS}")
+  set(CMAKE_REQUIRED_FLAGS "${CMAKE_REQUIRED_FLAGS} -march=armv8-a+sme")
+  check_cxx_source_compiles("#include <arm_sme.h>
+__arm_locally_streaming unsigned probe(float* p) {
+  const auto pg = svptrue_b32();
+  const auto v = svld1_f32(pg, p);
+  svst1_f32(pg, p, svdiv_f32_x(pg, v, v));
+  return svcntb();
+}
+int main() { return 0; }" PHOTOSPIDER_COMPILER_HAS_BLEND_SME_ACLE)
+  set(CMAKE_REQUIRED_FLAGS "${_bln_required_flags} -march=armv8-a+sme+sme-f64f64")
+  check_cxx_source_compiles("#include <arm_sme.h>
+__arm_locally_streaming void probe64(double* p) {
+  const auto pg=svptrue_b64();
+  svst1_f64(pg,p,svabs_f64_x(pg,svsub_f64_x(pg,svld1_f64(pg,p),svld1_f64(pg,p))));
+}
+int main() { return 0; }" PHOTOSPIDER_COMPILER_HAS_BLEND_SME_F64)
+  set(CMAKE_REQUIRED_FLAGS "${_bln_required_flags}")
+  if(PHOTOSPIDER_COMPILER_HAS_BLEND_SME_ACLE)
+    list(APPEND PHOTOSPIDER_OPERATION_SOURCES plugins/ops/09-composite/blend_sme.cpp)
+    set_source_files_properties(plugins/ops/09-composite/blend_sme.cpp PROPERTIES
+      COMPILE_OPTIONS "-march=armv8-a+sme;-fno-fast-math;-frounding-math;-ffp-contract=off")
+    set_property(SOURCE plugins/ops/09-composite/blend.cpp
+      plugins/ops/09-composite/blend_sme.cpp APPEND PROPERTY
+      COMPILE_DEFINITIONS PHOTOSPIDER_HAS_BLEND_SME=1)
+    if(PHOTOSPIDER_COMPILER_HAS_BLEND_SME_F64)
+      set_property(SOURCE plugins/ops/09-composite/blend_sme.cpp APPEND PROPERTY
+        COMPILE_OPTIONS "-march=armv8-a+sme+sme-f64f64")
+      set_property(SOURCE plugins/ops/09-composite/blend.cpp
+        plugins/ops/09-composite/blend_sme.cpp APPEND PROPERTY
+        COMPILE_DEFINITIONS PHOTOSPIDER_HAS_BLEND_SME_F64=1)
+    endif()
+  else()
+    message(STATUS "Compiler lacks SME support; blend spans retain NEON")
+  endif()
+endif()
+
 set(_frq_sme_default OFF)
 if(APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm64|aarch64)$")
   set(_frq_sme_default ON)
