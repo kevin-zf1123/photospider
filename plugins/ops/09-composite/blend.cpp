@@ -238,7 +238,9 @@ Status register_blend(OperationRegistry* registry) {
         operation<Kind::Subtract>("blend.subtract"),
         operation<Kind::Divide>("blend.divide"),
         operation<Kind::Multiply>("blend.multiply"),
-        operation<Kind::MultiplyUnbounded>("blend.multiply_unbounded")}) {
+        operation<Kind::MultiplyUnbounded>("blend.multiply_unbounded"),
+        operation<Kind::Darken>("blend.darken"),
+        operation<Kind::Lighten>("blend.lighten")}) {
     const auto status = registry->register_operation(std::move(definition));
     if (!status.ok())
       return status;

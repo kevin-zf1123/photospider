@@ -59,8 +59,8 @@
 | [BLN-02C Divide](op_specs/BLN-02C_divide.md) | primitive / tile / D1_draft | `blend.divide` | implemented |
 | [BLN-03A Multiply](op_specs/BLN-03A_multiply.md) | primitive / tile / D1_draft | `blend.multiply` | implemented |
 | [BLN-03B Multiply unbounded](op_specs/BLN-03B_multiply_unbounded.md) | primitive / tile / D1_draft | `blend.multiply_unbounded` | implemented |
-| [BLN-04A Darken](op_specs/BLN-04A_darken.md) | primitive / tile / D1_draft | `blend.darken` | not_implemented |
-| [BLN-04B Lighten](op_specs/BLN-04B_lighten.md) | primitive / tile / D1_draft | `blend.lighten` | not_implemented |
+| [BLN-04A Darken](op_specs/BLN-04A_darken.md) | primitive / tile / D1_draft | `blend.darken` | implemented |
+| [BLN-04B Lighten](op_specs/BLN-04B_lighten.md) | primitive / tile / D1_draft | `blend.lighten` | implemented |
 | [BLN-05A Screen](op_specs/BLN-05A_screen.md) | primitive / tile / D1_draft | `blend.screen` | not_implemented |
 | [BLN-05B Screen unbounded](op_specs/BLN-05B_screen_unbounded.md) | primitive / tile / D1_draft | `blend.screen_unbounded` | not_implemented |
 | [BLN-06A Overlay](op_specs/BLN-06A_overlay.md) | primitive / tile / D1_draft | `blend.overlay` | not_implemented |
