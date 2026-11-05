@@ -89,8 +89,8 @@
 | [BLN-20A Coverage-weighted image interpolation in linear coordinates](op_specs/BLN-20A_premul_mix_straight_linear.md) | primitive / tile / D1_draft | `blend.premul_mix_straight_linear` | implemented |
 | [BLN-20B Coverage-weighted image interpolation in encoded coordinates](op_specs/BLN-20B_premul_mix_straight_encoded.md) | primitive / tile / D1_draft | `blend.premul_mix_straight_encoded` | implemented |
 | [CMP-01A Clear an image](op_specs/CMP-01A_clear.md) | primitive / tile / D1_draft | `composite.clear` | implemented |
-| [CMP-02A Select source](op_specs/CMP-02A_source.md) | primitive / tile / D1_draft | `composite.source` | not_implemented |
-| [CMP-02B Select destination](op_specs/CMP-02B_destination.md) | primitive / tile / D1_draft | `composite.destination` | not_implemented |
+| [CMP-02A Select source](op_specs/CMP-02A_source.md) | primitive / tile / D1_draft | `composite.source` | implemented |
+| [CMP-02B Select destination](op_specs/CMP-02B_destination.md) | primitive / tile / D1_draft | `composite.destination` | implemented |
 | [CMP-03A Source over in linear RGB/Gray](op_specs/CMP-03A_source_over_linear.md) | primitive / tile / D1_draft | `composite.source_over_linear` | not_implemented |
 | [CMP-03B Destination over in linear RGB/Gray](op_specs/CMP-03B_destination_over_linear.md) | primitive / tile / D1_draft | `composite.destination_over_linear` | not_implemented |
 | [CMP-03C Source over with supplied blended color in linear coordinates](op_specs/CMP-03C_source_over_blended_color_linear.md) | primitive / tile / D1_draft | `composite.source_over_blended_color_linear` | not_implemented |

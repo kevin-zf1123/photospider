@@ -452,7 +452,9 @@ Status register_coverage(OperationRegistry* registry) {
   using coverage::Kind;
   using coverage::operation;
   for (auto op : {
-      operation<Kind::Clear>("composite.clear")}) {
+      operation<Kind::Clear>("composite.clear"),
+      operation<Kind::Source>("composite.source"),
+      operation<Kind::Destination>("composite.destination")}) {
     const auto status = registry->register_operation(std::move(op));
     if (!status.ok())
       return status;
