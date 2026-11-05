@@ -66,7 +66,7 @@
 | [BLN-06A Overlay](op_specs/BLN-06A_overlay.md) | primitive / tile / D1_draft | `blend.overlay` | implemented |
 | [BLN-07A Hard light](op_specs/BLN-07A_hard_light.md) | primitive / tile / D1_draft | `blend.hard_light` | implemented |
 | [BLN-08A Soft light w3c](op_specs/BLN-08A_soft_light_w3c.md) | primitive / tile / D1_draft | `blend.soft_light_w3c` | implemented |
-| [BLN-09A Color dodge](op_specs/BLN-09A_color_dodge.md) | primitive / tile / D1_draft | `blend.color_dodge` | not_implemented |
+| [BLN-09A Color dodge](op_specs/BLN-09A_color_dodge.md) | primitive / tile / D1_draft | `blend.color_dodge` | implemented |
 | [BLN-10A Color burn](op_specs/BLN-10A_color_burn.md) | primitive / tile / D1_draft | `blend.color_burn` | not_implemented |
 | [BLN-11A Linear dodge](op_specs/BLN-11A_linear_dodge.md) | primitive / tile / D1_draft | `blend.linear_dodge` | not_implemented |
 | [BLN-11B Linear burn](op_specs/BLN-11B_linear_burn.md) | primitive / tile / D1_draft | `blend.linear_burn` | not_implemented |
