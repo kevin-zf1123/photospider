@@ -128,9 +128,9 @@
 | [NBL-03A Color blend in lab](op_specs/NBL-03A_color_lab.md) | primitive / tile / D1_draft | `blend.color_lab` | implemented |
 | [NBL-03B Color blend in oklab](op_specs/NBL-03B_color_oklab.md) | primitive / tile / D1_draft | `blend.color_oklab` | implemented |
 | [NBL-03C Color blend in w3c](op_specs/NBL-03C_color_w3c.md) | primitive / tile / D1_draft | `blend.color_w3c` | implemented |
-| [NBL-04A Lightness blend in lab](op_specs/NBL-04A_lightness_lab.md) | primitive / tile / D1_draft | `blend.lightness_lab` | not_implemented |
-| [NBL-04B Lightness blend in oklab](op_specs/NBL-04B_lightness_oklab.md) | primitive / tile / D1_draft | `blend.lightness_oklab` | not_implemented |
-| [NBL-04C Lightness blend in w3c](op_specs/NBL-04C_luminosity_w3c.md) | primitive / tile / D1_draft | `blend.luminosity_w3c` | not_implemented |
+| [NBL-04A Lightness blend in lab](op_specs/NBL-04A_lightness_lab.md) | primitive / tile / D1_draft | `blend.lightness_lab` | implemented |
+| [NBL-04B Lightness blend in oklab](op_specs/NBL-04B_lightness_oklab.md) | primitive / tile / D1_draft | `blend.lightness_oklab` | implemented |
+| [NBL-04C Luminosity blend in W3C RGB](op_specs/NBL-04C_luminosity_w3c.md) | primitive / tile / D1_draft | `blend.luminosity_w3c` | implemented |
 
 ## 相关入口
 

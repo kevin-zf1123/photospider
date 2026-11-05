@@ -5,7 +5,7 @@ kind: primitive
 category: 09-composite
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented
 clarification_status: complete
 parent_id: NBL-04
 function: luminosity_w3c
@@ -14,7 +14,7 @@ proposed_operation_keys:
   - blend.luminosity_w3c
 ---
 
-# NBL-04C: Lightness blend in w3c
+# NBL-04C: Luminosity blend in W3C RGB
 
 Inherit the [shared contract](COM_common_contract.md) and [NBL contract](NBL_nonseparable_contract.md). The proposed basic tile operator is `blend.luminosity_w3c`.
 
@@ -28,7 +28,7 @@ Port order, tensor members, static selectors and output representation follow CO
 
 ## Mathematics
 
-Use the lightness construction from the W3C subsection of the [NBL contract](NBL_nonseparable_contract.md).
+Use the luminosity construction from the W3C subsection of the [NBL contract](NBL_nonseparable_contract.md).
 
 ## Behavior
 
@@ -36,6 +36,14 @@ E support at matching coordinates. Source descriptors are static dependencies; p
 
 ## Acceptance
 
-Compare bounded primaries and the family W3C analytic cases.
+Evaluate these bounded RGB samples in the explicitly selected working domain.
 
-Use the common native-versus-strict comparison rules for finite arithmetic, and exact checks for explicit copies and discrete outputs. Compare identical coordinates across whole-image, nonzero ROI and tile requests. Mathematical sources are listed in [research sources](../research-sources.md).
+| Case | Background B | Source S | Expected output |
+| --- | --- | --- | --- |
+| Identity | (0.5,0.25,0.125) | (0.5,0.25,0.125) | (0.5,0.25,0.125) |
+| Luminosity replacement | (0.5,0.5,0.5) | (0.75,0.25,0.5) | (171/400,171/400,171/400) |
+| White luminosity limit | (1,0,0) | (1,1,1) | (1,1,1) |
+
+Check the full three-coordinate construction, including tied extrema and gray tuples. Outputs stay in `[0,1]`; each requested output coordinate depends on both full RGB inputs.
+
+Use the [COM comparison rules](COM_common_contract.md#numerical-target-and-strict-reference) for both Float32 and Float64. Fractions in the tables denote exact reference values before output rounding. Compare continuous results within the inherited tolerances; compare copied coordinates and discrete branch decisions exactly. Repeat at identical coordinates in whole-image, nonzero ROI and tile requests. Mathematical sources are listed in [research sources](../research-sources.md).
