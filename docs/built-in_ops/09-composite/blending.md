@@ -72,7 +72,7 @@
 | [BLN-11B Linear burn](op_specs/BLN-11B_linear_burn.md) | primitive / tile / D1_draft | `blend.linear_burn` | implemented |
 | [BLN-12A Linear light](op_specs/BLN-12A_linear_light.md) | primitive / tile / D1_draft | `blend.linear_light` | implemented |
 | [BLN-13A Vivid light](op_specs/BLN-13A_vivid_light.md) | primitive / tile / D1_draft | `blend.vivid_light` | implemented |
-| [BLN-14A Pin light](op_specs/BLN-14A_pin_light.md) | primitive / tile / D1_draft | `blend.pin_light` | not_implemented |
+| [BLN-14A Pin light](op_specs/BLN-14A_pin_light.md) | primitive / tile / D1_draft | `blend.pin_light` | implemented |
 | [BLN-15A Difference](op_specs/BLN-15A_difference.md) | primitive / tile / D1_draft | `blend.difference` | not_implemented |
 | [BLN-15B Exclusion](op_specs/BLN-15B_exclusion.md) | primitive / tile / D1_draft | `blend.exclusion` | not_implemented |
 | [BLN-16A Hard mix vivid](op_specs/BLN-16A_hard_mix_vivid.md) | primitive / tile / D1_draft | `blend.hard_mix_vivid` | not_implemented |
