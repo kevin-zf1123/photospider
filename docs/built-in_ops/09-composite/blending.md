@@ -118,13 +118,13 @@
 | [NBL-01A Hue blend in lab](op_specs/NBL-01A_hue_lab.md) | primitive / tile / D1_draft | `blend.hue_lab` | implemented |
 | [NBL-01B Hue blend in oklab](op_specs/NBL-01B_hue_oklab.md) | primitive / tile / D1_draft | `blend.hue_oklab` | implemented |
 | [NBL-01C Hue blend in w3c](op_specs/NBL-01C_hue_w3c.md) | primitive / tile / D1_draft | `blend.hue_w3c` | implemented |
-| [NBL-02A Chroma blend in lab](op_specs/NBL-02A_chroma_lab_zero_hue.md) | primitive / tile / D1_draft | `blend.chroma_lab_zero_hue` | not_implemented |
-| [NBL-02B Chroma blend in oklab](op_specs/NBL-02B_chroma_oklab_zero_hue.md) | primitive / tile / D1_draft | `blend.chroma_oklab_zero_hue` | not_implemented |
-| [NBL-02C Chroma blend in w3c](op_specs/NBL-02C_saturation_w3c.md) | primitive / tile / D1_draft | `blend.saturation_w3c` | not_implemented |
-| [NBL-02D Chroma blend with preserve_gray in lab](op_specs/NBL-02D_chroma_lab_preserve_gray.md) | primitive / tile / D1_draft | `blend.chroma_lab_preserve_gray` | not_implemented |
-| [NBL-02E Chroma blend with preserve_gray in oklab](op_specs/NBL-02E_chroma_oklab_preserve_gray.md) | primitive / tile / D1_draft | `blend.chroma_oklab_preserve_gray` | not_implemented |
-| [NBL-02F Chroma blend with source_hue in lab](op_specs/NBL-02F_chroma_lab_source_hue.md) | primitive / tile / D1_draft | `blend.chroma_lab_source_hue` | not_implemented |
-| [NBL-02G Chroma blend with source_hue in oklab](op_specs/NBL-02G_chroma_oklab_source_hue.md) | primitive / tile / D1_draft | `blend.chroma_oklab_source_hue` | not_implemented |
+| [NBL-02A Chroma blend in lab](op_specs/NBL-02A_chroma_lab_zero_hue.md) | primitive / tile / D1_draft | `blend.chroma_lab_zero_hue` | implemented |
+| [NBL-02B Chroma blend in oklab](op_specs/NBL-02B_chroma_oklab_zero_hue.md) | primitive / tile / D1_draft | `blend.chroma_oklab_zero_hue` | implemented |
+| [NBL-02C Saturation blend in W3C RGB](op_specs/NBL-02C_saturation_w3c.md) | primitive / tile / D1_draft | `blend.saturation_w3c` | implemented |
+| [NBL-02D Chroma blend with preserve_gray in lab](op_specs/NBL-02D_chroma_lab_preserve_gray.md) | primitive / tile / D1_draft | `blend.chroma_lab_preserve_gray` | implemented |
+| [NBL-02E Chroma blend with preserve_gray in oklab](op_specs/NBL-02E_chroma_oklab_preserve_gray.md) | primitive / tile / D1_draft | `blend.chroma_oklab_preserve_gray` | implemented |
+| [NBL-02F Chroma blend with source_hue in lab](op_specs/NBL-02F_chroma_lab_source_hue.md) | primitive / tile / D1_draft | `blend.chroma_lab_source_hue` | implemented |
+| [NBL-02G Chroma blend with source_hue in oklab](op_specs/NBL-02G_chroma_oklab_source_hue.md) | primitive / tile / D1_draft | `blend.chroma_oklab_source_hue` | implemented |
 | [NBL-03A Color blend in lab](op_specs/NBL-03A_color_lab.md) | primitive / tile / D1_draft | `blend.color_lab` | not_implemented |
 | [NBL-03B Color blend in oklab](op_specs/NBL-03B_color_oklab.md) | primitive / tile / D1_draft | `blend.color_oklab` | not_implemented |
 | [NBL-03C Color blend in w3c](op_specs/NBL-03C_color_w3c.md) | primitive / tile / D1_draft | `blend.color_w3c` | not_implemented |

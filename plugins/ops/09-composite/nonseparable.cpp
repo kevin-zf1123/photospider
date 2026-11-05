@@ -349,9 +349,19 @@ namespace ps::plugin_internal {
 Status register_nonseparable(OperationRegistry* registry) {
   using nonseparable::Kind;
   using nonseparable::operation;
-  for (auto op : {operation<Kind::Hue>(true, "blend.hue_lab"),
-                  operation<Kind::Hue>(false, "blend.hue_oklab"),
-                  operation<Kind::HueW3c>(false, "blend.hue_w3c")}) {
+  for (auto op :
+       {operation<Kind::Hue>(true, "blend.hue_lab"),
+        operation<Kind::Hue>(false, "blend.hue_oklab"),
+        operation<Kind::HueW3c>(false, "blend.hue_w3c"),
+        operation<Kind::ChromaZero>(true, "blend.chroma_lab_zero_hue"),
+        operation<Kind::ChromaZero>(false, "blend.chroma_oklab_zero_hue"),
+        operation<Kind::SaturationW3c>(false, "blend.saturation_w3c"),
+        operation<Kind::ChromaPreserve>(true, "blend.chroma_lab_preserve_gray"),
+        operation<Kind::ChromaPreserve>(false,
+                                        "blend.chroma_oklab_preserve_gray"),
+        operation<Kind::ChromaSource>(true, "blend.chroma_lab_source_hue"),
+        operation<Kind::ChromaSource>(false,
+                                      "blend.chroma_oklab_source_hue")}) {
     const auto status = registry->register_operation(std::move(op));
     if (!status.ok())
       return status;

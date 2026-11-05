@@ -5,7 +5,7 @@ kind: primitive
 category: 09-composite
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented
 clarification_status: complete
 parent_id: NBL-02
 function: chroma_lab_source_hue
@@ -36,6 +36,14 @@ E support at matching coordinates. Source descriptors are static dependencies; p
 
 ## Acceptance
 
-For B=(0.5,0,0), S=(0.25,0,1), threshold=0, output (0.5,0,1). The zero_hue counterpart yields (0.5,1,0).
+Evaluate these samples in the member's native coordinates. Bind `neutral_threshold=0` for every row.
 
-Use the common native-versus-strict comparison rules for finite arithmetic, and exact checks for explicit copies and discrete outputs. Compare identical coordinates across whole-image, nonzero ROI and tile requests. Mathematical sources are listed in [research sources](../research-sources.md).
+| Case | Background B | Source S | Expected output |
+| --- | --- | --- | --- |
+| Identity | (0.5,0.25,0.125) | (0.5,0.25,0.125) | (0.5,0.25,0.125) |
+| Property replacement | (0.5,3,4) | (0.25,0,2) | (0.5,6/5,8/5) |
+| Neutral background: `source_hue` | (0.5,0,0) | (0.25,0,1) | (0.5,0,1) |
+
+The output L coordinate copies background L. A nonneutral background retains its hue and receives source chroma. Check the `source_hue` branch separately at zero and positive thresholds, including exact equality in the squared-chroma predicate.
+
+Use the [COM comparison rules](COM_common_contract.md#numerical-target-and-strict-reference) for both Float32 and Float64. Fractions in the tables denote exact reference values before output rounding. Compare continuous results within the inherited tolerances; compare copied coordinates and discrete branch decisions exactly. Repeat at identical coordinates in whole-image, nonzero ROI and tile requests. Mathematical sources are listed in [research sources](../research-sources.md).
