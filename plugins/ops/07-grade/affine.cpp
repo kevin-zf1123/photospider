@@ -353,7 +353,7 @@ struct Adjustment final : Program {
 
 OperationDefinition operation(bool lgg) {
   using Type = OperationParameterType;
-  return budgeted_operation(generation::operation(
+  auto definition = budgeted_operation(generation::operation(
       lgg ? "grade.lift_gamma_gain" : "grade.offset_gain", 2,
       {{"axis", Type::Int64, false},
        {"components", Type::String, false},
@@ -363,6 +363,8 @@ OperationDefinition operation(bool lgg) {
       [lgg](const auto& inputs, const auto& parameters) {
         return std::make_shared<Adjustment>(lgg, inputs, parameters);
       }));
+  definition.reusable_tiles = true;
+  return definition;
 }
 }  // namespace ps::plugin_internal::grade::affine
 namespace ps::plugin_internal {

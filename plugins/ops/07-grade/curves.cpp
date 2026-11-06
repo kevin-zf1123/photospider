@@ -434,12 +434,14 @@ OperationDefinition operation(unsigned member) {
     parameters.push_back({"source_basis", Type::String, false});
     parameters.push_back({"method", Type::String, true});
   }
-  return budgeted_operation(generation::operation(
+  auto definition = budgeted_operation(generation::operation(
       names[member], 3, std::move(parameters),
       {{"values", tensor_schema(ElementType::Float64, {1})}},
       [member](const auto& inputs, const auto& parameters) {
         return std::make_shared<Adjustment>(member, inputs, parameters);
       }));
+  definition.reusable_tiles = true;
+  return definition;
 }
 }  // namespace ps::plugin_internal::grade::curves
 namespace ps::plugin_internal {

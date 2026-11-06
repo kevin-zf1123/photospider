@@ -696,6 +696,10 @@ Result<PreparedKernel> PreparedOperation::prepare_kernel(
   }
 }
 
+bool PreparedOperation::reusable_tiles() const noexcept {
+  return impl_->definition->reusable_tiles && impl_->traits.deterministic &&
+         impl_->traits.side_effect_free;
+}
 const OperationTraits& PreparedOperation::traits() const noexcept {
   return impl_->traits;
 }

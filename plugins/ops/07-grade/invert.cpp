@@ -288,7 +288,7 @@ struct Invert final : Program {
 
 OperationDefinition operation() {
   using Type = OperationParameterType;
-  return budgeted_operation(generation::operation(
+  auto definition = budgeted_operation(generation::operation(
       "grade.invert", 2,
       {{"axis", Type::Int64, false},
        {"components", Type::String, false},
@@ -298,6 +298,8 @@ OperationDefinition operation() {
       [](const auto& inputs, const auto& parameters) {
         return std::make_shared<Invert>(inputs, parameters);
       }));
+  definition.reusable_tiles = true;
+  return definition;
 }
 }  // namespace ps::plugin_internal::grade::invert
 

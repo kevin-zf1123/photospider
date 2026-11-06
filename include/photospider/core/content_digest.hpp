@@ -38,7 +38,7 @@ class Sha256 final {
     integer(value.size());
     bytes(value.data(), value.size());
   }
-  std::string finish() const {
+  std::array<std::uint8_t, 32> digest() const noexcept {
     auto copy = *this;
     const auto bits = length_ * 8;
     const std::uint8_t one = 0x80, zero = 0;
@@ -49,12 +49,20 @@ class Sha256 final {
     for (unsigned i = 0; i < 8; ++i)
       tail[7 - i] = static_cast<std::uint8_t>(bits >> (8 * i));
     copy.bytes(tail, 8);
+    std::array<std::uint8_t, 32> result{};
+    for (std::size_t i = 0; i < result.size(); ++i)
+      result[i] =
+          static_cast<std::uint8_t>(copy.state_[i / 4] >> (24 - (i % 4) * 8));
+    return result;
+  }
+  std::string finish() const {
     static constexpr char hex[] = "0123456789abcdef";
     std::string result;
     result.reserve(64);
-    for (auto word : copy.state_)
-      for (int shift = 28; shift >= 0; shift -= 4)
-        result.push_back(hex[(word >> shift) & 15]);
+    for (auto byte : digest()) {
+      result.push_back(hex[byte >> 4]);
+      result.push_back(hex[byte & 15]);
+    }
     return result;
   }
 

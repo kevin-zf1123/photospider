@@ -1,10 +1,10 @@
 # Tile 存储、生命周期与准入
 
-状态：Proposed breaking design。本页以唯一 tile 存储替换 executor 缓存设计。参见 [Plan 契约](Compiler-and-Execution.zh.md)和[英文权威文档](../Cache-Model.md)。
+状态：block 存储与 admission 为 Proposed breaking design。下文的 Host tile 缓存已实现。参见 [Plan 契约](Compiler-and-Execution.zh.md)和[英文权威文档](../Cache-Model.md)。
 
 ## 数据布局与所有权
 
-动态物化 tile 的 identity 为 `(RunId, ActivationId, TileId)`，具有一个 producer、一个 allocation 和一个不可变 domain。不同的同时存活物化 tile 使用独立 backing allocation。消费者共享同一 tile 的只读 handle。View 与 block 参数名称引用同一个值，不产生第二次物化。
+动态物化 tile 的 identity 为 `(RunId, ActivationId, TileId)`，具有一个 producer、一个 allocation 和一个不可变 domain。新计算的 tile 使用独立 backing allocation。命中缓存时借用前一次执行的不可变 allocation。消费者共享同一 tile 的只读 handle。View 与 block 参数名称引用同一个值，不产生第二次物化。
 
 第一版在 admission 时分别分配当前 block 的输出 buffer，不使用大 slab 切分多个逻辑输出 buffer。旧 allocation 最后一个 owner 释放后，allocator 可以复用地址；Plan 不为存活 tile 建立别名。Scratch 属于提交，在完成后可以复用 lane。
 
@@ -78,10 +78,14 @@ Reservation 属于 block，其他 Run 不得撤回。Tile 释放的容量在 blo
 
 IR/Plan identity 用于复现与可选 host artifact 查找。PreparedPlan 复用共享不可变 code/resource。不可变输入 snapshot 工具可以在 executor 外保留，提供 binding owner，不授予执行结果复用资格。
 
-替换后的 executor 没有 completed-result、checkpoint、block-state cache，没有 residency mirror、自动 input-copy cache，也不在热路径进行 tile content hash。每个准入 task 执行一次，除非因 abort/failure 跳过或编译期省略。Host 可按自己的策略把缓存输出绑定为显式输入。
+宿主通过 `ExecutionContextConfig::tile_cache_bytes` 设置 Context 内的 Host tile 缓存，零表示关闭。在单 block Plan 中，CPU COPY 和声明 `OperationDefinition::reusable_tiles` 的确定性、无副作用 CPU 实现可以复用一个 task 的全部输出。该声明要求输出只依赖静态准备数据、声明的读取视图及其字节。对象 ID、可变外部状态和分配地址均不能影响此类实现的输出。
+
+缓存键包括有序 schema、参数、选定资源身份、kernel 和 placement、物理视图、tile 边长以及读取的传递依赖。外部不可变 allocation 按字节范围计算内容摘要。task 就绪并命中后直接借用缓存 backing，跳过原生调用，仍遵循原有 call retirement 和取消规则。当前 Run 创建自己的 Result 身份和封套。提交与完成 task 计数仅统计实际 backend 工作。
+
+成功 Run 的中间与最终 tile 在 Result 释放后仍可留在缓存内。缓存按最近使用顺序淘汰条目，执行 Root 计入保留的 payload 和缓存元数据。淘汰释放缓存自身的引用，运行中的读者继续持有独立引用。
 
 `COPY host -> device` 产生不同 tile。共享 coherent memory 是一个声明的 domain，使用一个 allocation 并执行同步。更改 backend 需要不同 prepared/compiled placement 契约，不为同一 tile 隐式创建替代 allocation。
 
 ## 限制
 
-容量上界针对受控分配，不代表 RSS、线程栈或不透明 driver 内存。没有 spill、eviction、重算或 storage donation。整 block admission 可能拒绝较小内存串行调度可完成的程序。原型验证抽象字节预算和 hold，不验证实际设备或操作系统分配行为。
+容量上界针对受控分配，不代表 RSS、线程栈或不透明 driver 内存。缓存淘汰释放空闲引用，执行器不会将运行中的存储换出到磁盘。整 block admission 可能拒绝较小内存串行调度可完成的程序。原型验证抽象字节预算和 hold，不验证实际设备或操作系统分配行为。

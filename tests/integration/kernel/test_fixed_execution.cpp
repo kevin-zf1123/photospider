@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -191,15 +192,69 @@ int observer_queue_failure(
            config.maximum_queued_tasks);
   return 0;
 }
+int reuse_immutable_backings() {
+  auto registry = std::make_shared<ps::OperationRegistry>();
+  auto op = ps::test::fixed_fixture::operation("pair", 0, false, 2);
+  op.reusable_tiles = true;
+  PS_REQUIRE_OK(registry->register_operation(std::move(op)));
+  PS_REQUIRE_OK(registry->freeze());
+  ps::WorkflowDocument doc;
+  doc.nodes = {{1, "pair", {}, {}}};
+  doc.outputs = {{"first", 1, "out0"}, {"second", 1, "out1"}};
+  ps::GraphContext graph(doc);
+  ps::PlanningOptions planning;
+  planning.tile_extent = 4;
+  auto compiled = ps::Compiler(registry).compile(graph, planning);
+  PS_REQUIRE_OK(compiled);
+  ps::ExecutionContextConfig config;
+  config.tile_cache_bytes = 1U << 20;
+  ps::ExecutionContext context(registry, config);
+  auto plan = context.prepare(*compiled.value().plan);
+  PS_REQUIRE_OK(plan);
+  std::array<std::shared_ptr<const ps::CpuStorage>, 2> previous;
+  for (unsigned i = 0; i < 3; ++i) {
+    if (i == 2)
+      PS_CHECK(context.release_cached_tiles());
+    auto submitted = context.submit(plan.value());
+    PS_REQUIRE_OK(submitted);
+    auto result = submitted.value().join();
+    PS_REQUIRE_OK(result);
+    PS_CHECK(result.value().diagnostics.completed_tasks == (i == 1 ? 0 : 1));
+    if (i == 1)
+      PS_CHECK(result.value().diagnostics.allocation_count == 0);
+    unsigned index = 0;
+    for (const auto& output : result.value().results) {
+      auto d = output.second.descriptor();
+      PS_REQUIRE_OK(d);
+      auto view =
+          output.second.acquire_tensor(d.value(), 0, ps::Region({{0, 4}}));
+      PS_REQUIRE_OK(view);
+      auto span = view.value().affine_view();
+      PS_REQUIRE_OK(span);
+      const auto backing = span.value().storage();
+      if (i == 1)
+        PS_CHECK(backing == previous[index]);
+      if (i == 2)
+        PS_CHECK(backing != previous[index]);
+      previous[index++] = backing;
+    }
+    PS_CHECK(previous[0] != previous[1]);
+  }
+  return 0;
+}
+
 int stop_before_final_success() {
   auto registry = std::make_shared<ps::OperationRegistry>();
-  PS_REQUIRE_OK(registry->register_operation(
-      ps::test::fixed_fixture::operation("final", 0)));
+  auto final_op = ps::test::fixed_fixture::operation("final", 0);
+  final_op.reusable_tiles = true;
+  PS_REQUIRE_OK(registry->register_operation(std::move(final_op)));
   PS_REQUIRE_OK(registry->freeze());
   ps::WorkflowDocument document;
   document.nodes = {{1, "final", {}, {}}};
   document.outputs = {{"value", 1, "out0"}};
-  ps::ExecutionContext context(registry);
+  ps::ExecutionContextConfig config;
+  config.tile_cache_bytes = 1U << 20;
+  ps::ExecutionContext context(registry, config);
   ps::PlanningOptions planning;
   planning.tile_extent = 4;
   for (unsigned mode = 0; mode < 3; ++mode) {
@@ -254,6 +309,7 @@ int stop_before_final_success() {
     auto recovered = recovery.value().join();
     PS_REQUIRE_OK(recovered);
     PS_CHECK(recovered.value().diagnostics.completed_tasks == 1);
+    PS_CHECK(context.release_cached_tiles());
   }
   return 0;
 }
@@ -261,6 +317,7 @@ int stop_before_final_success() {
 
 int main() {
   PS_CHECK(stop_before_final_success() == 0);
+  PS_CHECK(reuse_immutable_backings() == 0);
   auto probe = std::make_shared<Probe>();
   auto registry = std::make_shared<ps::OperationRegistry>();
   PS_REQUIRE_OK(registry->register_operation(op("A", 0, probe)));

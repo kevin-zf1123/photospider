@@ -311,6 +311,9 @@ class PHOTOSPIDER_API PreparedOperation final {
       const ResourceBudget& budget = ResourceBudget{}) const;
   /** @brief Complete resolved output contracts; valid for handle lifetime. */
   const OperationTraits& traits() const noexcept;
+  /** True for a registered content-only deterministic, effect-free CPU kernel.
+   */
+  bool reusable_tiles() const noexcept;
   /** @brief Borrowed immutable operation-defined program, possibly nullptr.
    * Runtime callbacks may borrow it while their owning session lives. The
    * producing registered operation alone defines its concrete type.
@@ -389,6 +392,12 @@ struct PHOTOSPIDER_API OperationDefinition final {
    */
   std::function<Status(const void* state, const ResourceSet& resources)>
       validate_resources;
+  /** Opt in to Host tile reuse. A successful kernel's bytes must depend only
+   * on static preparation inputs, declared read views and their bytes. It must
+   * not observe Result object identities, allocation addresses or mutable
+   * external state. The registry's determinism and purity checks also apply.
+   */
+  bool reusable_tiles = false;
 };
 
 /**

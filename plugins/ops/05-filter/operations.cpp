@@ -273,11 +273,13 @@ OperationDefinition make_filter(const std::string& key, Kind kind,
   if (kind == Kind::Normalized) {
     outputs.emplace_back("valid", tensor_schema(ElementType::UInt8, {1, 1}));
   }
-  return generation::operation(key, ports, std::move(p), outputs,
-                               [kind, profile](const auto& in, const auto& p) {
-                                 return std::make_shared<Filter>(kind, profile,
-                                                                 in, p);
-                               });
+  auto definition = generation::operation(
+      key, ports, std::move(p), outputs,
+      [kind, profile](const auto& in, const auto& p) {
+        return std::make_shared<Filter>(kind, profile, in, p);
+      });
+  definition.reusable_tiles = true;
+  return definition;
 }
 }  // namespace ps::plugin_internal::filter
 

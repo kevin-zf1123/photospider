@@ -549,13 +549,15 @@ OperationDefinition operation(unsigned member) {
     p.push_back({"hue_unit", Type::String, true});
   if (member == 5 || member >= 7)
     p.push_back({"source_basis", Type::String, false});
-  return budgeted_operation(generation::operation(
+  auto definition = budgeted_operation(generation::operation(
       names[member], member < 2 ? 3 : 2, std::move(p),
       {{member < 2 ? "modulation" : "values",
         tensor_schema(ElementType::Float64, {1})}},
       [member](const auto& inputs, const auto& p) {
         return std::make_shared<FeatureProgram>(member, inputs, p);
       }));
+  definition.reusable_tiles = true;
+  return definition;
 }
 }  // namespace ps::plugin_internal::grade::feature
 

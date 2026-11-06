@@ -367,13 +367,15 @@ OperationDefinition operation(bool opponent) {
       {"group", Type::String, false}};
   if (opponent)
     parameters.push_back({"model", Type::String, false});
-  return budgeted_operation(generation::operation(
+  auto definition = budgeted_operation(generation::operation(
       opponent ? "grade.color_balance_opponent" : "grade.color_balance_rgb", 3,
       std::move(parameters),
       {{"values", tensor_schema(ElementType::Float64, {1})}},
       [opponent](const auto& inputs, const auto& p) {
         return std::make_shared<Balance>(opponent, inputs, p);
       }));
+  definition.reusable_tiles = true;
+  return definition;
 }
 }  // namespace ps::plugin_internal::grade::balance
 namespace ps::plugin_internal {

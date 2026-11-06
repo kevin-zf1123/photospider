@@ -29,6 +29,7 @@
 #include "execution/fair_admission.hpp"
 #include "execution/native_gpu.hpp"
 #include "execution/task_schedule.hpp"
+#include "execution/tile_cache.hpp"
 #include "execution/tile_view.hpp"
 #include "photospider/core/checked_math.hpp"
 #include "photospider/plugin/fixed_invocation.hpp"
@@ -294,7 +295,8 @@ struct ContextState {
         cpu_count(count),
         gpu_count(config.maximum_gpu_submissions),
         gpu_available(gpu_count),
-        maximum_runs(config.maximum_runs) {
+        maximum_runs(config.maximum_runs),
+        tile_cache(budget, config.tile_cache_bytes) {
     runs.reserve(maximum_runs);
     core_internal::ResourceMetadataAccess::commit(
         metadata, runs.capacity() * sizeof(runs[0]));
@@ -359,6 +361,7 @@ struct ContextState {
   std::uint32_t cpu_count, gpu_count;
   std::atomic<std::uint32_t> gpu_available;
   std::uint32_t maximum_runs;
+  TileCache tile_cache;
   std::mutex mutex;
   bool closed = false;
   std::uint64_t next_run = 1;
@@ -418,6 +421,8 @@ struct RunState : std::enable_shared_from_this<RunState> {
     core_internal::MetadataAllocation tile_allocation, identity_allocation;
     BlockMemory memory;
     std::vector<TileOwner> tiles;
+    ResourceVector<std::uint8_t> cached;
+    ResourceVector<std::pair<TileKey, TileCache::Owner>> candidates;
     std::vector<std::shared_ptr<ValueIdentity>> identities;
     std::vector<ResultRef> canonical;
     std::vector<std::uint32_t> holds;
@@ -598,6 +603,9 @@ RunState::Frame::Frame(RunState& owner, Id block_id, Incoming incoming)
       tile_allocation(std::move(incoming.tile_allocation)),
       identity_allocation(std::move(incoming.identity_allocation)),
       tiles(std::move(incoming.tiles)),
+      cached(ResourceAllocator<std::uint8_t>(owner.prepared->context->budget)),
+      candidates(ResourceAllocator<std::pair<TileKey, TileCache::Owner>>(
+          owner.prepared->context->budget)),
       identities(std::move(incoming.identities)) {
   // NOLINTEND
   const auto& p = run.program();
@@ -629,14 +637,70 @@ RunState::Frame::Frame(RunState& owner, Id block_id, Incoming incoming)
       identities[vi] = identity.take_value();
     }
   }
+  auto& cache = run.prepared->context->tile_cache;
+  ResourceVector<TileKey> keys;
+  if (cache.limit() && p.blocks.size() == 1) {
+    // Both the caller's token and Context shutdown / RunHandle cancellation
+    // interrupt fingerprinting, including within a single very large input.
+    const auto check = [&] {
+      if (run.poll() != ErrorCode::Ok)
+        throw run.abort_status;
+    };
+    try {
+      ResourceAllocationScope scope(run.prepared->context->budget);
+      keys = tile_keys(
+          run.prepared->plan, block,
+          [&](Id id) {
+            const auto& owner = tiles[id];
+            return owner.storage ? cache.input_key(owner.storage, owner.offset,
+                                                   p.tiles[id].bytes, check)
+                                 : TileKey{};
+          },
+          check);
+      cached.resize(p.tasks.size());
+      for (auto task : p.blocks[block].tasks) {
+        const auto& writes = p.tasks[task].writes;
+        if (writes.empty() || keys[writes[0]] == TileKey{})
+          continue;
+        // All outputs of one native invocation must hit together. Roll back
+        // partial hits before any Result builds an owning envelope.
+        bool hit = true;
+        for (auto id : writes) {
+          auto backing = cache.find(keys[id]);
+          if (!backing) {
+            hit = false;
+            break;
+          }
+          tiles[id] = {std::move(backing), 0};
+        }
+        cached[task] = hit;
+        if (!hit)
+          for (auto id : writes)
+            tiles[id] = {};
+      }
+    } catch (const std::bad_alloc&) {
+      keys = {};
+      cache.clear();  // Optional indexing must not prevent ordinary execution.
+    }
+  }
   ResourceAdmissionFailure failure;
   std::uint64_t allocations = 0;
-  auto allocated = BlockMemory::allocate(
-      p, block, run.lanes, run.prepared->context->budget, run.gpu_lanes,
-      run.prepared->native ? &*run.prepared->native : nullptr, &failure,
-      &allocations,
-      std::shared_ptr<MemoryObservation>(run.diagnostics,
-                                         &run.diagnostics->memory));
+  auto allocate = [&] {
+    return BlockMemory::allocate(
+        p, block, run.lanes, run.prepared->context->budget, run.gpu_lanes,
+        run.prepared->native ? &*run.prepared->native : nullptr, &failure,
+        &allocations,
+        std::shared_ptr<MemoryObservation>(run.diagnostics,
+                                           &run.diagnostics->memory),
+        cached);
+  };
+  auto allocated = allocate();
+  if (!allocated.ok() && cache.limit() &&
+      allocated.status().code == ErrorCode::ResourceExhausted) {
+    cache.clear();
+    ResourceVector<TileKey>().swap(keys);
+    allocated = allocate();
+  }
   run.result.diagnostics.allocation_count += allocations;
   if (!allocated.ok()) {
     run.result.diagnostics.last_block_admission_failure = BlockAdmissionFailure{
@@ -644,6 +708,25 @@ RunState::Frame::Frame(RunState& owner, Id block_id, Incoming incoming)
     throw allocated.status();
   }
   memory = allocated.take_value();
+  // Keep candidates private until the block and Run have succeeded. Capturing
+  // the unpublished owner here also covers intermediates retired before RET.
+  std::uint64_t candidate_bytes = 0;
+  if (!keys.empty()) {
+    for (auto task : p.blocks[block].tasks)
+      for (auto id : p.tasks[task].writes) {
+        if (keys[id] == TileKey{} || cached[task])
+          continue;
+        auto owner = memory.unpublished(id);
+        if (owner && owner->capacity() <= cache.limit() - candidate_bytes) {
+          candidate_bytes += owner->capacity();
+          try {
+            candidates.emplace_back(keys[id], std::move(owner));
+          } catch (const std::bad_alloc&) {
+            candidate_bytes = cache.limit();
+          }
+        }
+      }
+  }
   core_internal::MetadataAllocation root_allocation(owner.metadata);
   std::vector<std::uint8_t> roots(p.tiles.size());
   root_allocation.commit(roots.capacity() * sizeof(roots[0]));
@@ -1407,6 +1490,7 @@ const Status& RunState::execute_block(Frame* frame) {
     }
     if (poll() != ErrorCode::Ok)
       frame->abort(abort_status);
+    bool settled_cached = false;
     for (auto& item : frame->work) {
       // Match cancellation's bounded safe-point admission: a rejection racing
       // issue may leave already-accepted work, but the next lane is gated.
@@ -1423,6 +1507,16 @@ const Status& RunState::execute_block(Frame* frame) {
         context.cpu_admission.cancel(frame->cpu_waiter);
         continue;
       }
+      if (!frame->cached.empty()) {
+        auto next = frame->schedule.next_ready(physical::Backend::Cpu);
+        if (next != physical::none && frame->cached[next]) {
+          auto hit = frame->schedule.issue_next(physical::Backend::Cpu);
+          frame->release_readers(next);
+          frame->schedule.complete(hit->key, Status::success());
+          settled_cached = true;
+          break;
+        }
+      }
       auto status = CpuSubmission::Busy;
       context.cpu_admission.try_acquire(frame->cpu_waiter, [&] {
         status = context.workers.submit_ready(&item, acquire);
@@ -1434,6 +1528,8 @@ const Status& RunState::execute_block(Frame* frame) {
         frame->abort(failure(ErrorCode::Cancelled, "context stopped"));
       }
     }
+    if (settled_cached)
+      continue;
     frame->update_head_wait();
     for (unsigned backend = 0; backend < 2; ++backend) {
       const auto kind = static_cast<physical::Backend>(backend);
@@ -1478,6 +1574,7 @@ const Status& RunState::execute_block(Frame* frame) {
   }
 }
 void RunState::run() noexcept {
+  ResourceVector<std::pair<TileKey, TileCache::Owner>> pending_tiles;
   core_internal::ResourceMetadataScope observation(
       prepared->context->budget, diagnostics->metadata_observation);
   try {
@@ -1542,6 +1639,7 @@ void RunState::run() noexcept {
       }
       if (b.end == physical::EndKind::Return) {
         result.results = std::move(frame.final_results);
+        pending_tiles = std::move(frame.candidates);
         break;
       }
       unsigned choice = 0;
@@ -1614,8 +1712,17 @@ void RunState::run() noexcept {
       observe({ErrorCode::Cancelled, {}});
     else if (!prepared->plan.current())
       observe({ErrorCode::Stale, {}});
-    if (!abort_status.ok())
+    if (!abort_status.ok()) {
       result.results.clear();
+    } else {
+      for (const auto& entry : pending_tiles) {
+        try {
+          prepared->context->tile_cache.store(entry.first, entry.second);
+        } catch (const std::bad_alloc&) {
+          break;
+        }
+      }
+    }
     publish_diagnostics();
     terminal = true;
   }
@@ -2320,6 +2427,9 @@ Result<ExecutionResult> RunHandle::join() const {
   } catch (const std::bad_alloc&) {
     return Result<ExecutionResult>({ErrorCode::ResourceExhausted, {}});
   }
+}
+bool ExecutionContext::release_cached_tiles() const {
+  return state_->tile_cache.clear();
 }
 Result<ResourceBudget> ExecutionContext::resource_budget() const {
   return Result<ResourceBudget>(state_->budget);

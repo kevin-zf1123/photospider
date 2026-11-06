@@ -434,6 +434,7 @@ Result<ps_prepared_kernel_v8> prepare_kernel(const KernelPreparation& query) {
 OperationDefinition operation(bool encode, SequenceProfile profile,
                               const char* suffix) {
   OperationDefinition d;
+  d.reusable_tiles = true;
   d.key =
       std::string("color.transfer_") + (encode ? "encode" : "decode") + suffix;
   auto& t = d.traits;

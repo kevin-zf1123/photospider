@@ -145,6 +145,7 @@ ps_kernel_cpu_invoke_v8 pointwise_entry(Pointwise kind) {
 inline OperationDefinition fixed_pointwise(const char* key, Pointwise kind) {
   OperationDefinition definition;
   definition.key = key;
+  definition.reusable_tiles = true;
   auto& traits = definition.traits;
   traits.input_count = pointwise_inputs(kind);
   traits.input_schema.resize(traits.input_count);

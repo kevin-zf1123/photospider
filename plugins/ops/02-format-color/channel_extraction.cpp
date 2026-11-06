@@ -398,6 +398,7 @@ OperationDefinition extraction(const std::string& key, bool named,
                                SequenceProfile profile) {
   OperationDefinition definition;
   definition.key = key;
+  definition.reusable_tiles = true;
   auto& traits = definition.traits;
   traits.input_count = 1;
   OperationPortConstraint port;

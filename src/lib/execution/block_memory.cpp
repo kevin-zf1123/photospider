@@ -260,7 +260,8 @@ Result<BlockMemory> BlockMemory::allocate(
     std::uint32_t lanes, const ResourceBudget& budget, std::uint32_t gpu_lanes,
     const NativeAllocations* native, ResourceAdmissionFailure* failure,
     std::uint64_t* allocation_count,
-    std::shared_ptr<MemoryObservation> observation) {
+    std::shared_ptr<MemoryObservation> observation,
+    const ResourceVector<std::uint8_t>& cached) {
   using Answer = Result<BlockMemory>;
   if (allocation_count)
     *allocation_count = 0;
@@ -293,10 +294,29 @@ Result<BlockMemory> BlockMemory::allocate(
     for (auto task : block.tasks)
       if (!add(program.tasks[task].writes.size(), &allocations))
         return Answer(exhausted());
+    auto scratch = reservation.scratch;
+    if (!cached.empty() && !scratch[0][1] && !scratch[0][2]) {
+      scratch[0] = {};
+      for (auto task : block.tasks) {
+        const auto& t = program.tasks[task];
+        if (!cached[task] &&
+            program.placements[t.placement].backend == physical::Backend::Cpu) {
+          for (unsigned domain = 0; domain < 3; ++domain)
+            scratch[0][domain] =
+                std::max(scratch[0][domain], t.scratch[domain]);
+        }
+      }
+    }
     std::uint64_t private_allocations = 0;
     std::array<std::uint64_t, 3> domain_bytes{reservation.outputs[0], 0, 0};
     for (auto task : block.tasks)
       for (auto tile : program.tasks[task].writes) {
+        if (!cached.empty() && cached[task]) {
+          const auto& t = program.tiles[tile];
+          domain_bytes[0] -= (t.bytes + t.alignment - 1) & ~(t.alignment - 1);
+          --allocations;
+          continue;
+        }
         const auto domain = static_cast<unsigned>(program.tiles[tile].domain);
         if (domain != 0 && (!native->tiles[tile] ||
                             !add(native->tiles[tile], &domain_bytes[domain])))
@@ -308,7 +328,7 @@ Result<BlockMemory> BlockMemory::allocate(
       for (unsigned domain : {0U, 1U, 2U}) {
         const auto bytes =
             domain == 0
-                ? reservation.scratch[backend][0]
+                ? scratch[backend][0]
                 : (native ? native->scratch[block_id][backend][domain] : 0);
         const auto count = backend == 0 ? lanes : gpu_lanes;
         std::uint64_t total;
@@ -472,6 +492,8 @@ Result<BlockMemory> BlockMemory::allocate(
     };
     for (auto task : block.tasks)
       for (auto id : program.tasks[task].writes) {
+        if (!cached.empty() && cached[task])
+          continue;
         const auto& tile = program.tiles[id];
         if (tile.domain == physical::Domain::Device) {
           auto storage = allocate_private(tile.bytes, native->tiles[id]);
@@ -494,7 +516,7 @@ Result<BlockMemory> BlockMemory::allocate(
     for (std::size_t i = 0; i < result.scratch_.size(); ++i) {
       const auto backend = i < lanes ? 0U : 1U;
       for (unsigned domain : {0U, 1U, 2U}) {
-        const auto scratch_bytes = reservation.scratch[backend][domain];
+        const auto scratch_bytes = scratch[backend][domain];
         if (!scratch_bytes)
           continue;
         if (domain == 1) {

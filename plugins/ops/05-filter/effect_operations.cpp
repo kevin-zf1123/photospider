@@ -128,10 +128,12 @@ OperationDefinition make_effect(const std::string& key, EffectKind kind,
       {"output", tensor_schema(ElementType::Float64, {1, 1})}};
   if (kind == EffectKind::Box || kind == EffectKind::Disk)
     outputs.emplace_back("valid", tensor_schema(ElementType::UInt8, {1, 1}));
-  return generation::operation(key, 2, std::move(p), outputs,
-                               [kind, profile](const auto& in, const auto& p) {
-                                 return std::make_shared<Effect>(kind, profile,
-                                                                 in, p);
-                               });
+  auto definition = generation::operation(
+      key, 2, std::move(p), outputs,
+      [kind, profile](const auto& in, const auto& p) {
+        return std::make_shared<Effect>(kind, profile, in, p);
+      });
+  definition.reusable_tiles = true;
+  return definition;
 }
 }  // namespace ps::plugin_internal::filter

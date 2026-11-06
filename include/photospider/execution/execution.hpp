@@ -38,6 +38,10 @@ struct ExecutionContextConfig final {
    */
   std::uint64_t maximum_live_bytes = 256U * 1024U * 1024U;
   std::optional<ResourceLimits> managed_resources;
+  /** Maximum bytes retained for reusable immutable Host tiles across Runs in
+   * this context. Zero disables reuse. Active Runs retain independent owners.
+   */
+  std::uint64_t tile_cache_bytes = 0;
 };
 struct ExecutionBinding final {
   std::string name;
@@ -339,6 +343,11 @@ class PHOTOSPIDER_API ExecutionContext final {
                            const CancellationToken& cancellation = {},
                            ExecutionOptions options = {});
   Result<ResourceBudget> resource_budget() const;
+  /** Release idle cache references before retrying a rejected admission.
+   * Thread-safe; returns true if any entries were removed. Running readers
+   * keep their owners. No Run is retried or cancelled by this method.
+   */
+  bool release_cached_tiles() const;
   std::uint32_t cpu_workers() const noexcept;
   /** @brief Human-readable native device and driver description for
    * diagnostics. Empty until successful native device creation during prepare.

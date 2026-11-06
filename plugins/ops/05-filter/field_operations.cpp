@@ -390,10 +390,12 @@ OperationDefinition make_field(const std::string& key, FieldKind kind,
         name, tensor_schema(valid ? ElementType::UInt8 : ElementType::Float64,
                             {1, 1}));
   }
-  return generation::operation(key, ports, std::move(parameters), outputs,
-                               [kind, profile](const auto& in, const auto& p) {
-                                 return std::make_shared<Fields>(kind, profile,
-                                                                 in, p);
-                               });
+  auto definition = generation::operation(
+      key, ports, std::move(parameters), outputs,
+      [kind, profile](const auto& in, const auto& p) {
+        return std::make_shared<Fields>(kind, profile, in, p);
+      });
+  definition.reusable_tiles = true;
+  return definition;
 }
 }  // namespace ps::plugin_internal::filter

@@ -60,7 +60,8 @@ class BlockMemory final {
       const NativeAllocations* native = nullptr,
       ResourceAdmissionFailure* failure = nullptr,
       std::uint64_t* allocation_count = nullptr,
-      std::shared_ptr<MemoryObservation> observation = {});
+      std::shared_ptr<MemoryObservation> observation = {},
+      const ResourceVector<std::uint8_t>& cached = {});
   MutableBuffer& tile(physical::Id id) { return tiles_.at(id); }
   gpu_internal::DeviceStorage* device_tile(physical::Id id) {
     return device_tiles_.at(id).get();

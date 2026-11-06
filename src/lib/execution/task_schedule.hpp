@@ -65,6 +65,10 @@ class TaskSchedule final {
    * Coordinator-only, allocation-free. Effects remain gated by retirement.
    */
   bool has_ready(physical::Backend backend);
+  physical::Id next_ready(physical::Backend backend) {
+    return has_ready(backend) ? ready_[static_cast<unsigned>(backend)].front()
+                              : physical::none;
+  }
   /** @brief Arm one eligible task before calling the backend submit function.
    * Caller must already own its resource/queue credit and completion slot.
    * A rejected submit is completed locally with its failure status; accepted

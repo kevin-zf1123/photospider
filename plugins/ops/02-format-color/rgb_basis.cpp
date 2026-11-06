@@ -1096,6 +1096,7 @@ OperationDefinition definition(unsigned member, const std::string& suffix,
   const std::array<const char*, 3> names{
       {"rgb_to_xyz", "xyz_to_rgb", "adapt_xyz_white"}};
   OperationDefinition op;
+  op.reusable_tiles = true;
   op.key = std::string("color.") + names[member] + '_' + suffix;
   auto& traits = op.traits;
   traits.input_count = 1;

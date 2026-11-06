@@ -248,11 +248,13 @@ OperationDefinition make_local(const std::string& key, LocalKind kind,
         p.push_back({"component_axis", Type::Int64});
     }
   }
-  return generation::operation(
+  auto definition = generation::operation(
       key, ports, std::move(p),
       {{"output", tensor_schema(ElementType::Float64, {1, 1})}},
       [kind, profile](const auto& in, const auto& p) {
         return std::make_shared<LocalFilter>(kind, profile, in, p);
       });
+  definition.reusable_tiles = true;
+  return definition;
 }
 }  // namespace ps::plugin_internal::filter

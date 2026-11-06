@@ -361,7 +361,7 @@ struct Adjustment final : Program {
 
 OperationDefinition operation(bool logarithmic) {
   using Type = OperationParameterType;
-  return budgeted_operation(generation::operation(
+  auto definition = budgeted_operation(generation::operation(
       logarithmic ? "grade.contrast_log2" : "grade.contrast_linear", 2,
       {{"axis", Type::Int64, false},
        {"components", Type::String, false},
@@ -371,6 +371,8 @@ OperationDefinition operation(bool logarithmic) {
       [logarithmic](const auto& inputs, const auto& parameters) {
         return std::make_shared<Adjustment>(logarithmic, inputs, parameters);
       }));
+  definition.reusable_tiles = true;
+  return definition;
 }
 }  // namespace ps::plugin_internal::grade::contrast
 namespace ps::plugin_internal {

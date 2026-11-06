@@ -136,6 +136,7 @@ set(
   src/lib/data/tensor_validation.cpp
   src/lib/plugin/port_validation.cpp
   src/lib/data/input_snapshot.cpp
+  src/lib/execution/tile_cache.cpp
   src/lib/execution/execution.cpp
   src/lib/execution/task_schedule.cpp
   src/lib/execution/cpu_workers.cpp

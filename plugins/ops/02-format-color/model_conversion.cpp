@@ -1503,6 +1503,7 @@ Result<ps_prepared_kernel_v8> prepare_kernel(const KernelPreparation& query) {
 OperationDefinition definition(Kind kind, SequenceProfile profile,
                                const char* suffix, bool fast = false) {
   OperationDefinition def;
+  def.reusable_tiles = true;
   def.key = std::string(operation_name(kind)) + suffix;
   auto& traits = def.traits;
   traits.input_count = 1;

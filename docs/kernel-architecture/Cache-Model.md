@@ -1,12 +1,12 @@
 # Tile Storage, Lifetimes and Admission
 
-Status: Proposed breaking design. This page replaces the executor cache design with unique tile storage. See the [Plan contract](Compiler-and-Execution.md) and [Chinese reader version](zh/Cache-Model.zh.md).
+Status: Proposed breaking design for block storage and admission. The Host tile cache described below is implemented. See the [Plan contract](Compiler-and-Execution.md) and [Chinese reader version](zh/Cache-Model.zh.md).
 
 ## Data layout and ownership
 
-A dynamic materialized tile has identity `(RunId, ActivationId, TileId)`, one producer, one allocation and one immutable domain. Different simultaneously live materialized tiles have distinct backing allocations. Consumers share a tile's read-only handle. Views and block-argument names for that tile refer to the same value rather than materializing another one.
+A dynamic materialized tile has identity `(RunId, ActivationId, TileId)`, one producer, one allocation and one immutable domain. Newly computed tiles have distinct backing allocations. A verified cache hit borrows an immutable allocation from an earlier execution. Consumers share a tile's read-only handle. Views and block-argument names for that tile refer to the same value rather than materializing another one.
 
-The baseline separately allocates the current block's output buffers at admission. A slab sliced into several logical output buffers is outside this baseline. Allocators may reuse addresses after the previous allocation's final owner releases it; the Plan never aliases live tiles. Scratch is private to a submission and its lane can be reused after completion.
+The baseline separately allocates the current block's missing output buffers at admission. A slab sliced into several logical output buffers is outside this baseline. Allocators may reuse addresses after the previous allocation's final owner releases it; the Plan never aliases live tiles. Scratch is private to a submission and its lane can be reused after completion.
 
 External Result bindings may use existing valid Tensor backing. Preflight checks names, schemas, coverage, layout and owners without scanning samples. Explicit import COPY tasks materialize the required external tiles into the Plan representation. They belong to the earliest consuming call and participate in its dependency graph. Zero-copy binding is permitted only for separate, compatible immutable tile allocations. No hidden input-copy cache exists.
 
@@ -78,10 +78,14 @@ Coalescing DAG path blocks increases scheduling freedom and can also increase th
 
 IR/Plan identities serve reproducibility and optional host artifact lookup. PreparedPlan reuse shares immutable code/resources. Immutable input snapshot utilities can remain outside the executor and provide binding owners; they do not authorize execution-result reuse.
 
-The replacement executor has no completed-result cache, checkpoint cache, block-state cache, residency mirror, automatic input-copy cache or hot-path tile-content hashing. Each admitted task executes once unless skipped by abort/failure or elided during planning. A host can bind cached outputs as explicit inputs under its own policy.
+A host can enable a context-local Host tile cache with `ExecutionContextConfig::tile_cache_bytes`. Zero disables it. In single-block Plans a CPU COPY or a deterministic, side-effect-free CPU implementation that declares `OperationDefinition::reusable_tiles` can reuse all the outputs of a task together. The declaration promises that outputs depend only on frozen preparation data, declared read views and their bytes. Object IDs, mutable external state and allocation addresses cannot affect an opted-in implementation's output.
+
+Keys include ordered schemas, parameters, selected resource identities, kernel and placement, physical views, tile extent and transitive read dependencies. Immutable external allocations are fingerprinted by byte range. When a task becomes ready, a hit satisfies its dependencies using the cached backing and skips the native invocation. Normal call retirement and cancellation still apply. The current Run creates its own Result identities and envelopes. Task submission and completion counters count actual backend work.
+
+Successful Runs retain bounded intermediate and final tiles after their Result handles are released. Least-recently-used entries are evicted under the cache limit. The execution Root accounts for retained payloads and cache metadata. Evicting a cache entry releases its reference while active readers keep theirs.
 
 `COPY host -> device` produces a different tile. Shared coherent memory is one declared domain with one allocation and synchronization. Changing backend requires a different prepared/compiled placement contract, never a hidden alternate allocation for the same tile.
 
 ## Limits
 
-The bound covers controlled capacity, not RSS, stacks or opaque driver memory. There is no spill, eviction, recomputation or storage donation. Full-block admission may reject programs executable under a smaller-memory serial schedule. The prototype checks abstract byte budgets and holds, not physical device or operating-system allocation behavior.
+The bound covers controlled capacity, not RSS, stacks or opaque driver memory. Cache eviction drops idle references. The execution engine does not spill live Run storage. Full-block admission may reject programs executable under a smaller-memory serial schedule. The prototype checks abstract byte budgets and holds, not physical device or operating-system allocation behavior.

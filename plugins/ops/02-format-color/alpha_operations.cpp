@@ -944,6 +944,7 @@ Result<ps_prepared_kernel_v8> prepare_kernel(const KernelPreparation& query) {
 OperationDefinition alpha_definition(const std::string& key, Action action,
                                      numeric_ops::SequenceProfile profile) {
   OperationDefinition d;
+  d.reusable_tiles = true;
   d.key = key;
   auto& t = d.traits;
   OperationPortConstraint port;

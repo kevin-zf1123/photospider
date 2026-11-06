@@ -386,7 +386,7 @@ struct Exposure final : Program {
 };
 OperationDefinition operation(bool field) {
   using Type = OperationParameterType;
-  return budgeted_operation(generation::operation(
+  auto definition = budgeted_operation(generation::operation(
       field ? "grade.exposure_field" : "grade.exposure", 2,
       {{"axis", Type::Int64, false},
        {"components", Type::String, false},
@@ -396,6 +396,8 @@ OperationDefinition operation(bool field) {
       [field](const auto& inputs, const auto& parameters) {
         return std::make_shared<Exposure>(field, inputs, parameters);
       }));
+  definition.reusable_tiles = true;
+  return definition;
 }
 }  // namespace ps::plugin_internal::grade
 namespace ps::plugin_internal {

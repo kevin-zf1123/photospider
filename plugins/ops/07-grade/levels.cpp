@@ -354,7 +354,7 @@ struct Adjustment final : Program {
 
 OperationDefinition operation(bool signed_levels) {
   using Type = OperationParameterType;
-  return budgeted_operation(generation::operation(
+  auto definition = budgeted_operation(generation::operation(
       signed_levels ? "grade.levels_signed" : "grade.levels_bounded", 2,
       {{"axis", Type::Int64, false},
        {"components", Type::String, false},
@@ -364,6 +364,8 @@ OperationDefinition operation(bool signed_levels) {
       [signed_levels](const auto& inputs, const auto& parameters) {
         return std::make_shared<Adjustment>(signed_levels, inputs, parameters);
       }));
+  definition.reusable_tiles = true;
+  return definition;
 }
 }  // namespace ps::plugin_internal::grade::levels
 namespace ps::plugin_internal {
