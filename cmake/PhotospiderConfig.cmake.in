@@ -4,6 +4,7 @@ if(NOT Photospider_FIND_COMPONENTS OR
    "kernel" IN_LIST Photospider_FIND_COMPONENTS OR
    "ops" IN_LIST Photospider_FIND_COMPONENTS OR
    "ops_sdk" IN_LIST Photospider_FIND_COMPONENTS OR
+   "result_files" IN_LIST Photospider_FIND_COMPONENTS OR
    "benchmark_tools" IN_LIST Photospider_FIND_COMPONENTS)
   include(CMakeFindDependencyMacro)
   find_dependency(Threads)
@@ -13,6 +14,7 @@ if(NOT Photospider_FIND_COMPONENTS OR
 endif()
 
 set(Photospider_kernel_FOUND TRUE)
+set(Photospider_result_files_FOUND @PHOTOSPIDER_BUILD_TOOLS@)
 set(Photospider_ops_FOUND @PHOTOSPIDER_BUILD_OPS@)
 set(Photospider_ops_headers_FOUND @PHOTOSPIDER_BUILD_OPS@)
 set(Photospider_operation_sdk_FOUND TRUE)
@@ -25,6 +27,7 @@ foreach(_Photospider_component IN LISTS Photospider_FIND_COMPONENTS)
      NOT _Photospider_component STREQUAL "operation_sdk" AND
      NOT _Photospider_component STREQUAL "ops_headers" AND
      NOT _Photospider_component STREQUAL "ops_sdk" AND
+     NOT _Photospider_component STREQUAL "result_files" AND
      NOT _Photospider_component STREQUAL "benchmark_tools")
     set(Photospider_${_Photospider_component}_FOUND FALSE)
   endif()

@@ -114,21 +114,40 @@ with tempfile.TemporaryDirectory(prefix="photospider-cli-") as directory:
 
     def values(directory):
         manifest = json.loads((Path(directory) / "manifest.json").read_text())
+        assert manifest["format"] == "photospider.results" and manifest["version"] == 2
+        assert manifest["byte_order"] == sys.byteorder
         result = {}
         for output in manifest["outputs"]:
             items = {}
-            for fragment in output["tensors"][0]["fragments"]:
-                raw = (Path(directory) / fragment["path"]).read_bytes()
-                assert len(raw) == fragment["byte_length"] == fragment["shape"][0] * 8
-                for i, value in enumerate(struct.unpack("<" + "d" * (len(raw) // 8), raw)):
-                    offset = fragment["offset"][0] + i
+            tensor = output["tensors"][0]
+            assert tensor["encoding"] == "physical-tile"
+            raw = (Path(directory) / output["path"]).read_bytes()
+            magic, extent, count = struct.unpack_from("<8sQQ", raw)
+            assert magic == b"PSXTILE2" and extent == 2 and count == len(tensor["tiles"])
+            assert len(raw) == output["byte_length"]
+            pos = 24 + count * 24
+            for ordinal, tile in enumerate(tensor["tiles"]):
+                slot, index, size = struct.unpack_from("<QQQ", raw, 24 + ordinal * 24)
+                assert slot == tensor["slot"] and index == tile["index"]
+                assert tile["offset"] == [index * extent] and tile["byte_strides"] == [8]
+                assert tile["file_offset"] == pos and size == tile["byte_length"] == tile["shape"][0] * 8
+                pos += size
+                for i, (value,) in enumerate(struct.iter_unpack("=d", raw[tile["file_offset"]:pos])):
+                    offset = tile["offset"][0] + i
                     assert offset not in items
                     items[offset] = value
+            assert pos == len(raw)
             result[output["name"]] = items
+        assert len(list(Path(directory).glob("*.bin"))) == len(manifest["outputs"])
         return result
 
     expected = {"first": dict(enumerate([3., 6., 9., 12.])), "second": dict(enumerate([9., 18., 27., 36.]))}
     assert values("plain.results") == expected
+    run(psx, "plain.psxp", *runtime, "--export-buffer-bytes", 3, "-o", "tiny-buffer.results")
+    assert values("tiny-buffer.results") == expected
+    for tile_file in Path("plain.results").glob("*.bin"):
+        assert tile_file.read_bytes() == (Path("tiny-buffer.results") / tile_file.name).read_bytes()
+    run(psx, "plain.psxp", *runtime, "--export-buffer-bytes", 0, "-o", "invalid-buffer", code=2)
     run(psc, "raw.psir", *common, "-O", "optimize", "-O", "optimize", "--emit", "ir",
         "--save-ir", "0=again.psir", "--save-ir", "1=one.psir", "--release-ir-after-save", 0, "-o", "two.psir")
     assert Path("again.psir").read_bytes() == Path("raw.psir").read_bytes()
@@ -141,6 +160,10 @@ with tempfile.TemporaryDirectory(prefix="photospider-cli-") as directory:
     write("requests.json", requests)
     run(psx, "plain.psxp", *runtime, "--requests", "requests.json", "-o", "partial.results")
     assert values("partial.results") == {"second": {2: 27., 3: 36.}}
+    write("empty-requests.json", {"format": "photospider.requests", "version": 1,
+                                  "outputs": [{"name": "second", "members": []}]})
+    run(psx, "plain.psxp", *runtime, "--requests", "empty-requests.json", "-o", "empty.results")
+    assert values("empty.results") == {"second": {}}
     run(psc, "input.json", *common, "--tile-extent", 2, "--requests", "requests.json", "-o", "partial.psxp")
     run(psx, "partial.psxp", *runtime, "-o", "compiled-partial.results")
     assert values("compiled-partial.results") == {"second": {2: 27., 3: 36.}}

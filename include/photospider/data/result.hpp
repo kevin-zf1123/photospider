@@ -273,9 +273,14 @@ class PHOTOSPIDER_API ResultTensorReadWindow final {
   Result<bool> visit_backing_regions(
       const ResourceBudget& budget,
       const std::function<Status(const Region&)>& visitor) const;
-  /** @brief Copy this authorized window in logical row-major order.
-   * The caller owns exactly bytes writable bytes. No payload allocation occurs;
-   * cancellation and Root work limits apply. Failure may leave a partial copy.
+  /** @brief Concatenate authorized backing pieces in visit_backing_regions
+   * order. Copy each piece in increasing physical address order. Its samples
+   * must occupy one dense interval; holes or overlapping samples return
+   * InvalidArgument with reason ViewUnavailable.
+   * @param destination Caller-owned writable storage disjoint from the source.
+   * @param bytes Exact window element count times element size.
+   * @return Status of the copy. Cancellation or failure may leave a prefix.
+   * Root work limits apply; copying allocates no payload.
    */
   Status copy_to(std::uint8_t* destination, std::uint64_t bytes) const;
   Result<ResultTensorRun> row_run(const std::vector<std::uint64_t>& at) const;

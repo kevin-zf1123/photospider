@@ -54,6 +54,8 @@ Float32 空间边缘 chunk 的高为 2、宽为 72、planar 通道数为 4 时�
 
 窗口保留来源 owner 和取消状态。Token 取消后 run 查找可返回 Cancelled；此前返回的指针在窗口销毁前仍有 owner。获取窗口不执行上游 producer，也不填充空洞。获取和访问工作按相应 Root 与限制计费。
 
+`ResultTensorReadWindow::copy_to` 按 `visit_backing_regions` 的遍历顺序拼接已授权的存储片段，每个片段内按物理地址递增顺序复制。两个相邻的 2×2 tile 分别存储 `[10,11,20,21]` 和 `[12,13,22,23]` 时，输出为 `[10,11,20,21,12,13,22,23]`。每个片段的样本必须占据一个连续区间，且彼此独立。裁剪或带步长的片段存在间隙，或广播视图的样本地址重叠时，返回 `InvalidArgument`，原因为 `ViewUnavailable`。
+
 `publish_tensor_kernel()` 在 callback 前准入容量并准备私有写入。Region 和 Footprint 重载使用同一 Tensor 机制。Callback 只获得请求且尚未发布的覆盖；并行写入必须不相交并在返回前结束。借用写窗口在 callback 返回时失效。成功校验和取消检查后提交 backing，失败不暴露新覆盖。
 
 Writer 活动期间拒绝同 producer 的修改或 seal；移动或替换其 builder 会使事务失败。此前已提交样本保持不可变。空覆盖不调用 writer、不分配样本 payload。普通执行器额外要求每次发布恰好覆盖一个完整所选成员 tile；共享 stage 提交可以包含多个完整 tile。

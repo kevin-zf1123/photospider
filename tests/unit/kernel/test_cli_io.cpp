@@ -17,16 +17,11 @@
 #include "psx/result_export.hpp"
 
 namespace {
-void tiled_bindings(const ps::tools::fs::path& directory) {
+std::shared_ptr<ps::OperationRegistry> copy_registry(
+    const ps::SchemaTemplate& schema) {
   using namespace ps;         // NOLINT(build/namespaces)
   using namespace ps::tools;  // NOLINT(build/namespaces)
   auto registry = std::make_shared<OperationRegistry>();
-  SchemaTemplate schema;
-  schema.id = "test.binding";
-  ResultTensorSpec tensor;
-  tensor.key = "samples";
-  tensor.descriptor = {ElementType::Float64, {3, 5}};
-  schema.tensors.push_back(tensor);
   OperationPortConstraint port;
   port.result_schema_id = schema.id;
   port.result_schema_version = 1;
@@ -48,11 +43,37 @@ void tiled_bindings(const ps::tools::fs::path& directory) {
   };
   check(registry->register_operation(std::move(definition)));
   check(registry->freeze());
+  return registry;
+}
+ps::WorkflowDocument copy_document(const ps::SchemaTemplate& schema) {
+  using namespace ps;  // NOLINT(build/namespaces)
   WorkflowDocument document;
   document.inputs = {
       {1, "input", std::make_shared<const SchemaTemplate>(schema)}};
   document.nodes = {{1, "copy", {WorkflowInputReference{1}}, {}}};
   document.outputs = {{"result", 1, "value"}};
+  return document;
+}
+ps::ExecutionPlan export_plan(const ps::SchemaTemplate& schema,
+                              std::uint64_t extent) {
+  ps::GraphContext graph(copy_document(schema));
+  ps::Compiler compiler(copy_registry(schema));
+  ps::PlanningOptions options;
+  options.tile_extent = extent;
+  return ps::tools::take(compiler.plan(
+      ps::tools::take(compiler.analyze(graph.snapshot())), options));
+}
+void tiled_bindings(const ps::tools::fs::path& directory) {
+  using namespace ps;         // NOLINT(build/namespaces)
+  using namespace ps::tools;  // NOLINT(build/namespaces)
+  SchemaTemplate schema;
+  schema.id = "test.binding";
+  ResultTensorSpec tensor;
+  tensor.key = "samples";
+  tensor.descriptor = {ElementType::Float64, {3, 5}};
+  schema.tensors.push_back(tensor);
+  auto registry = copy_registry(schema);
+  auto document = copy_document(schema);
   GraphContext graph(document);
   Compiler compiler(registry);
   PlanningOptions options;
@@ -178,6 +199,85 @@ void tiled_bindings(const ps::tools::fs::path& directory) {
         throw std::runtime_error("import COPY changed raw bits or coordinates");
     }
 }
+std::uint64_t header_u64(const std::string& file, std::size_t offset) {
+  std::uint64_t value = 0;
+  for (unsigned i = 0; i < 8; ++i)
+    value |= static_cast<std::uint64_t>(
+                 static_cast<unsigned char>(file.at(offset + i)))
+             << (8 * i);
+  return value;
+}
+void check_header(const std::string& file, std::uint64_t extent,
+                  std::uint64_t count) {
+  if (file.compare(0, 8, "PSXTILE2", 8) || header_u64(file, 8) != extent ||
+      header_u64(file, 16) != count || file.size() < 24 + 24 * count)
+    throw std::runtime_error("invalid output header");
+}
+void check_record(const std::string& file, unsigned record, unsigned slot,
+                  std::uint64_t id, std::uint64_t length) {
+  const auto pos = 24 + record * 24;
+  if (header_u64(file, pos) != slot || header_u64(file, pos + 8) != id ||
+      header_u64(file, pos + 16) != length)
+    throw std::runtime_error("invalid output tile record");
+}
+void tiled_export(const ps::tools::fs::path& directory) {
+  using namespace ps;         // NOLINT(build/namespaces)
+  using namespace ps::tools;  // NOLINT(build/namespaces)
+  ResourceBudget budget;
+  Files files;
+  SchemaTemplate schema;
+  schema.id = "test.export";
+  ResultTensorSpec member;
+  member.key = "samples";
+  member.descriptor = {ElementType::UInt8, {2, 4}};
+  schema.tensors.push_back(member);
+  auto metadata = member;
+  metadata.key = "tag";
+  metadata.descriptor.shape = {1};
+  schema.tensors.push_back(metadata);
+  const auto plan = export_plan(schema, 2);
+  const auto& grid = plan.output("result").tile_grids[0];
+  for (bool reversed : {false, true}) {
+    auto builder = take(ResultBuilder::start(budget, schema, "export", {}, 2));
+    std::vector<std::string> payloads{"abAB", "cdCD"};
+    for (unsigned id = 0; id < 2; ++id) {
+      auto box = take(grid.region(id));
+      auto buffer = take(budget.allocator().allocate(4));
+      std::memcpy(buffer.data(), payloads[id].data(), 4);
+      StridedLayout layout = reversed ? StridedLayout{3, {-2, -1}, {0, 2 * id}}
+                                      : StridedLayout{0, {2, 1}, {0, 2 * id}};
+      check(builder.publish_tensor(0, box, layout, std::move(buffer).freeze()));
+    }
+    const std::uint8_t tag = 123;
+    check(builder.publish_tensor(1, Region::whole({1}), ByteView(&tag, 1)));
+    ExecutionResult result;
+    result.results.emplace("result", take(builder.seal()));
+    auto output = directory / (reversed ? "reversed" : "tiled");
+    psx::export_results(plan, result, output, files, {}, budget);
+    JsonDocument manifest(files.read(output / "manifest.json"));
+    auto entry = manifest.root().at("outputs").array()[0];
+    auto file = files.read(output / entry.at("path").text());
+    check_header(file, 2, 3);
+    check_record(file, 2, 1, 0, 1);
+    if (file.size() != 96 + 9 || entry.at("byte_length").u64() != file.size() ||
+        file.back() != 123)
+      throw std::runtime_error("second tensor missing from shared output bin");
+    auto tiles = entry.at("tensors").array()[0].at("tiles").array();
+    if (tiles.size() != 2)
+      throw std::runtime_error("expected two complete tiles");
+    for (unsigned id = 0; id < 2; ++id) {
+      auto tile = tiles[id];
+      check_record(file, id, 0, id, 4);
+      if (tile.at("index").u64() != id ||
+          tile.at("offset").array()[1].u64() != 2 * id ||
+          tile.at("byte_strides").array()[0].i64() != (reversed ? -2 : 2) ||
+          tile.at("file_offset").u64() != 96 + 4 * id ||
+          file.substr(tile.at("file_offset").u64(), 4) != payloads[id])
+        throw std::runtime_error(
+            "tile export changed physical bytes or layout");
+    }
+  }
+}
 void worker_options() {
   using namespace ps::tools;  // NOLINT(build/namespaces)
   for (const auto* option : {"--threads", "--parallelism"}) {
@@ -217,19 +317,20 @@ int main() try {
   } cleanup{directory};
   worker_options();
   tiled_bindings(directory);
+  tiled_export(directory);
   ResourceBudget budget;
   SchemaTemplate schema;
   schema.id = "test.bits";
   schema.version = 1;
   ResultTensorSpec tensor;
   tensor.key = "samples";
-  tensor.descriptor = {ElementType::Float64, {262144}};
+  tensor.descriptor = {ElementType::Float64, {262145}};
   schema.tensors.push_back(tensor);
-  std::vector<std::uint64_t> bits(262144);
+  std::vector<std::uint64_t> bits(262145);
   for (std::size_t i = 0; i < bits.size(); ++i)
     bits[i] =
         i % 2 ? UINT64_C(0x8000000000000000) : UINT64_C(0x7ff8000000000042);
-  auto builder = take(ResultBuilder::start(budget, schema, "io"));
+  auto builder = take(ResultBuilder::start(budget, schema, "io", {}, 262144));
   check(builder.publish_tensor(
       0, Region::whole({bits.size()}),
       {reinterpret_cast<const std::uint8_t*>(bits.data()), bits.size() * 8}));
@@ -238,40 +339,40 @@ int main() try {
   Files files;
   auto output = directory / "result";
   files.reserve(output);
-  ps::tools::psx::export_results(result, output, files, {}, budget);
+  const auto plan = export_plan(schema, 262144);
+  ps::tools::psx::export_results(plan, result, output, files, {}, budget);
   JsonDocument manifest(files.read(output / "manifest.json"));
-  auto fragments = manifest.root()
-                       .at("outputs")
-                       .array()[0]
-                       .at("tensors")
-                       .array()[0]
-                       .at("fragments")
-                       .array();
-  if (fragments.size() < 2)
-    throw std::runtime_error("export did not split a large window");
-  std::vector<bool> seen(bits.size());
-  for (auto fragment : fragments) {
-    auto bytes = files.read(output / fragment.at("path").text());
-    if (bytes.size() > 1024 * 1024)
-      throw std::runtime_error("unbounded export buffer");
-    auto offset = fragment.at("offset").array()[0].u64();
-    auto count = fragment.at("shape").array()[0].u64();
-    if (bytes.size() != count * 8 || offset + count > bits.size())
-      throw std::runtime_error("fragment descriptor mismatch");
-    for (std::size_t i = 0; i < count; ++i) {
-      std::uint64_t value = 0;
-      for (unsigned byte = 0; byte < 8; ++byte)
-        value |= static_cast<std::uint64_t>(
-                     static_cast<unsigned char>(bytes[i * 8 + byte]))
-                 << (8 * byte);
-      if (seen[offset + i] || value != bits[offset + i])
-        throw std::runtime_error("overlap or changed IEEE bits");
-      seen[offset + i] = true;
-    }
+  auto entry = manifest.root().at("outputs").array()[0];
+  auto file = files.read(output / entry.at("path").text());
+  check_header(file, 262144, 2);
+  auto tiles = entry.at("tensors").array()[0].at("tiles").array();
+  if (entry.at("byte_length").u64() != 72 + bits.size() * 8 ||
+      file.size() != entry.at("byte_length").u64())
+    throw std::runtime_error("large output bin size mismatch");
+  if (tiles.size() != 2)
+    throw std::runtime_error("expected two complete tiles in the output bin");
+  for (unsigned id = 0; id < 2; ++id) {
+    auto tile = tiles[id];
+    auto offset = id * 262144U;
+    auto count = id == 0 ? 262144U : 1U;
+    check_record(file, id, 0, id, count * 8);
+    if (tile.at("shape").array()[0].u64() != count ||
+        tile.at("offset").array()[0].u64() != offset ||
+        tile.at("file_offset").u64() != 72 + offset * 8 ||
+        std::memcmp(file.data() + tile.at("file_offset").u64(),
+                    bits.data() + offset, count * 8))
+      throw std::runtime_error("tile lost edge geometry or physical IEEE bits");
   }
-  for (bool value : seen)
-    if (!value)
-      throw std::runtime_error("missing coverage");
+  const auto chunked = directory / "chunked";
+  ResourceLimits export_limits;
+  export_limits.capacity[ResourceKind::Payload] = 4093;
+  ResourceBudget export_budget(export_limits);
+  ps::tools::psx::export_results(plan, result, chunked, files, {},
+                                 export_budget, 4093);
+  if (export_budget.statistics().peak[ResourceKind::Payload] != 4093)
+    throw std::runtime_error("export did not respect its staging buffer size");
+  if (files.read(chunked / entry.at("path").text()) != file)
+    throw std::runtime_error("I/O buffer size changed the output bin");
   ExecutionResult invalid_name;
   invalid_name.results.emplace(std::string("output-") + static_cast<char>(0xff),
                                result.results.at("result"));
@@ -279,8 +380,8 @@ int main() try {
   files.reserve(invalid_output);
   bool rejected_name = false;
   try {
-    ps::tools::psx::export_results(invalid_name, invalid_output, files, {},
-                                   budget);
+    ps::tools::psx::export_results(plan, invalid_name, invalid_output, files,
+                                   {}, budget);
   } catch (const ToolError& error) {
     rejected_name = error.id == "PS-JSON-UTF8";
   }

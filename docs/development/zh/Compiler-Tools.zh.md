@@ -91,9 +91,10 @@ Plan 的每个输入必须恰好绑定一次，包括所选输出未使用的输
 | `--threads N` | CPU worker 数；省略使用 context 默认，显式范围为 1..4096。 |
 | `--parallelism N` | 本次 Run 的最大并发 task 数，范围 1..4096；省略时使用 context worker 数量，call 按 Plan 顺序退休。 |
 | `--max-live-bytes N` | 268435456，正的受控 Payload 容量。 |
+| `--export-buffer-bytes N` | 导出时可复用的临时 payload 缓冲区上限，单位为字节，默认 8388608（8 MiB），必须为正数。 |
 | `-o DIRECTORY` | 默认当前目录 `plan-stem.results`；stdin 必须指定输出；目录必须不存在。 |
 
-`psx` 拒绝优化、backend、tile extent 参数。更大的覆盖或不同物理目标需要重新编译。输出是 manifest 和记录真实覆盖的小端二进制片段，不填补缺失区域。逻辑窗口拷贝遵循负/零 stride，保留 NaN、负零等位模式。不创建持久执行服务或恢复状态。
+输出选择使用已编译 Plan 的成员和 tile 编号。`psx` 为每个具名输出写一个带 tile 目录的二进制文件，按物理顺序写入所有选中 tile。新增覆盖或改变物理目标需要重新编译。见[结果格式](Compiler-Tool-Formats.zh.md#results)。
 
 ## 实现边界
 
@@ -116,7 +117,7 @@ Plan 的每个输入必须恰好绑定一次，包括所选输出未使用的输
 
 输出不得与任何输入、资源、库或另一输出指向同一文件；检查包括符号链接解析和硬链接等价性。普通输出先完整编码、写入私有同目录 staging，再原子 rename；允许替换既有普通文件。结果目录在 macOS/Linux/Windows 上通过 exclusive rename 发布；不支持的平台返回 I/O 错误，不复用既有目录。原子发布保证可见性，不承诺断电持久性。stdin/stdout 传递 artifact 字节；诊断、verbose 和 timing 写 stderr。帮助、清单和流水线信息命令使用 stdout，不生成 artifact。
 
-输入 JSON 与 artifact 文本最多 64 MiB。JSON 最多 128 层、4194304 个 DOM 值；拒绝重复键、未知字段、非法 Unicode、错误类型和数值溢出。请求最多 65536 个区间，每个成员只归一化一次。静态资源每项 1..64 MiB，必须匹配 SHA-256。绑定 staging 在读取前申请容量；导出使用受预算管理的最多 1 MiB 片段，每个 Tensor 最多 1048576 片。预算涵盖声明的 buffer，不等于进程 RSS、文件系统缓存或插件私有分配。
+输入 JSON 与 artifact 文本最多 64 MiB。JSON 最多 128 层、4194304 个 DOM 值；拒绝重复键、未知字段、非法 Unicode、错误类型和数值溢出。请求最多 65536 个区间，每个成员只归一化一次。静态资源每项 1..64 MiB，必须匹配 SHA-256。绑定 staging 在读取前申请容量；导出对每个具名输出分配一块可复用的临时缓冲区，大小取配置值与最大选中 tile 字节数的较小值。超过缓冲区大小的 tile 分批连续写入同一文件。文件大小取决于文件头和全部选中 tile 的总字节数。预算涵盖声明的 buffer，不等于进程 RSS、文件系统缓存或插件私有分配。
 
 两个工具均保留选项值中的 `=` 字符，包括 `-oalpha=beta` 这样的短选项附着写法。独立的 `--` 开始位置参数，除非它已被前一个选项作为值消费。非法调用的诊断格式也按同样的参数边界确定。重复指定 `--diagnostic-format` 仍属于参数错误，由第一次指定的格式渲染该错误。
 

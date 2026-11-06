@@ -7,10 +7,10 @@
 
 namespace ps::tools::psx {
 Invocation parse_options(int argc, char** argv, bool* json_diagnostics) {
-  auto parsed =
-      parse_arguments(argc, argv, json_diagnostics, {},
-                      {"--bindings", "--threads", "--parallelism",
-                       "--max-live-bytes", "--max-work", "--max-stages"});
+  auto parsed = parse_arguments(
+      argc, argv, json_diagnostics, {},
+      {"--bindings", "--threads", "--parallelism", "--max-live-bytes",
+       "--max-work", "--max-stages", "--export-buffer-bytes"});
   Invocation o;
   static_cast<CommonOptions&>(o) = std::move(parsed.common);
   require_input(
@@ -28,6 +28,12 @@ Invocation parse_options(int argc, char** argv, bool* json_diagnostics) {
         unsigned_number(o.get("--max-live-bytes"), "--max-live-bytes");
   if (!o.context.maximum_live_bytes)
     throw ToolError("--max-live-bytes must be positive", 2);
+  if (o.has("--export-buffer-bytes")) {
+    o.export_buffer_bytes = unsigned_number(o.get("--export-buffer-bytes"),
+                                            "--export-buffer-bytes");
+    if (!o.export_buffer_bytes)
+      throw ToolError("--export-buffer-bytes must be positive", 2);
+  }
   if (o.has("--max-work")) {
     o.execution.maximum_work =
         unsigned_number(o.get("--max-work"), "--max-work");

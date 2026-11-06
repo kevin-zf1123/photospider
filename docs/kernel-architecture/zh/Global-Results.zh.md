@@ -109,6 +109,8 @@ COPY task 支持 Host、Shared 与 Device 端点。GPU COPY 的 Host 端点使�
 
 发布把物理数组与 backing owner 保存在源自 Result 的存储 owner 中，而发布状态拥有 Root、资源租约与 schema。销毁时先退役数组 backing，再由发布状态释放其 Root 租约。存储 owner 索引避免每次发布都重新扫描此前已发布的 backing；当成员分区允许时，`acquire_tensor` 通过区间查找定位分块，否则使用有界扫描。`acquire_tensor` 在持有发布互斥锁时复制不可变 backing 句柄，然后先解锁再构造拥有型读窗口。`publish_tensor_kernel` 在互斥锁之外准备回调工作，然后重新获取锁，在提交前校验 owner、revision 与 sticky 失败。读窗口保留其 Result 与 backing，只允许读取捕获的 coverage 和所请求矩形内的样本。
 
+物理复制遵循[读窗口存储契约](../../kernel-specs/zh/Tensor-Storage-and-Region-Access.zh.md#读窗口与事务写入)。
+
 `publish_tensor_kernel` 为被请求区域出借可写窗口。Builder 在成员 tile 与 batch 边界处划分请求，并为 spatial 成员提供 tile 内的 planar 字节。它不预留全 domain backing，因此巨大逻辑 domain 上的稀疏请求按实际可写 tile 计费。回调必须使用每个窗口的 `spec()`、`region()`、`sample_axis()` 以及 `row_run()` 或 `rectangle_run()` 返回的 stride。回调不得假定跨窗口的 planar backing 或连续行。
 
 ```cpp

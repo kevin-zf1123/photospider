@@ -19,6 +19,7 @@
 #include "core/resource_observation.hpp"
 #include "data/affine_view.hpp"
 #include "data/footprint_index.hpp"
+#include "data/physical_piece.hpp"
 #include "data/result_device_access.hpp"
 #include "data/result_state.hpp"
 #include "data/result_support.hpp"
@@ -372,6 +373,8 @@ bool inside(const Region& region, const std::vector<std::uint64_t>& at) {
   }
   return true;
 }
+// Bound cancellation latency and charge before writing each batch.
+constexpr std::uint64_t kCopyBatchSamples = 16384;
 }  // namespace
 Status ResultTensorReadWindow::copy_to(std::uint8_t* destination,
                                        std::uint64_t bytes) const try {
@@ -379,38 +382,29 @@ Status ResultTensorReadWindow::copy_to(std::uint8_t* destination,
     return {ErrorCode::InvalidArgument, {}};
   auto count = region_.element_count();
   const auto width = TensorSpan::element_size(spec().descriptor.element_type);
-  if (!count.ok() || !core_internal::can_multiply(count.value(), width) ||
+  if (!count.ok() ||
+      !core_internal::can_multiply(count.value(), width, SIZE_MAX) ||
       bytes != count.value() * width)
     return {ErrorCode::InvalidArgument, "tensor copy byte count mismatch"};
-  const auto metadata_bytes = region_.rank() * sizeof(std::uint64_t);
-  auto scratch = owner_.impl_->budget.reserve(
-      ResourceCapacity::host(metadata_bytes, metadata_bytes));
-  if (!scratch.ok())
-    return scratch.status();
-  core_internal::MetadataAllocation allocation(scratch.value());
-  std::vector<std::uint64_t> at;
-  at.reserve(region_.rank());
-  allocation.commit(at.capacity() * sizeof(std::uint64_t));
-  for (const auto& axis : region_.dimensions())
-    at.push_back(axis.offset);
-  for (std::uint64_t sample = 0; sample < count.value(); ++sample) {
+  for (const auto& span : affine_) {
     if (cancellation_.cancelled())
       return {ErrorCode::Cancelled, {}};
-    auto charged = owner_.impl_->budget.consume({1});
-    if (!charged.ok())
-      return charged;
-    auto row = row_run(at);
-    if (!row.ok())
-      return row.status();
-    std::memcpy(destination + sample * width, row.value().data, width);
-    for (std::size_t axis = at.size(); axis-- > 0;) {
-      const auto d = region_.dimensions()[axis];
-      if (++at[axis] < d.offset + d.extent)
-        break;
-      at[axis] = d.offset;
+    auto piece = data_internal::physical_piece(span);
+    if (!piece.ok())
+      return piece.status();
+    auto source = piece.value();
+    for (std::size_t offset = 0; offset < source.size();) {
+      auto size = std::min<std::uint64_t>(source.size() - offset,
+                                          kCopyBatchSamples * width);
+      window_tick(owner_.impl_->budget, cancellation_, size / width);
+      std::memcpy(destination, source.data() + offset, size);
+      destination += size;
+      offset += size;
     }
   }
   return Status::success();
+} catch (const WindowWorkFailure& failure) {
+  return failure.status;
 } catch (const std::bad_alloc&) {
   return {ErrorCode::ResourceExhausted, {}};
 }

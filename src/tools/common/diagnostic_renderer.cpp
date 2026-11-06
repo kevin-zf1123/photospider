@@ -47,6 +47,7 @@ void check(Status status) {
       status.message.empty() ? error_name(status.code) : status.message, code,
       "PS-" + error_name(status.code));
   error.status = error_name(status.code);
+  error.kernel_code = status.code;
   error.reason = status.reason;
   error.node = status.detail.node_id;
   error.input = status.detail.input_id;

@@ -3,10 +3,12 @@
 
 #include "common/options.hpp"
 #include "photospider/execution/execution.hpp"
+#include "psx/result_export.hpp"
 namespace ps::tools::psx {
 struct Invocation final : CommonOptions {
   ExecutionContextConfig context;
   ExecutionOptions execution;
+  std::uint64_t export_buffer_bytes = kDefaultExportBufferBytes;
 };
 Invocation parse_options(int argc, char** argv, bool* json_diagnostics);
 std::string output_path(const Invocation& options);

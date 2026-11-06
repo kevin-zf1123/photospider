@@ -1,6 +1,8 @@
 #include "photospider/ops/numeric/lut3d_bake.hpp"
 
+#include <cstring>
 #include <map>
+#include <new>
 #include <string>
 #include <utility>
 #include <vector>
@@ -8,6 +10,7 @@
 #include "common/numeric_bits.hpp"
 #include "photospider/core/content_digest.hpp"
 #include "photospider/core/status_helpers.hpp"
+#include "photospider/data/region_runs.hpp"
 
 namespace ps {
 namespace {
@@ -152,7 +155,7 @@ Result<Lut3dBakeReportLayout> prepare_lut3d_bake_report_layout(
 Result<Lut3dBakeReport> read_lut3d_bake_report(
     const ResultRef& result, const Lut3dBakeReportLayout& layout,
     std::uint64_t maximum_window, const CancellationToken& cancellation,
-    const std::function<Status(std::uint64_t)>& consume_work) {
+    const std::function<Status(std::uint64_t)>& consume_work) try {
   using Answer = Result<Lut3dBakeReport>;
   if (cancellation.cancelled())
     return Answer(Status{ErrorCode::Cancelled, {}});
@@ -189,15 +192,37 @@ Result<Lut3dBakeReport> read_lut3d_bake_report(
                                         layout.regions[field], cancellation);
     if (!window.ok())
       return Answer(window.status());
-    auto copied = window.value().copy_to(
-        static_cast<std::uint8_t*>(fields[field]), sizes[field]);
-    if (!copied.ok())
-      return Answer(copied);
+    const auto& region = window.value().region();
+    const auto width =
+        TensorSpan::element_size(window.value().spec().descriptor.element_type);
+    auto count = region.element_count();
+    if (window.value().sample_axis() != region.rank() - 1 || !count.ok() ||
+        sizes[field] % width || count.value() != sizes[field] / width)
+      return Answer(Status{ErrorCode::InvalidArgument,
+                           "invalid LUT3D report field layout"});
+    std::vector<std::uint64_t> at;
+    auto* field_data = static_cast<std::uint8_t*>(fields[field]);
+    for (std::uint64_t index = 0; index < count.value();) {
+      region_run_coordinate(region, index, &at);
+      auto row = window.value().row_run(at);
+      if (!row.ok())
+        return Answer(row.status());
+      const auto& run = row.value();
+      // Report members are nonspatial, so each run follows the final axis.
+      for (std::uint64_t i = 0; i < run.samples; ++i)
+        std::memcpy(
+            field_data + (index + i) * width,
+            run.data + static_cast<std::int64_t>(i) * run.sample_stride_bytes,
+            width);
+      index += run.samples;
+    }
   }
   report.passed = passed != 0;
   for (unsigned i = 0; i < measured.size(); ++i)
     report.measured_table_id |= std::uint64_t{measured[i]} << (8 * i);
   return Answer(std::move(report));
+} catch (const std::bad_alloc&) {
+  return Result<Lut3dBakeReport>(Status{ErrorCode::ResourceExhausted, {}});
 }
 Result<Lut3dBakeDescription> lut3d_bake_from_parameters(
     const std::map<std::string, ParameterValue>& parameters) {

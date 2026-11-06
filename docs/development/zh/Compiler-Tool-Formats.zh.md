@@ -1,6 +1,6 @@
 # 编译工具文件格式
 
-驱动使用严格 UTF-8 JSON 读取和写出 DAG 及 manifest，要求 `format` 和整数 `version: 1`。Tensor 二进制文件使用小端标量表示。`.psir`、`.psxp` 使用独立的 v5 文本格式。参见[工具用法与边界](Compiler-Tools.zh.md)。
+驱动读写严格 UTF-8 JSON。DAG、资源、绑定和请求使用 v1，结果 manifest 使用 v2。绑定的标量采用小端表示，结果 tile 保留物理字节序。`.psir`、`.psxp` 使用独立的 v5 文本格式。参见[工具用法与边界](Compiler-Tools.zh.md)。
 
 ## DAG JSON
 
@@ -76,21 +76,35 @@ Typed f64 拒绝无法精确表示的整数 token；需要浮点舍入时使用�
 
 ## Results
 
-成功的 `psx` 创建新目录，包含 `manifest.json` 和生成的片段文件名。前述部分请求与资源 `03` 的结果示例：
+`psx` 为每个具名输出写一个 `.bin`，并在 `manifest.json` 中记录路径。一个输出的所有成员共用同一个文件。下面的例子选中成员 0 的 tile 1，包含 9.0 和 12.0 两个 Float64 样本。
 
 ```json
-{"format":"photospider.results","version":1,"outputs":[
-  {"name":"result","schema":{
+{"format":"photospider.results","version":2,"byte_order":"little","outputs":[
+  {"name":"result","path":"output-0.bin","byte_length":64,"schema":{
     "id":"fixture.vector","version":1,"tensors":[
       {"key":"samples","dtype":"f64","shape":[4],"batch":[],"atomic":0,"layout":{"spatial":false}}
     ],"publication_scopes":[]},
-   "tensors":[{"slot":0,"encoding":"raw-le","dtype":"f64","shape":[4],"fragments":[
-     {"path":"output-0-tensor-0-fragment-0.bin","byte_length":16,"offset":[2],"shape":[2]}
+   "tensors":[{"slot":0,"encoding":"physical-tile","dtype":"f64","shape":[4],"tiles":[
+     {"index":1,"file_offset":48,"byte_length":16,"offset":[2],"shape":[2],"byte_strides":[8]}
    ]}]}
 ]}
 ```
 
-二进制片段保存 9.0、12.0。Tensor 的 `shape` 是静态全形状，fragment 的 `offset`、`shape` 是真实覆盖坐标。片段顺序和拆分是实现细节；片段互不重叠，只覆盖已发布 samples，每片按其区域保存 row-major 小端连续字节。空覆盖不生成二进制文件。消费者必须读取 manifest，不应通过文件名或完整 schema 推断覆盖。Results 是输出文件，不是可恢复执行状态。
+| 文件偏移 | 内容 |
+| --- | --- |
+| 0 | 8 个 ASCII 字节 `PSXTILE2` |
+| 8 | Plan 的 `tile_extent`，小端 uint64 |
+| 16 | 本输出选中的 tile 条数 N，小端 uint64 |
+| 24 | N 条目录记录，每条由三个小端 uint64 组成，依次为成员 slot、成员内 tile 编号、payload 字节数 |
+| 24 + 24 × N | 按目录顺序紧密拼接的完整 tile payload |
+
+目录先按成员 slot，再按 tile 编号升序排列；编号沿用编译后 Plan 的网格，稀疏选择保留原编号。无选中 tile 的具名输出仍生成 24 字节文件头。每条记录只存储一个完整 tile，边缘 tile 的实际形状见 manifest。传输缓冲区的大小只影响写入批次。
+
+`outputs[].byte_length` 包含文件头。每条 tile 的 `file_offset` 从文件开头计数，`byte_length` 仅计算该 tile 的样本。逻辑起点和形状分别为 `offset` 和 `shape`。payload 按物理地址递增顺序存储，保留 NaN、负零和宿主字节序；manifest 的 `byte_order` 为 `little` 或 `big`。读取器使用带符号的 `byte_strides` 定位样本。对于负步长轴，逻辑起点相对 payload 开头的字节偏移是这些轴上 `(shape[i] - 1) * abs(byte_strides[i])` 之和。
+
+导出要求可由 CPU 读取的完整 tile，其样本占据一个连续、互不重叠的物理区间。图像格式所需的行排列和 whole 算子需要的连续输入由相应 codec 处理。
+
+应用可以链接 `Photospider::result_files`，调用 `ps::tools::export_tiled_image` 为完整、已封存的 CPU 图像写出同一结果目录。调用者提供 tile 网格边长、目标目录和临时存储预算；成功后可以返回本地文件路径。
 
 ## IR 与 Plan 文本 v5
 

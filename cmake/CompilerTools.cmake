@@ -1,4 +1,3 @@
-option(PHOTOSPIDER_BUILD_TOOLS "Build psc compiler and psx executor" ON)
 if(NOT PHOTOSPIDER_BUILD_TOOLS)
   return()
 endif()
@@ -10,7 +9,7 @@ foreach(_file IN ITEMS yyjson.c yyjson.h LICENSE)
   endif()
 endforeach()
 add_library(photospider_cli_json STATIC third_party/yyjson/yyjson.c)
-target_include_directories(photospider_cli_json SYSTEM PUBLIC third_party/yyjson)
+target_include_directories(photospider_cli_json SYSTEM PUBLIC "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/third_party/yyjson>")
 target_compile_definitions(photospider_cli_json PRIVATE
   YYJSON_DISABLE_NON_STANDARD=1 YYJSON_DISABLE_FILE=1
   YYJSON_READER_DEPTH_LIMIT=128 YYJSON_WRITER_DEPTH_LIMIT=128)
@@ -23,7 +22,7 @@ add_library(photospider_cli_common STATIC
   src/tools/common/process.cpp src/tools/common/environment.cpp
   src/tools/common/schema_codec.cpp src/tools/common/resource_manifest.cpp
   src/tools/common/request_manifest.cpp)
-target_include_directories(photospider_cli_common PUBLIC src/tools)
+target_include_directories(photospider_cli_common PUBLIC "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/tools>")
 target_link_libraries(photospider_cli_common PUBLIC Photospider::kernel PRIVATE photospider_cli_json)
 target_compile_features(photospider_cli_common PUBLIC cxx_std_17)
 target_compile_definitions(photospider_cli_common PRIVATE PHOTOSPIDER_CLI_VERSION="${PROJECT_VERSION}")
@@ -37,8 +36,17 @@ add_library(photospider_psc STATIC
   src/tools/psc/dag_io.cpp)
 add_library(photospider_psx STATIC
   src/tools/psx/options.cpp src/tools/psx/driver.cpp
-  src/tools/psx/bindings_io.cpp src/tools/psx/result_export.cpp)
-foreach(_library IN ITEMS photospider_cli_common photospider_psc photospider_psx)
+  src/tools/psx/bindings_io.cpp)
+add_library(photospider_result_files STATIC src/tools/psx/result_export.cpp)
+add_library(Photospider::result_files ALIAS photospider_result_files)
+set_target_properties(photospider_result_files PROPERTIES EXPORT_NAME result_files POSITION_INDEPENDENT_CODE ON)
+target_include_directories(photospider_result_files PRIVATE src/lib third_party/yyjson)
+target_link_libraries(photospider_result_files PUBLIC Photospider::kernel PRIVATE photospider_cli_common)
+target_link_libraries(photospider_psx PUBLIC photospider_result_files)
+install(TARGETS photospider_result_files photospider_cli_common photospider_cli_json
+        EXPORT PhotospiderTargets ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
+set_target_properties(photospider_cli_common PROPERTIES POSITION_INDEPENDENT_CODE ON)
+foreach(_library IN ITEMS photospider_cli_common photospider_psc photospider_psx photospider_result_files)
   target_compile_options(${_library} PRIVATE -Wall -Wextra -Wpedantic -Werror
     -fno-fast-math -frounding-math -ffp-contract=off)
 endforeach()

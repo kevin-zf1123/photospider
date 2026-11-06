@@ -107,6 +107,8 @@ COPY tasks support Host, Shared and Device endpoints. Host endpoints of GPU COPY
 
 Publication keeps physical arrays and backing owners in the Result-derived storage owner, while publication state owns the Root, resource leases, and schema. Destruction retires array backing before the publication state releases its Root leases. Storage-owner indexing avoids rescanning previously published backing for each publication, and `acquire_tensor` locates pieces by an interval search when the member's partition permits it, otherwise by a bounded scan. `acquire_tensor` copies immutable backing handles while holding the publication mutex, then unlocks before constructing the owning read window. `publish_tensor_kernel` prepares callback work outside the mutex, then reacquires it to validate the owner, revision, and sticky failure before committing. A read window retains its Result and backing and permits reads only within its captured coverage and requested rectangle.
 
+Physical copying follows the [read-window storage contract](../kernel-specs/Tensor-Storage-and-Region-Access.md#read-windows-and-transactional-writes).
+
 `publish_tensor_kernel` lends writable windows for the requested region. The builder partitions the request at member tile and batch boundaries and gives spatial members tile-local planar bytes. It reserves no full-domain backing, so a sparse request over a huge logical domain is charged by its actual writable tiles. Callbacks must use each window's `spec()`, `region()`, `sample_axis()`, and the strides returned by `row_run()` or `rectangle_run()`. They must not assume planar backing or contiguous rows across windows.
 
 ```cpp

@@ -16,6 +16,7 @@ include(CTest)
 include(cmake/BehaviorTests.cmake)
 include(GNUInstallDirs)
 
+option(PHOTOSPIDER_BUILD_TOOLS "Build psc compiler and psx executor" ON)
 option(PHOTOSPIDER_BUILD_OPS "Build bundled operation implementations" OFF)
 
 option(PHOTOSPIDER_ENABLE_METAL "Build the optional Apple Silicon Metal backend" ${APPLE})

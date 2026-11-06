@@ -1,17 +1,113 @@
 #include "psx/result_export.hpp"
 
+#include <algorithm>
 #include <chrono>
+#include <cstring>
+#include <fstream>
+#include <functional>
+#include <limits>
+#include <memory>
 #include <string>
-#include <utility>
 #include <vector>
 
 #include "common/codec.hpp"
 #include "common/process.hpp"
+#include "data/physical_piece.hpp"
+#include "photospider/core/checked_math.hpp"
+#include "photospider/tools/result_files.hpp"
 
 namespace ps::tools::psx {
-void export_results(const ExecutionResult& results, const fs::path& directory,
-                    const Files& files, const CancellationToken& cancellation,
-                    const ResourceBudget& budget) {
+namespace {
+constexpr std::uint64_t kHeaderBytes = 24;
+constexpr std::uint64_t kTileRecordBytes = 24;
+void write_u64_le(std::ostream& stream, std::uint64_t value) {
+  std::uint8_t bytes[8];
+  for (unsigned byte = 0; byte < 8; ++byte)
+    bytes[byte] = static_cast<std::uint8_t>(value >> (8 * byte));
+  stream.write(reinterpret_cast<const char*>(bytes), sizeof(bytes));
+}
+struct Header {
+  std::uint64_t bytes, largest_tile;
+};
+Header write_header(std::ostream& stream, std::uint64_t tile_extent,
+                    const PlanOutput& output, const TileRequest& selected,
+                    const CancellationToken& cancellation) {
+  const auto count = selected.size();
+  if (!core_internal::can_multiply_add(count, kTileRecordBytes, kHeaderBytes))
+    throw ToolError("result tile directory exceeds file offset range");
+  std::uint64_t largest_tile = 0;
+  stream.write("PSXTILE2", 8);
+  write_u64_le(stream, tile_extent);
+  write_u64_le(stream, count);
+  for (const auto& member : selected.members) {
+    const auto& grid = output.tile_grids.at(member.first);
+    for (auto id : member.second) {
+      interrupted();
+      if (cancellation.cancelled())
+        check(Status{ErrorCode::Cancelled, {}});
+      auto box = take(grid.region(id));
+      write_u64_le(stream, member.first);
+      write_u64_le(stream, id);
+      const auto payload =
+          byte_count(box, output.result_schema->tensors.at(member.first)
+                              .descriptor.element_type);
+      write_u64_le(stream, payload);
+      largest_tile = std::max(largest_tile, payload);
+    }
+  }
+  if (!stream)
+    throw ToolError("result header write failed", 4, "PS-IO-WRITE");
+  return {kHeaderBytes + count * kTileRecordBytes, largest_tile};
+}
+// All writes for this tile are adjacent. Only the I/O batch size depends
+// on the temporary buffer; the tile directory contains one record either way.
+void write_tile(std::ostream& stream, const ResultTensorReadWindow& window,
+                const TensorSpan& span, std::uint64_t payload,
+                MutableBuffer& buffer, const CancellationToken& cancellation,
+                const ResourceBudget& budget) {
+  if (payload <= buffer.size()) {
+    check(window.copy_to(buffer.data(), payload));
+    stream.write(reinterpret_cast<const char*>(buffer.data()),
+                 static_cast<std::streamsize>(payload));
+  } else {
+    const auto source = take(data_internal::physical_piece(span));
+    if (source.size() != payload)
+      throw ToolError("physical tile length differs from directory");
+    const auto width = TensorSpan::element_size(span.descriptor().element_type);
+    for (std::uint64_t offset = 0; offset < payload;) {
+      interrupted();
+      if (cancellation.cancelled())
+        check(Status{ErrorCode::Cancelled, {}});
+      const auto n = std::min<std::uint64_t>(payload - offset, buffer.size());
+      // Charge a sample when its first byte enters a batch, even for a
+      // buffer smaller than one scalar.
+      const auto end = offset + n;
+      const auto first_sample = offset / width + (offset % width != 0);
+      const auto past_sample = (end - 1) / width + 1;
+      check(budget.consume({past_sample - first_sample}));
+      std::memcpy(buffer.data(), source.data() + offset, n);
+      stream.write(reinterpret_cast<const char*>(buffer.data()),
+                   static_cast<std::streamsize>(n));
+      if (!stream)
+        break;
+      offset = end;
+    }
+  }
+  if (!stream)
+    throw ToolError("result payload write failed", 4, "PS-IO-WRITE");
+}
+struct OutputSelection {
+  const PlanOutput& output;
+  const TileRequest& tiles;
+};
+void write_directory(
+    std::uint64_t tile_extent,
+    const std::function<OutputSelection(const std::string&)>& selection,
+    const ExecutionResult& results, const fs::path& directory,
+    const Files& files, const CancellationToken& cancellation,
+    const ResourceBudget& budget, std::uint64_t buffer_limit) {
+  if (!buffer_limit)
+    throw ToolError("result export buffer must be positive");
   if (directory == "-" || fs::exists(directory))
     throw ToolError("result directory must be new: " + directory.string(), 4);
   auto parent = fs::absolute(directory).parent_path();
@@ -33,7 +129,11 @@ void export_results(const ExecutionResult& results, const fs::path& directory,
   JsonWriter w;
   auto* root = w.object();
   w.put(root, "format", w.str("photospider.results"));
-  w.put(root, "version", w.integer(std::uint64_t{1}));
+  w.put(root, "version", w.integer(std::uint64_t{2}));
+  const std::uint16_t endian_marker = 1;
+  w.put(root, "byte_order",
+        w.str(*reinterpret_cast<const std::uint8_t*>(&endian_marker) ? "little"
+                                                                     : "big"));
   auto* outputs = w.array();
   w.put(root, "outputs", outputs);
   std::size_t index = 0;
@@ -42,8 +142,27 @@ void export_results(const ExecutionResult& results, const fs::path& directory,
     auto facts = take(value.descriptor());
     auto* entry = w.object();
     w.push(outputs, entry);
-    w.put(entry, "name",
-          w.str(std::string(output.first.data(), output.first.size())));
+    const std::string output_name(output.first.data(), output.first.size());
+    w.put(entry, "name", w.str(output_name));
+    const auto [output_plan, selected] = selection(output_name);
+    const auto name = "output-" + std::to_string(index) + ".bin";
+    w.put(entry, "path", w.str(name));
+    // This stream is private until exclusive publication of the result
+    // directory.
+    std::ofstream stream(staging / name, std::ios::binary);
+    if (!stream)
+      throw ToolError("cannot stage result file: " + name, 4, "PS-IO-WRITE");
+    const auto header =
+        write_header(stream, tile_extent, output_plan, selected, cancellation);
+    auto position = header.bytes;
+    MutableBuffer buffer;
+    if (header.largest_tile) {
+      const auto buffer_bytes =
+          std::min({header.largest_tile, buffer_limit,
+                    static_cast<std::uint64_t>(
+                        std::numeric_limits<std::streamsize>::max())});
+      buffer = take(budget.allocator().allocate(buffer_bytes));
+    }
     w.put(entry, "schema", write_schema(&w, value.schema()));
     auto* tensors = w.array();
     w.put(entry, "tensors", tensors);
@@ -52,61 +171,48 @@ void export_results(const ExecutionResult& results, const fs::path& directory,
       auto* tensor = w.object();
       w.push(tensors, tensor);
       w.put(tensor, "slot", w.integer(static_cast<std::uint64_t>(slot)));
-      w.put(tensor, "encoding", w.str("raw-le"));
+      w.put(tensor, "encoding", w.str("physical-tile"));
       w.put(tensor, "shape", dimensions(&w, spec.sample_shape()));
       w.put(tensor, "dtype", w.str(dtype_name(spec.descriptor.element_type)));
-      auto* fragments = w.array();
-      w.put(tensor, "fragments", fragments);
-      std::size_t fi = 0;
-      std::vector<Region> pending;
-      for (const auto& covered : facts.tensor_coverage(slot).boxes())
-        pending.push_back(covered);
-      while (!pending.empty()) {
+      auto* tiles = w.array();
+      w.put(tensor, "tiles", tiles);
+      auto member = selected.members.find(slot);
+      if (member == selected.members.end())
+        continue;
+      const auto& grid = output_plan.tile_grids.at(slot);
+      for (auto id : member->second) {
         interrupted();
-        auto box = std::move(pending.back());
-        pending.pop_back();
-        auto size = byte_count(box, spec.descriptor.element_type);
-        if (size > 1024 * 1024) {
-          auto left = box.dimensions();
-          auto right = left;
-          std::size_t axis = 0;
-          while (left[axis].extent < 2)
-            ++axis;
-          left[axis].extent /= 2;
-          right[axis].offset += left[axis].extent;
-          right[axis].extent -= left[axis].extent;
-          pending.emplace_back(std::move(right));
-          pending.emplace_back(std::move(left));
-          continue;
-        }
-        if (fi >= 1048576)
-          throw ToolError("result export fragment limit exceeded");
-        auto capacity = ResourceCapacity::host(size + 1);
-        capacity[ResourceKind::Payload] = size + 1;
-        auto lease = take(budget.reserve(capacity));
-        std::string bytes(size, '\0');
+        auto box = take(grid.region(id));
         auto window =
             take(value.acquire_tensor(facts, slot, box, cancellation));
-        check(window.copy_to(reinterpret_cast<std::uint8_t*>(bytes.data()),
-                             bytes.size()));
-        endian(&bytes, TensorSpan::element_size(spec.descriptor.element_type));
-        auto name = "output-" + std::to_string(index) + "-tensor-" +
-                    std::to_string(slot) + "-fragment-" + std::to_string(fi++) +
-                    ".bin";
-        files.write(staging / name, bytes);
-        auto* fragment = w.object();
-        w.push(fragments, fragment);
-        w.put(fragment, "path", w.str(name));
-        w.put(fragment, "byte_length", w.integer(size));
+        auto span = take(window.affine_view());
+        const auto payload = byte_count(box, spec.descriptor.element_type);
+        if (!core_internal::can_add(position, payload))
+          throw ToolError("result file exceeds representable size");
+        write_tile(stream, window, span, payload, buffer, cancellation, budget);
+        auto* tile = w.object();
+        w.push(tiles, tile);
+        w.put(tile, "index", w.integer(id));
+        w.put(tile, "file_offset", w.integer(position));
+        w.put(tile, "byte_length", w.integer(payload));
+        position += payload;
         std::vector<std::uint64_t> offset, extent;
         for (const auto& dim : box.dimensions()) {
           offset.push_back(dim.offset);
           extent.push_back(dim.extent);
         }
-        w.put(fragment, "offset", dimensions(&w, offset));
-        w.put(fragment, "shape", dimensions(&w, extent));
+        w.put(tile, "offset", dimensions(&w, offset));
+        w.put(tile, "shape", dimensions(&w, extent));
+        auto* strides = w.array();
+        for (auto stride : span.layout().byte_strides)
+          w.push(strides, w.integer(stride));
+        w.put(tile, "byte_strides", strides);
       }
     }
+    stream.close();
+    if (!stream)
+      throw ToolError("result file close failed: " + name, 4, "PS-IO-WRITE");
+    w.put(entry, "byte_length", w.integer(position));
     ++index;
   }
   files.write(staging / "manifest.json", w.finish(root, true));
@@ -115,4 +221,69 @@ void export_results(const ExecutionResult& results, const fs::path& directory,
     throw ToolError("result directory appeared during export", 4);
   publish(staging, directory, true);
 }
+}  // namespace
+void export_results(const ExecutionPlan& plan, const ExecutionResult& results,
+                    const fs::path& directory, const Files& files,
+                    const CancellationToken& cancellation,
+                    const ResourceBudget& budget, std::uint64_t buffer_limit) {
+  write_directory(
+      plan.tile_extent(),
+      [&](const std::string& name) {
+        return OutputSelection{plan.output(name),
+                               plan.output_requests().at(name)};
+      },
+      results, directory, files, cancellation, budget, buffer_limit);
+}
 }  // namespace ps::tools::psx
+
+namespace ps::tools {
+Status export_job_results(const ExecutionPlan& plan,
+                          const ExecutionResult& results,
+                          const std::filesystem::path& directory,
+                          const ResourceBudget& budget) try {
+  psx::export_results(plan, results, directory, Files{}, {}, budget);
+  return Status::success();
+} catch (const ToolError& e) {
+  return {e.exit_code == 4 && e.status.empty() ? ErrorCode::OperationFailed
+                                               : e.kernel_code,
+          e.what(), e.reason};
+} catch (const std::filesystem::filesystem_error& e) {
+  return {ErrorCode::OperationFailed, e.what()};
+} catch (const std::bad_alloc&) {
+  return {ErrorCode::ResourceExhausted, {}};
+}
+Status export_tiled_image(const ResultRef& image, std::uint64_t tile_extent,
+                          const std::filesystem::path& directory,
+                          const ResourceBudget& budget) try {
+  if (!image.valid() || !tile_extent || (tile_extent & (tile_extent - 1)))
+    return {ErrorCode::InvalidArgument, "invalid image or tile extent"};
+  PlanOutput output;
+  output.name = "image";
+  output.result_schema = std::make_shared<const SchemaTemplate>(image.schema());
+  output.tile_grids = take(TileGrid::members(image.schema(), tile_extent));
+  // An imported image certifies complete coverage. Bound the grid before
+  // directory construction or enumeration of untrusted dimensions.
+  std::uint64_t count = 0;
+  for (const auto& grid : output.tile_grids) {
+    if (!core_internal::checked_add(count, grid.tile_count(), &count, 65536))
+      return {ErrorCode::ResourceExhausted,
+              "image exceeds export tile count limit"};
+  }
+  auto tiles = take(TileRequest::all(output.tile_grids, budget));
+  ExecutionResult results;
+  results.results.emplace("image", image);
+  psx::write_directory(
+      tile_extent,
+      [&](const auto&) { return psx::OutputSelection{output, tiles}; }, results,
+      directory, Files{}, {}, budget, psx::kDefaultExportBufferBytes);
+  return Status::success();
+} catch (const ToolError& e) {
+  return {e.exit_code == 4 && e.status.empty() ? ErrorCode::OperationFailed
+                                               : e.kernel_code,
+          e.what(), e.reason};
+} catch (const std::filesystem::filesystem_error& e) {
+  return {ErrorCode::OperationFailed, e.what()};
+} catch (const std::bad_alloc&) {
+  return {ErrorCode::ResourceExhausted, {}};
+}
+}  // namespace ps::tools

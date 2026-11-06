@@ -103,6 +103,83 @@ int irregular_partition() {
     }
   return 0;
 }
+int window_copy_order() {
+  ResourceBudget root;
+  const auto schema = multi_result::schema(ElementType::UInt8, {2, 4});
+  const auto whole = Region::whole({2, 4});
+  const std::vector<std::uint8_t> logical{10, 11, 12, 13, 20, 21, 22, 23};
+  const std::vector<std::uint8_t> physical{10, 11, 20, 21, 12, 13, 22, 23};
+  auto builder = take(ResultBuilder::start(root, schema, "tiles", {}, 2));
+  check(builder.publish_tensor(0, whole,
+                               ByteView(logical.data(), logical.size())));
+  auto result = take(builder.seal());
+  CancellationSource cancellation;
+  auto window = take(result.acquire_tensor(take(result.descriptor()), 0, whole,
+                                           cancellation.token()));
+  std::vector<std::uint8_t> out(8);
+  auto before = root.statistics().issued.work;
+  check(window.copy_to(out.data(), out.size()));
+  PS_CHECK(out == physical && root.statistics().issued.work - before == 8);
+  PS_CHECK(window.copy_to(out.data(), 7).code == ErrorCode::InvalidArgument);
+  auto roi = take(result.acquire_tensor(take(result.descriptor()), 0,
+                                        Region({{0, 2}, {1, 2}})));
+  PS_CHECK(roi.copy_to(out.data(), 4).reason == FailureReason::ViewUnavailable);
+  cancellation.cancel();
+  PS_CHECK(window.copy_to(out.data(), 8).code == ErrorCode::Cancelled);
+  return 0;
+}
+int window_copy_work_limit() {
+  const auto whole = Region::whole({2, 4});
+  const auto schema = multi_result::schema(ElementType::UInt8, {2, 4});
+  const std::vector<std::uint8_t> logical{10, 11, 12, 13, 20, 21, 22, 23};
+  ResourceLimits limits;
+  limits.maximum_work = 100000;
+  ResourceBudget root(limits);
+  auto builder = take(ResultBuilder::start(root, schema, "budget", {}, 2));
+  check(builder.publish_tensor(0, whole,
+                               ByteView(logical.data(), logical.size())));
+  auto result = take(builder.seal());
+  auto window =
+      take(result.acquire_tensor(take(result.descriptor()), 0, whole));
+  // Leave work for the left piece only. The right piece must stay untouched.
+  check(
+      root.consume({limits.maximum_work - root.statistics().issued.work - 4}));
+  std::vector<std::uint8_t> out(8, 0);
+  auto status = window.copy_to(out.data(), out.size());
+  PS_CHECK(status.code == ErrorCode::ResourceExhausted &&
+           status.reason == FailureReason::WorkLimit);
+  PS_CHECK((out == std::vector<std::uint8_t>{10, 11, 20, 21, 0, 0, 0, 0}));
+  return 0;
+}
+int window_copy_strides() {
+  ResourceBudget root;
+  const auto schema = multi_result::schema(ElementType::UInt8, {2, 3});
+  const auto whole = Region::whole({2, 3});
+  auto buffer = take(root.allocator().allocate(9));
+  for (unsigned i = 0; i < 9; ++i)
+    buffer.data()[i] = i;
+  auto storage = std::move(buffer).freeze();
+  for (bool broadcast : {false, true}) {
+    auto builder = take(ResultBuilder::start(root, schema, "strided"));
+    // The first mapping transposes and reverses a dense interval [1..6].
+    // The second repeats each sample along the first axis.
+    StridedLayout layout =
+        broadcast ? StridedLayout{1, {0, 2}} : StridedLayout{5, {1, -2}};
+    check(builder.publish_tensor(0, whole, layout, storage));
+    auto result = take(builder.seal());
+    auto window =
+        take(result.acquire_tensor(take(result.descriptor()), 0, whole));
+    std::vector<std::uint8_t> out(6);
+    auto copied = window.copy_to(out.data(), out.size());
+    if (broadcast) {
+      PS_CHECK(copied.reason == FailureReason::ViewUnavailable);
+    } else {
+      check(copied);
+      PS_CHECK((out == std::vector<std::uint8_t>{1, 2, 3, 4, 5, 6}));
+    }
+  }
+  return 0;
+}
 int incremental_owners() {
   ResourceLimits limits;
   limits.maximum_work = 400000;
@@ -237,7 +314,8 @@ int affine_views() {
 int main() {
   try {
     return tensor_transaction() || affine_views() || irregular_partition() ||
-           incremental_owners();
+           incremental_owners() || window_copy_order() ||
+           window_copy_strides() || window_copy_work_limit();
   } catch (const std::exception& failure) {
     std::cerr << failure.what() << '\n';
     return 1;

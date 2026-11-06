@@ -1,6 +1,6 @@
 # Compiler tool file formats
 
-The driver reads and writes strict UTF-8 JSON for DAGs and manifests, with `format` and integer `version: 1` tags. Binary Tensor files use little-endian scalar representations. `.psir` and `.psxp` use the independent version-5 text codec. See [tool usage and bounds](Compiler-Tools.md).
+The drivers read and write strict UTF-8 JSON. DAGs, resources, bindings and requests use v1. Result manifests use v2. Binding files use little-endian scalars. Result tile payloads retain their physical byte order. The `.psir` and `.psxp` text codecs have their own version (v5). See [tool usage and bounds](Compiler-Tools.md).
 
 ## DAG JSON
 
@@ -76,21 +76,35 @@ For example, Python `struct.pack('<4d', 1, 2, 3, 4)` creates the 32-byte input. 
 
 ## Results
 
-A successful `psx` run creates a new directory with `manifest.json` and generated fragment filenames. Example for the partial request above and scale resource `03`:
+`psx` writes one `.bin` file per named output. All tensor members of that output share the file. The manifest maps the output name to its path. In this example the Plan selected tile 1 of member 0, containing the Float64 values 9.0 and 12.0.
 
 ```json
-{"format":"photospider.results","version":1,"outputs":[
-  {"name":"result","schema":{
+{"format":"photospider.results","version":2,"byte_order":"little","outputs":[
+  {"name":"result","path":"output-0.bin","byte_length":64,"schema":{
     "id":"fixture.vector","version":1,"tensors":[
       {"key":"samples","dtype":"f64","shape":[4],"batch":[],"atomic":0,"layout":{"spatial":false}}
     ],"publication_scopes":[]},
-   "tensors":[{"slot":0,"encoding":"raw-le","dtype":"f64","shape":[4],"fragments":[
-     {"path":"output-0-tensor-0-fragment-0.bin","byte_length":16,"offset":[2],"shape":[2]}
+   "tensors":[{"slot":0,"encoding":"physical-tile","dtype":"f64","shape":[4],"tiles":[
+     {"index":1,"file_offset":48,"byte_length":16,"offset":[2],"shape":[2],"byte_strides":[8]}
    ]}]}
 ]}
 ```
 
-The binary fragment holds 9.0 and 12.0. `shape` on the Tensor is its static full shape; `offset` and `shape` on each fragment are actual covered logical coordinates. Fragment ordering and splitting are implementation details. Fragments are disjoint, collectively cover only published samples, and each stores contiguous row-major little-endian bytes for its region. Empty coverage produces no binary file. Consumers must use the manifest rather than infer coverage from filenames or full schema shape. Results are output files, not resumable execution state.
+| File offset | Contents |
+| --- | --- |
+| 0 | Eight ASCII bytes `PSXTILE2` |
+| 8 | Plan `tile_extent`, little-endian uint64 |
+| 16 | Selected tile count N for this output, little-endian uint64 |
+| 24 | N directory entries, each three little-endian uint64 values: member slot, member-local tile index, payload byte length |
+| 24 + 24 × N | Complete tile payloads concatenated in directory order |
+
+Entries are ordered by member slot and tile index. Indices come from the compiled Plan grid, so sparse selections keep their original IDs. A named output with an empty selection has a 24-byte header. A record stores one complete tile, including the actual clipped shape of an edge tile. The transfer buffer size controls only the size of writes.
+
+`outputs[].byte_length` includes the header. Each tile's `file_offset` is relative to the beginning of the file and its `byte_length` counts only its sample bytes. The logical origin and extents are `offset` and `shape`. Payload bytes follow increasing physical address order and preserve scalar bit patterns, including NaNs and signed zero. The manifest records the payload byte order as `little` or `big`. Use the signed `byte_strides` to locate samples. For negative strides, the logical origin lies at the sum of `(shape[i] - 1) * abs(byte_strides[i])` over the negative-stride axes, relative to the payload start.
+
+Export requires a complete CPU-readable tile whose distinct samples occupy one contiguous physical interval. Image codecs and codecs for whole operators handle any conversion to the row layout required by their consumers.
+
+Applications can link `Photospider::result_files` and call `ps::tools::export_tiled_image` to write the same result directory for a sealed, complete CPU image. The caller supplies the physical tile extent, destination directory and temporary storage budget, and can return the local file reference after success.
 
 ## IR and Plan text v5
 

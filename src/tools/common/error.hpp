@@ -11,6 +11,7 @@ struct ToolError : std::runtime_error {
   int exit_code;
   std::string id, status;
   std::uint64_t node = 0, input = 0;
+  ErrorCode kernel_code = ErrorCode::InvalidArgument;
   FailureReason reason = FailureReason::None;
   explicit ToolError(std::string message, int code = 1,
                      std::string diagnostic = "PS-INPUT-INVALID")

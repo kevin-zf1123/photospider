@@ -91,9 +91,10 @@ Each declared Plan input must be bound exactly once, including inputs that a sel
 | `--threads N` | CPU workers; omitted uses the context default. Explicit range is 1..4096. |
 | `--parallelism N` | Maximum concurrent tasks for this Run, range 1..4096; omitted uses the context worker count. Call retirement remains in Plan order. |
 | `--max-live-bytes N` | 268435456; positive controlled Payload capacity. |
+| `--export-buffer-bytes N` | Maximum reusable temporary payload buffer in bytes. Positive integer, default 8388608 (8 MiB). |
 | `-o DIRECTORY` | Default current-directory `plan-stem.results`; stdin requires explicit output. Directory must be new. |
 
-`psx` rejects optimization, backend and tile-extent options. Recompile for larger coverage or a different physical target. Output is a result manifest plus little-endian binary fragments with actual coverage. Missing regions are not filled. Logical window copying respects signed/zero strides; bit patterns are retained, including NaNs and signed zero. No persistent execution service or recovery state is created.
+Output selection uses member slots and tile indices from the compiled Plan. `psx` writes one binary file per named output, with a tile directory and all selected tile payloads in physical order. Recompile for larger coverage or a different physical target. See the [result format](Compiler-Tool-Formats.md#results).
 
 ## Implementation boundaries
 
@@ -116,7 +117,7 @@ The common tool library owns neither a compiler session nor an execution context
 
 An output cannot alias any input, resource, library or another output; checks include symlink resolution and hardlink equivalence. Ordinary outputs are fully encoded, written to a private sibling staging directory and atomically renamed into place. Existing ordinary output files may be replaced. Result directories are staged and published with an exclusive rename on macOS/Linux/Windows; unsupported platforms report an I/O error. Existing result directories are never reused. Publication is atomic visibility, not a crash-durability guarantee. stdin/stdout use binary artifact bytes; text diagnostics, verbose events and timing use stderr. Informational commands (`--help`, inventories and pipeline printing) use stdout and produce no artifact.
 
-Input JSON and artifact text are bounded to 64 MiB. JSON is limited to 128 nesting levels and 4194304 DOM values; duplicate keys, unknown fields, invalid Unicode, wrong types and numeric overflow fail. Requests allow at most 65536 intervals and normalize them once per member. Each static resource is 1..64 MiB and must match its declared SHA-256. Binding staging reserves capacity before file reading; output staging uses budgeted fragments of at most 1 MiB, with at most 1048576 fragments per Tensor. The managed budget covers declared buffers, not process RSS, filesystem caches or plugin-private allocations.
+Input JSON and artifact text are bounded to 64 MiB. JSON is limited to 128 nesting levels and 4194304 DOM values; duplicate keys, unknown fields, invalid Unicode, wrong types and numeric overflow fail. Requests allow at most 65536 intervals and normalize them once per member. Each static resource is 1..64 MiB and must match its declared SHA-256. Binding staging reserves capacity before file reading; export allocates a reusable buffer for each named output, bounded by the smaller of the configured size and the largest selected tile. Larger tiles are written in consecutive batches to the same file. File size depends on the header and the sum of the selected payload sizes. The managed budget covers declared buffers, not process RSS, filesystem caches or plugin-private allocations.
 
 Both tools preserve literal `=` characters inside option values, including attached short forms such as `-oalpha=beta`. A standalone `--` begins positional arguments unless consumed as an option value. Diagnostic selection respects the same boundaries even for malformed invocations. Repeated `--diagnostic-format` remains an argument error; its first occurrence determines how that error is rendered.
 

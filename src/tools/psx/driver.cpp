@@ -87,8 +87,8 @@ void execute(const Invocation& o,
   diagnostics->timing("execution", started);
   diagnostics->stage = "result-export";
   started = Clock::now();
-  export_results(result, destination, *files, cancellation.token(),
-                 take(context.resource_budget()));
+  export_results(plan, result, destination, *files, cancellation.token(),
+                 take(context.resource_budget()), o.export_buffer_bytes);
   diagnostics->timing("result export", started);
 }
 }  // namespace
@@ -102,6 +102,8 @@ int run(int argc, char** argv, Diagnostics* diagnostics) {
         << "psx options:\n"
            "  --bindings FILE --threads N --parallelism N\n"
            "  --max-live-bytes N --max-work N --max-stages N\n"
+           "  --export-buffer-bytes N: temporary output buffer (default 8 "
+           "MiB)\n"
            "  --max-work: positive per-Run coordinator + v9 numerical work\n"
            "  --max-stages: per-Run refinement attempts; zero is allowed\n";
     return 0;
