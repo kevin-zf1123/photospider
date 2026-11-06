@@ -48,6 +48,7 @@ endif()
 set(PHOTOSPIDER_OPERATION_SOURCES
   plugins/ops/09-composite/keying_point.cpp
   plugins/ops/09-composite/keying_spatial.cpp
+  plugins/ops/09-composite/keying_matting.cpp
   plugins/ops/09-composite/nonseparable.cpp
   plugins/ops/09-composite/coverage.cpp
   plugins/ops/09-composite/blend.cpp
@@ -396,6 +397,7 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
   set_property(SOURCE
     plugins/ops/09-composite/keying_point.cpp
     plugins/ops/09-composite/keying_spatial.cpp
+    plugins/ops/09-composite/keying_matting.cpp
     APPEND PROPERTY COMPILE_OPTIONS -O3 -fno-math-errno -fno-rounding-math)
 endif()
 

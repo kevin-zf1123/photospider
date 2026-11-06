@@ -14,6 +14,7 @@ Status register_builtin_operations(OperationRegistry* registry) {
   }
   for (const auto function : {register_keying_point,
                               register_keying_spatial,
+                              register_keying_matting,
                               register_nonseparable,
                               register_coverage,
                               register_blend,
