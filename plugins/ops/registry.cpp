@@ -12,7 +12,8 @@ Status register_builtin_operations(OperationRegistry* registry) {
   if (!diagnostics.ok()) {
     return diagnostics;
   }
-  for (const auto function : {register_nonseparable,
+  for (const auto function : {register_keying_point,
+                              register_nonseparable,
                               register_coverage,
                               register_blend,
                               register_blend_composite,

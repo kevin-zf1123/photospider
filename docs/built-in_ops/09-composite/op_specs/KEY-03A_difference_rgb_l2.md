@@ -5,7 +5,7 @@ kind: primitive
 category: 09-composite
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented
 clarification_status: complete
 parent_id: KEY-03
 function: difference_rgb_l2
@@ -26,9 +26,23 @@ Matching relative linear RGB, already spatially aligned. 0<=inner<outer in RGB c
 
 Port order, tensor members, static selectors and output representation follow COM. Shapes and dtypes are inferred from the stated signatures before payload evaluation.
 
+### Static parameters
+
+Raw selection uses `axis:Int64` and `components:String`. The latter is the comma-separated canonical decimal encoding of the ordered COM component-index list, for example `"0,1,2"`: exactly three distinct in-range indices in RGB or Lab coordinate order. Alternatively, `input_description:String` and `group:String` resolve the selection through the existing FMT description rules; this form excludes `axis` and `components`. A declared spatial channel axis must agree with the resolved selection.
+
+The current implementation resolves an explicit common linear RGB interpretation using `source_basis:String`, or the primaries and white in the selected description group. An explicitly supplied basis must agree with the description. There is no implicit basis and no color conversion; preset names and custom values use the existing FMT basis codec. Description groups use model `rgb`, transfer `linear`, and straight association.
+
+The resolved color sample rank is three; removing the component axis yields `[H,W]`. The component extent is three except for edge extension, which also carries alpha and optional other channels.
+
+`max_work:Int64=9223372036854775807` is the nonnegative per-invocation operator-work limit. Run work admission and cancellation remain effective in addition to this limit.
+
 ## Mathematics
 
 Publish d=sqrt(sum_c(image_c-plate_c)^2) to T. Return h(inner,outer,d) from KEY-01 using the stored distance.
+
+### Current implementation profile
+
+The implementation forms the native-T RGB squared distance, rounds its square root to T, and then evaluates the declared smoothstep. Both images use the same resolved RGB interpretation.
 
 ## Behavior
 

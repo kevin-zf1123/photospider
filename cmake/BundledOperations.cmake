@@ -46,6 +46,7 @@ if(NOT PHOTOSPIDER_FMT10_SIMD)
 endif()
 
 set(PHOTOSPIDER_OPERATION_SOURCES
+  plugins/ops/09-composite/keying_point.cpp
   plugins/ops/09-composite/nonseparable.cpp
   plugins/ops/09-composite/coverage.cpp
   plugins/ops/09-composite/blend.cpp
@@ -388,6 +389,15 @@ endif()
 
 set_property(SOURCE ${PHOTOSPIDER_OPERATION_SOURCES} APPEND PROPERTY
   COMPILE_OPTIONS "-fno-fast-math" "-frounding-math" "-ffp-contract=off")
+# KEY evaluates the native COM equations; copies and discrete choices retain
+# IEEE semantics. These options apply only to the KEY operation sources.
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+  set_property(SOURCE
+    plugins/ops/09-composite/keying_point.cpp
+    APPEND PROPERTY COMPILE_OPTIONS -O3 -fno-math-errno -fno-rounding-math)
+endif()
+
+
 include(${CMAKE_CURRENT_LIST_DIR}/NumericMath.cmake)
 
 
