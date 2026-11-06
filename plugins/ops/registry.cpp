@@ -13,6 +13,7 @@ Status register_builtin_operations(OperationRegistry* registry) {
     return diagnostics;
   }
   for (const auto function : {register_keying_point,
+                              register_keying_spatial,
                               register_nonseparable,
                               register_coverage,
                               register_blend,
