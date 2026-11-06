@@ -1,5 +1,6 @@
 #include "03-generation/runtime.hpp"
 
+#include <algorithm>
 #include <memory>
 #include <set>
 #include <string>
@@ -97,9 +98,12 @@ using Address = std::tuple<unsigned, unsigned, TileIndex>;
 std::vector<Address> reads(const Program& program, unsigned port,
                            const Region& output, std::uint64_t extent,
                            const ResourceBudget& budget,
-                           std::uint64_t maximum_records) {
+                           std::uint64_t maximum_records,
+                           const std::vector<unsigned>* ports = nullptr) {
   std::set<Address> selected;
-  for (const auto& region : program.support(port, output)) {
+  const auto support = ports ? program.collective_support(*ports)
+                             : program.support(port, output);
+  for (const auto& region : support) {
     const auto grid = take(TileGrid::from_schema(
         *program.inputs[region.port].result_schema, extent, region.member));
     for (auto tile : take(sdk::tiles_for_region(budget, grid, region.region))) {
@@ -135,12 +139,24 @@ Result<OperationProgram> lower(const OperationLowering& query) {
     ResourceLimits limits;
     limits.maximum_work = query.limits.maximum_work;
     ResourceBudget budget(limits);
+    const auto has_requested_tiles = [](const TileRequest& request) {
+      return std::any_of(
+          request.members.begin(), request.members.end(),
+          [](const auto& member) { return !member.second.empty(); });
+    };
     bool requested = false;
     for (const auto& request : query.requests) {
-      requested |= !request.empty();
+      requested |= has_requested_tiles(request);
     }
     if (!requested) {
       return builder.finish();
+    }
+    std::vector<unsigned> retained_ports;
+    if (state.collective && !state.complete) {
+      for (unsigned p = 0; p < query.requests.size(); ++p) {
+        if (has_requested_tiles(query.requests[p]))
+          retained_ports.push_back(p);
+      }
     }
     const auto add = [&](unsigned port, unsigned member, TileIndex tile) {
       Region region;
@@ -151,8 +167,11 @@ Result<OperationProgram> lower(const OperationLowering& query) {
       }
       const auto task = take(builder.add_task(
           kSymbol, kContract, {}, {state.task_scratch(port, region), 0, 0}));
-      for (const auto& read : reads(state, port, region, query.tile_extent,
-                                    budget, query.limits.maximum_records)) {
+      for (const auto& read :
+           reads(state, port, region, query.tile_extent, budget,
+                 query.limits.maximum_records,
+                 state.collective && !state.complete ? &retained_ports
+                                                     : nullptr)) {
         check(builder.read_input(task, std::get<0>(read), std::get<1>(read),
                                  std::get<2>(read)));
       }
@@ -290,12 +309,20 @@ Result<ps_prepared_kernel_v8> prepare(const physical::KernelDesc& description,
     }
     require(write_index == query.writes.size(),
             "generation output tile arity mismatch");
+    std::vector<unsigned> retained_ports;
+    if (state.collective && !state.complete)
+      for (const auto& write : query.writes)
+        if (std::find(retained_ports.begin(), retained_ports.end(),
+                      write.port) == retained_ports.end())
+          retained_ports.push_back(write.port);
+    std::sort(retained_ports.begin(), retained_ports.end());
     const auto expected_reads =
         reads(state, first.port,
               state.complete || state.collective
                   ? Region{}
                   : fixed_tensor::view_region(first.layout),
-              query.tile_extent, ResourceBudget{}, query.reads.size());
+              query.tile_extent, ResourceBudget{}, query.reads.size(),
+              state.collective && !state.complete ? &retained_ports : nullptr);
     require(query.reads.size() == expected_reads.size(),
             "generation input tile arity mismatch");
     auto kernel = std::make_unique<Kernel>();

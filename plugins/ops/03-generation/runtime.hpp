@@ -117,7 +117,8 @@ struct Program {
   std::uint64_t work_limit = INT64_MAX;
   bool complete = false;
   // One invocation shares global work and writes only requested output tiles.
-  // Its support and scratch are independent of the individual tile/port.
+  // Support may depend on the retained port set, but not individual tiles.
+  // Scratch remains independent of the individual tile/port.
   bool collective = false;
   bool whole_inputs = false;
   virtual ~Program() = default;
@@ -127,6 +128,12 @@ struct Program {
   }
   virtual std::vector<ReadRegion> support(unsigned output,
                                           const Region& region) const;
+  // Collective operators may declare only dependencies of retained ports.
+  // The default preserves the original whole-operation support policy.
+  virtual std::vector<ReadRegion> collective_support(
+      const std::vector<unsigned>&) const {
+    return support(0, Region{});
+  }
   // Explicit opt-in for a complete v9 envelope. Legacy programs retain their
   // original v8 behavior and do not claim numerical Run charging.
   virtual void run_v9(const Kernel& kernel,
