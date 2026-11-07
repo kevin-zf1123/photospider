@@ -178,7 +178,9 @@ struct ValidationLimits final {
 
 /** @brief Check affine reachability without sample access or allocation.
  * Returns InvalidArgument for malformed shape/type/extent or address overflow.
- * Writable views must be dense, positive-stride row-major tile allocations.
+ * writable requests the dense row-major check for numeric tensors. The
+ * program validator checks spatial tiles against their canonical planar
+ * strides, row pitch and allocation length using the member schema.
  */
 PHOTOSPIDER_API Status validate_layout(const Layout& layout,
                                        std::uint64_t bytes, bool writable);

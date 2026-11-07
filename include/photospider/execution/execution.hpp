@@ -49,7 +49,9 @@ struct ExecutionBinding final {
 };
 /** @brief Exact-name immutable input snapshot, retained through Run drain.
  * Duplicate/missing/extra names fail preflight. Payload must already cover the
- * compiled tile views and match their physical layout; adaptation requires
+ * compiled tile views and match their physical layout. DirectTiles Host
+ * allocation bases must satisfy host_page_alignment() and the Plan alignment.
+ * Adaptation requires
  * explicit compiled COPY tasks. No sample validation or hidden copy occurs.
  */
 struct ExecutionBindings final {

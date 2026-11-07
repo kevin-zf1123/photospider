@@ -36,25 +36,27 @@ Row run 的 `data` 指向第一个逻辑样本。`sample_stride_bytes` 可为负
 
 空间拓扑独立于字节顺序控制逻辑 H/W run 轴。默认写入在 batch 和物理 tile 边界切分请求 Footprint，提供受限的 planar 写窗口。非空间向量、矩阵和高维 Tensor 使用同一 backing 与窗口机制。显式 batch 坐标和 atomic 末尾轴保持结构含义。
 
-一次发布可以分配由多个 chunk span 共享的 buffer，tile 不必独占 allocation。兼容的外部仿射或分片 backing 仍合法。Plan 的逻辑 tile extent 可以与输入 backing 不同。
+每个物化的 Host tile 有独立的页对齐分配。图像成员使用 planar 存储：x 方向样本相邻，y 方向按物理行距前进，每个通道有独立的平面。非空间张量保留仿射布局。Plan 的逻辑 tile extent 可以与输入 backing 不同。
 
 ## Tile 布局与受检运算
 
 Plan-wide `tile_extent` 是正二次幂，默认 128。空间网格切分 H/W；非空间网格切分最后两个非 atomic cell 轴，其余非 atomic cell 轴和显式 batch 轴形成 batch 坐标。只有一个可分割轴时，每块最多 T 个 observation；没有可分割轴时，每个 batch 坐标形成一个 tile。
 
-默认物化按实际 chunk 宽高生成 stride 和 payload 大小，不把所有边缘行补到 T，也不让每个小 Tensor 对齐 OS 页。实际分配容量与逻辑覆盖分别准入。所有大小乘法和寻址运算都检查溢出。
+图像 tile 的物理行距是 T 个样本，行数取实际高度，逻辑 shape 保留实际宽度。实际分配容量与逻辑覆盖分别准入。所有大小乘法和寻址运算都检查溢出。
 
 ### 边缘行分配示例
 
-Float32 空间边缘 chunk 的高为 2、宽为 72、planar 通道数为 4 时，样本 payload 为 `2 * 72 * 4 * 4 = 2304` 字节。紧凑 planar row stride 为 `72 * 4 = 288` 字节。不要求 128 宽的补齐行或完整 128×128 tile。外部 backing 可以带 padding；读窗口暴露真实 stride，不把 padding 授权为样本。
+Float32 图像边缘 tile 高 2、宽 72、四个通道、T=128 时，逻辑样本占 2304 字节，行距为 512 字节，平面距为 1024 字节，物理分配及 BIN 中的 tile 为 4096 字节。第 72 至 127 列属于零填充，不进入逻辑覆盖。
 
 ## 读窗口与事务写入
+
+完整 tile 的物理复制及 BIN 文件保留行填充。`physical_byte_size()` 返回所需目标字节数。子视图只授权自己的样本覆盖。
 
 `ResultRef::acquire_tensor` 返回拥有型、仅可移动的读窗口，受捕获 descriptor 和请求矩形限制。后续生产不扩大该授权。`row_run()` 与 `rectangle_run()` 在授权、物理 tile 和片段边界截断。空间 run 遵循 width/height，非空间 run 使用最后一个/倒数第二个轴。默认物化 chunk 在 batch 边界截断。普通外部 span 可以覆盖多个 batch；调用方遵循 sample_axis()、row_axis() 和实际返回范围，非空间 rectangle 可以沿 batch 轴跨越坐标。
 
 窗口保留来源 owner 和取消状态。Token 取消后 run 查找可返回 Cancelled；此前返回的指针在窗口销毁前仍有 owner。获取窗口不执行上游 producer，也不填充空洞。获取和访问工作按相应 Root 与限制计费。
 
-`ResultTensorReadWindow::copy_to` 按 `visit_backing_regions` 的遍历顺序拼接已授权的存储片段，每个片段内按物理地址递增顺序复制。两个相邻的 2×2 tile 分别存储 `[10,11,20,21]` 和 `[12,13,22,23]` 时，输出为 `[10,11,20,21,12,13,22,23]`。每个片段的样本必须占据一个连续区间，且彼此独立。裁剪或带步长的片段存在间隙，或广播视图的样本地址重叠时，返回 `InvalidArgument`，原因为 `ViewUnavailable`。
+`ResultTensorReadWindow::copy_to` 按 `visit_backing_regions` 的遍历顺序拼接已授权的存储片段，每个片段内按物理地址递增顺序复制。两个相邻的 2×2 tile 分别存储 `[10,11,20,21]` 和 `[12,13,22,23]` 时，输出为 `[10,11,20,21,12,13,22,23]`。片段可以是一个样本互不重叠的连续区间，也可以是包含行填充的完整自有 planar tile。裁剪或带步长的片段存在间隙，或广播视图的样本地址重叠时，返回 `InvalidArgument`，原因为 `ViewUnavailable`。
 
 `publish_tensor_kernel()` 在 callback 前准入容量并准备私有写入。Region 和 Footprint 重载使用同一 Tensor 机制。Callback 只获得请求且尚未发布的覆盖；并行写入必须不相交并在返回前结束。借用写窗口在 callback 返回时失效。成功校验和取消检查后提交 backing，失败不暴露新覆盖。
 

@@ -12,6 +12,7 @@
 #include "01-numeric/array_parameters.hpp"
 #include "01-numeric/comparison_profiles.hpp"
 #include "01-numeric/exact_predicate.hpp"
+#include "common/fixed_output.hpp"
 #include "common/fixed_point_inputs.hpp"
 #include "common/registry.hpp"
 #include "common/tensor_program.hpp"
@@ -175,9 +176,13 @@ void comparison_invoke(const ps_kernel_invocation_v8* invocation,
       arithmetic->right[lane] = reader.bits(1, at, width);
       advance(&at, layout);
     }
+    std::array<std::uint8_t, 4> bits{};
     arithmetic->evaluate(state.dtype, lanes, state.absolute, state.relative,
-                         static_cast<std::uint8_t*>(output.allocation) +
-                             output.byte_offset + begin);
+                         bits.data());
+    auto* dst =
+        static_cast<std::uint8_t*>(output.allocation) + output.byte_offset;
+    for (unsigned j = 0; j < lanes; ++j)
+      dst[fixed_tensor::sample_offset(layout, begin + j)] = bits[j];
   }
   *status = {};
 }
@@ -317,7 +322,8 @@ void selection_invoke(const ps_kernel_invocation_v8* invocation,
     const auto condition = reader.bits(0, at, 1);
     const auto selected = reader.bits(condition ? 1 : 2, at, state.width);
     std::memcpy(static_cast<std::uint8_t*>(output.allocation) +
-                    output.byte_offset + sample * state.width,
+                    output.byte_offset +
+                    fixed_tensor::coordinate_offset(layout, at.data()),
                 &selected, state.width);
     advance(&at, layout);
   }

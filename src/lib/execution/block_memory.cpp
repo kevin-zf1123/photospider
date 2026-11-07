@@ -446,7 +446,7 @@ Result<BlockMemory> BlockMemory::allocate(
                               bool dense) -> Result<MutableBuffer> {
       if (!shared)
         return allocator.allocate_aligned_impl(bytes, alignment, dense);
-      auto native_allocator = native->device->allocator(allocator);
+      auto native_allocator = native->device->allocator(allocator, alignment);
       const auto reserve = native_allocator.reserve_;
       // A changed device requirement cannot consume another allocation's
       // reservation. The whole block fails before issue.
@@ -504,7 +504,11 @@ Result<BlockMemory> BlockMemory::allocate(
             ++*allocation_count;
           continue;
         }
-        auto storage = allocate(tile.bytes, tile.alignment,
+        const auto alignment =
+            tile.domain != physical::Domain::Device
+                ? std::max<std::uint64_t>(tile.alignment, host_page_alignment())
+                : tile.alignment;
+        auto storage = allocate(tile.bytes, alignment,
                                 tile.domain == physical::Domain::Shared,
                                 native ? native->tiles[id] : 0, dense_host);
         if (!storage.ok())

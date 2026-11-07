@@ -1144,17 +1144,19 @@ void RunState::invoke(void* pointer) noexcept {
   for (unsigned axis = 0; axis < input.layout->rank; ++axis)
     count *= input.layout->shape[axis];
   for (std::uint64_t sample = 0; sample < count; ++sample) {
-    auto remainder = sample, offset = input.byte_offset;
+    auto remainder = sample, offset = input.byte_offset,
+         target = output.byte_offset;
     for (unsigned axis = input.layout->rank; axis-- > 0;) {
       auto coordinate = remainder % input.layout->shape[axis];
       remainder /= input.layout->shape[axis];
+      target += coordinate * output.layout->strides[axis];
       auto stride = input.layout->strides[axis];
       if (stride < 0)
         offset -= coordinate * (static_cast<std::uint64_t>(-(stride + 1)) + 1);
       else
         offset += coordinate * static_cast<std::uint64_t>(stride);
     }
-    std::memcpy(static_cast<std::uint8_t*>(output.allocation) + sample * width,
+    std::memcpy(static_cast<std::uint8_t*>(output.allocation) + target,
                 static_cast<const std::uint8_t*>(input.allocation) + offset,
                 width);
   }
@@ -1364,12 +1366,21 @@ Result<ResultRef> RunState::value(const Frame& frame, Id vi,
           failure(ErrorCode::Internal, "missing completed tile"));
     const auto& layout = p.layouts[tile.layout];
     TileView view(metadata, layout, true, owner.offset);
-    auto published =
-        owner.device
-            ? data_internal::ResultDeviceAccess::publish(
-                  builder, tile.member, view.region, view.layout, owner.device)
-            : builder.publish_tensor(tile.member, view.region, view.layout,
-                                     owner.storage);
+    Status published;
+    const auto& spec = p.schemas[v.schema]->tensors[tile.member];
+    if (owner.device) {
+      published = data_internal::ResultDeviceAccess::publish(
+          builder, tile.member, view.region, view.layout, owner.device);
+    } else if (spec.layout.spatial && tile.domain != physical::Domain::Device &&
+               !(v.kind == physical::ValueKind::Input &&
+                 v.input_layout == physical::InputLayout::DenseHost) &&
+               !owner.offset && owner.storage->bytes().size() == tile.bytes) {
+      published = builder.publish_planar_tile(tile.member, view.region,
+                                              p.tile_extent, owner.storage);
+    } else {
+      published = builder.publish_tensor(tile.member, view.region, view.layout,
+                                         owner.storage);
+    }
     if (!published.ok())
       return Result<ResultRef>(published);
   }
@@ -1881,9 +1892,14 @@ Result<execution_internal::Incoming> bind_inputs(
                          "input origin cannot bind compiled view"});
         auto base = offset.value() - layout.byte_offset;
         const auto bytes = view.value().storage()->bytes();
+        const auto alignment =
+            tile.domain != physical::Domain::Device &&
+                    p.values[value_id].input_layout ==
+                        physical::InputLayout::DirectTiles
+                ? std::max<std::uint64_t>(tile.alignment, host_page_alignment())
+                : tile.alignment;
         if (base > bytes.size() || tile.bytes > bytes.size() - base ||
-            reinterpret_cast<std::uintptr_t>(bytes.data() + base) %
-                tile.alignment)
+            reinterpret_cast<std::uintptr_t>(bytes.data() + base) % alignment)
           return Answer(
               {ErrorCode::TypeMismatch, "input allocation contract mismatch"});
         auto owner = prepared.context->budget.reference(view.value().storage());

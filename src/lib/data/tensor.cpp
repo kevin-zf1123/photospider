@@ -204,8 +204,9 @@ Result<Tensor> Tensor::create_view(
       if (!view.ok())
         return Result<Tensor>(view.status());
       auto part = view.take_value();
-      auto canonical = TensorSpan::from_storage(
-          part.descriptor(), part.region(), part.layout(), part.storage());
+      auto canonical = TensorSpan::from_storage_impl(
+          part.descriptor(), part.region(), part.layout(), part.storage(),
+          part.has_tile_padding());
       if (!canonical.ok())
         return Result<Tensor>(canonical.status());
       append_coalesced(&result.storage_->fragments, canonical.take_value());

@@ -355,10 +355,13 @@ struct Exposure final : Program {
       double ev = 0;
       if (!field && arithmetic)
         ev = mask::Reader{k, inv}.value(1, 0, {});
-      const bool interleaved = arithmetic && axis > 0 &&
-                               axis + 1 == dims.size() &&
-                               output.layout->origin[axis] == 0 &&
-                               output.layout->shape[axis] == dims[axis];
+      const bool interleaved =
+          arithmetic && axis > 0 &&
+          output.layout->strides[axis] ==
+              static_cast<std::int64_t>(TensorSpan::element_size(
+                  static_cast<ElementType>(output.layout->element_type))) &&
+          axis + 1 == dims.size() && output.layout->origin[axis] == 0 &&
+          output.layout->shape[axis] == dims[axis];
       if (interleaved && dims[axis] == 1)
         pixels<T, 1>(k, inv, output, ev);
       else if (interleaved && dims[axis] == 3)

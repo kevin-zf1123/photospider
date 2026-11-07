@@ -26,38 +26,26 @@ void write_u64_le(std::ostream& stream, std::uint64_t value) {
     bytes[byte] = static_cast<std::uint8_t>(value >> (8 * byte));
   stream.write(reinterpret_cast<const char*>(bytes), sizeof(bytes));
 }
-struct Header {
-  std::uint64_t bytes, largest_tile;
-};
-Header write_header(std::ostream& stream, std::uint64_t tile_extent,
-                    const PlanOutput& output, const TileRequest& selected,
-                    const CancellationToken& cancellation) {
-  const auto count = selected.size();
-  if (!core_internal::can_multiply_add(count, kTileRecordBytes, kHeaderBytes))
-    throw ToolError("result tile directory exceeds file offset range");
-  std::uint64_t largest_tile = 0;
+void write_header(std::ostream& stream, std::uint64_t tile_extent,
+                  const TileRequest& selected,
+                  const ResourceVector<std::uint64_t>& lengths,
+                  const CancellationToken& cancellation) {
+  stream.seekp(0);
   stream.write("PSXTILE2", 8);
   write_u64_le(stream, tile_extent);
-  write_u64_le(stream, count);
-  for (const auto& member : selected.members) {
-    const auto& grid = output.tile_grids.at(member.first);
+  write_u64_le(stream, selected.size());
+  std::size_t index = 0;
+  for (const auto& member : selected.members)
     for (auto id : member.second) {
       interrupted();
       if (cancellation.cancelled())
         check(Status{ErrorCode::Cancelled, {}});
-      auto box = take(grid.region(id));
       write_u64_le(stream, member.first);
       write_u64_le(stream, id);
-      const auto payload =
-          byte_count(box, output.result_schema->tensors.at(member.first)
-                              .descriptor.element_type);
-      write_u64_le(stream, payload);
-      largest_tile = std::max(largest_tile, payload);
+      write_u64_le(stream, lengths.at(index++));
     }
-  }
   if (!stream)
     throw ToolError("result header write failed", 4, "PS-IO-WRITE");
-  return {kHeaderBytes + count * kTileRecordBytes, largest_tile};
 }
 // All writes for this tile are adjacent. Only the I/O batch size depends
 // on the temporary buffer; the tile directory contains one record either way.
@@ -152,17 +140,17 @@ void write_directory(
     std::ofstream stream(staging / name, std::ios::binary);
     if (!stream)
       throw ToolError("cannot stage result file: " + name, 4, "PS-IO-WRITE");
-    const auto header =
-        write_header(stream, tile_extent, output_plan, selected, cancellation);
-    auto position = header.bytes;
+    // Reserve directory space; fill its lengths after observing each actual
+    // backing once. Physical padding is not derivable from the logical shape.
+    std::uint64_t position = 0;
+    if (!core_internal::checked_multiply_add(selected.size(), kTileRecordBytes,
+                                             kHeaderBytes, &position))
+      throw ToolError("result tile directory exceeds file offset range");
+    stream.seekp(static_cast<std::streamoff>(position));
+    ResourceVector<std::uint64_t> lengths{
+        ResourceAllocator<std::uint64_t>(budget)};
+    lengths.reserve(selected.size());
     MutableBuffer buffer;
-    if (header.largest_tile) {
-      const auto buffer_bytes =
-          std::min({header.largest_tile, buffer_limit,
-                    static_cast<std::uint64_t>(
-                        std::numeric_limits<std::streamsize>::max())});
-      buffer = take(budget.allocator().allocate(buffer_bytes));
-    }
     w.put(entry, "schema", write_schema(&w, value.schema()));
     auto* tensors = w.array();
     w.put(entry, "tensors", tensors);
@@ -186,9 +174,18 @@ void write_directory(
         auto window =
             take(value.acquire_tensor(facts, slot, box, cancellation));
         auto span = take(window.affine_view());
-        const auto payload = byte_count(box, spec.descriptor.element_type);
+        const auto payload = take(window.physical_byte_size());
         if (!core_internal::can_add(position, payload))
           throw ToolError("result file exceeds representable size");
+        lengths.push_back(payload);
+        const auto batch =
+            std::min({payload, buffer_limit,
+                      static_cast<std::uint64_t>(
+                          std::numeric_limits<std::streamsize>::max())});
+        if (buffer.size() < batch) {
+          buffer = {};
+          buffer = take(budget.allocator().allocate(batch));
+        }
         write_tile(stream, window, span, payload, buffer, cancellation, budget);
         auto* tile = w.object();
         w.push(tiles, tile);
@@ -209,6 +206,7 @@ void write_directory(
         w.put(tile, "byte_strides", strides);
       }
     }
+    write_header(stream, tile_extent, selected, lengths, cancellation);
     stream.close();
     if (!stream)
       throw ToolError("result file close failed: " + name, 4, "PS-IO-WRITE");

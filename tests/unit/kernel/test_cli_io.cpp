@@ -278,6 +278,52 @@ void tiled_export(const ps::tools::fs::path& directory) {
     }
   }
 }
+void padded_planar_export(const ps::tools::fs::path& directory) {
+  using namespace ps;         // NOLINT(build/namespaces)
+  using namespace ps::tools;  // NOLINT(build/namespaces)
+  ResourceBudget budget;
+  SchemaTemplate schema;
+  schema.id = "image.planar";
+  ResultTensorSpec m;
+  m.key = "samples";
+  m.descriptor = {ElementType::UInt8, {2, 3, 2}};
+  m.layout.spatial = true;
+  m.atomic_trailing_axes = 1;
+  schema.tensors.push_back(m);
+  auto plan = export_plan(schema, 2);
+  auto b = take(ResultBuilder::start(budget, schema, "image", {}, 2));
+  const std::uint8_t source[] = {10, 11, 12, 20, 21, 22,
+                                 30, 31, 32, 40, 41, 42};
+  const auto region = Region::whole({2, 3, 2});
+  check(b.publish_tensor(0, region, ByteView(source, sizeof(source))));
+  auto original = take(b.seal());
+  auto whole =
+      take(original.acquire_tensor(take(original.descriptor()), 0, region));
+  ResultTensorViewTransform identity;
+  identity.source_axes = {{0, 0, 1}, {1, 0, 1}, {2, 0, 1}};
+  auto alias = take(ResultBuilder::start(budget, schema, "alias", {}, 2));
+  check(alias.publish_tensor_view(0, region, whole, identity));
+  ExecutionResult result;
+  result.results.emplace("result", take(alias.seal()));
+  Files files;
+  for (auto buffer : {1U, 128U}) {
+    auto output = directory / ("planar-" + std::to_string(buffer));
+    psx::export_results(plan, result, output, files, {}, budget, buffer);
+    JsonDocument manifest(files.read(output / "manifest.json"));
+    auto entry = manifest.root().at("outputs").array()[0];
+    auto tile = entry.at("tensors").array()[0].at("tiles").array()[1];
+    auto bin = files.read(output / entry.at("path").text());
+    check_record(bin, 1, 0, 1, 8);
+    const std::uint8_t expected[] = {12, 0, 22, 0, 32, 0, 42, 0};
+    auto strides = tile.at("byte_strides").array();
+    if (tile.at("shape").array()[1].u64() != 1 || strides[0].u64() != 2 ||
+        strides[1].u64() != 1 || strides[2].u64() != 4 ||
+        tile.at("byte_length").u64() != 8 ||
+        std::memcmp(bin.data() + tile.at("file_offset").u64(), expected,
+                    sizeof(expected)))
+      throw std::runtime_error("invalid padded image tile export");
+  }
+}
 void worker_options() {
   using namespace ps::tools;  // NOLINT(build/namespaces)
   for (const auto* option : {"--threads", "--parallelism"}) {
@@ -317,6 +363,7 @@ int main() try {
   } cleanup{directory};
   worker_options();
   tiled_bindings(directory);
+  padded_planar_export(directory);
   tiled_export(directory);
   ResourceBudget budget;
   SchemaTemplate schema;

@@ -24,6 +24,7 @@
 
 #include "02-format-color/exact_conversion.hpp"
 #include "common/domain/exact_numeric.hpp"
+#include "common/fixed_output.hpp"
 #include "common/fixed_point_inputs.hpp"
 #include "common/floating_environment.hpp"
 #include "common/registry.hpp"
@@ -809,7 +810,8 @@ void invoke(const ps_kernel_invocation_v8* invocation,
   if (state.sme && samples >= 4096 && samples <= 65536) {
     reader.bits(0, at, source_width);
     const auto& view = *reader.cached[0];
-    bool contiguous = view.layout->rank == rank;
+    bool contiguous = view.layout->rank == rank &&
+                      fixed_tensor::packed_output(*output.layout, target_width);
     std::uint64_t stride = source_width;
     for (unsigned axis = rank; axis-- > 0;) {
       contiguous &=
@@ -838,8 +840,10 @@ void invoke(const ps_kernel_invocation_v8* invocation,
     const auto input = reader.bits(0, at, source_width);
     const auto& view = *reader.cached[0];
     std::uint64_t used = 0;
-    if (view.layout->strides[rank - 1] ==
-        static_cast<std::int64_t>(source_width)) {
+    if (output.layout->strides[rank - 1] ==
+            static_cast<std::int64_t>(target_width) &&
+        view.layout->strides[rank - 1] ==
+            static_cast<std::int64_t>(source_width)) {
       const auto count = std::min<std::uint64_t>(
           {64,
            view.layout->origin[rank - 1] + view.layout->shape[rank - 1] -
@@ -850,9 +854,11 @@ void invoke(const ps_kernel_invocation_v8* invocation,
       for (unsigned axis = 0; axis < rank; ++axis)
         offset += static_cast<__int128>(at[axis] - view.layout->origin[axis]) *
                   view.layout->strides[axis];
-      used = convert_span(static_cast<const std::uint8_t*>(view.allocation) +
-                              static_cast<std::ptrdiff_t>(offset),
-                          target + sample * target_width, count, state);
+      used = convert_span(
+          static_cast<const std::uint8_t*>(view.allocation) +
+              static_cast<std::ptrdiff_t>(offset),
+          target + fixed_tensor::coordinate_offset(*output.layout, at.data()),
+          count, state);
     }
     if (!used) {
       const auto& bounds =
@@ -860,8 +866,9 @@ void invoke(const ps_kernel_invocation_v8* invocation,
       auto converted = convert_one(input, state, bounds, math, consume);
       if (!accept(converted.status()))
         return;
-      write_raw(target + sample * target_width, state.target,
-                converted.value());
+      write_raw(
+          target + fixed_tensor::coordinate_offset(*output.layout, at.data()),
+          state.target, converted.value());
       used = 1;
     }
     sample += used;

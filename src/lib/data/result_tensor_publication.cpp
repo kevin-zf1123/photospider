@@ -19,6 +19,7 @@
 #include "core/callback_environment.hpp"
 #include "core/resource_observation.hpp"
 #include "data/affine_view.hpp"
+#include "data/planar_view.hpp"
 #include "data/result_state.hpp"
 #include "data/result_support.hpp"
 #include "data/result_window_access.hpp"
@@ -81,6 +82,67 @@ Status ResultBuilder::publish_tensor(std::uint32_t slot, const Region& region,
   return publish_tensor_storage(slot, region, layout, std::move(storage),
                                 cancellation, {});
 }
+namespace {
+bool same_padded_view(const TensorSpan& piece, const Region& region,
+                      const StridedLayout& layout) {
+  if (!piece.has_tile_padding() || region.rank() != piece.region().rank() ||
+      layout.byte_offset != piece.layout().byte_offset)
+    return false;
+  for (std::size_t a = 0; a < region.rank(); ++a) {
+    const auto n = region.dimensions()[a].extent;
+    if (n != piece.region().dimensions()[a].extent ||
+        (n > 1 && layout.byte_strides[a] != piece.layout().byte_strides[a]))
+      return false;
+  }
+  return true;
+}
+}  // namespace
+Status ResultBuilder::publish_planar_tile(
+    std::uint32_t slot, const Region& region, std::uint64_t row_pitch,
+    std::shared_ptr<const CpuStorage> storage,
+    const CancellationToken& cancellation) try {
+  if (!impl_)
+    return {ErrorCode::Stale, {}};
+  auto reject = [&](Status error) {
+    fail(error);
+    return error;
+  };
+  if (slot >= impl_->schema.tensors.size() ||
+      !impl_->schema.tensors[slot].layout.spatial || !storage || !row_pitch ||
+      reinterpret_cast<std::uintptr_t>(storage->bytes().data()) %
+          host_page_alignment())
+    return reject({ErrorCode::InvalidArgument, "invalid planar tile backing"});
+  const auto& spec = impl_->schema.tensors[slot];
+  auto geometry = tensor_tile_storage(spec, region, row_pitch);
+  if (!geometry.ok())
+    return reject(geometry.status());
+  if (geometry.value().bytes != storage->bytes().size())
+    return reject(
+        {ErrorCode::InvalidArgument, "invalid planar tile byte count"});
+  ResourceAllocationScope scope(impl_->budget);
+  StridedLayout layout;
+  layout.byte_strides.assign(geometry.value().strides.begin(),
+                             geometry.value().strides.begin() + region.rank());
+  for (auto dim : region.dimensions())
+    layout.origin.push_back(dim.offset);
+  const data_internal::SampleDescriptor sample(spec);
+  auto span = TensorSpan::from_storage_impl(
+      sample.value, region, layout, std::move(storage),
+      row_pitch >
+          region.dimensions()[spec.batch_axes.size() + spec.layout.width_axis]
+              .extent);
+  if (!span.ok())
+    return reject(span.status());
+  ResourceVector<TensorSpan> spans{
+      ResourceAllocator<TensorSpan>(impl_->budget)};
+  spans.push_back(span.take_value());
+  return publish_tensor_spans(slot, region, spans, cancellation, {});
+} catch (const std::bad_alloc&) {
+  Status status{ErrorCode::ResourceExhausted, {}};
+  fail(status);
+  return status;
+}
+
 Status ResultBuilder::publish_tensor_storage(
     std::uint32_t slot, const Region& region, const StridedLayout& layout,
     std::shared_ptr<const CpuStorage> storage,
@@ -167,6 +229,11 @@ Status ResultBuilder::publish_tensor_spans(
   auto next = target.coverage.unite(samples.value(), limits);
   if (!next.ok())
     return reject(next.status());
+  for (const auto& span : spans) {
+    if (!data_internal::planar_view(spec, span.region(),
+                                    span.layout().byte_strides.data()))
+      return reject({ErrorCode::TypeMismatch, "image backing must be planar"});
+  }
   auto supplied = Tensor::create_view(sample.value, samples.value(),
                                       spans.data(), spans.size(), limits);
   if (!supplied.ok())
@@ -201,8 +268,9 @@ Status ResultBuilder::publish_tensor_spans(
         return reject({ErrorCode::ResourceExhausted, {}});
       growth_bytes += storage.value()->capacity();
     }
-    auto value = TensorSpan::from_storage(span.descriptor(), span.region(),
-                                          span.layout(), storage.take_value());
+    auto value = TensorSpan::from_storage_impl(
+        span.descriptor(), span.region(), span.layout(), storage.take_value(),
+        span.has_tile_padding());
     if (!value.ok())
       return reject(value.status());
     adopted.push_back(value.take_value());
@@ -265,6 +333,16 @@ Status ResultBuilder::publish_tensor(
     fail(status);
     return status;
   }
+  if (!count.value())
+    return publish_tensor_kernel(
+        slot, region, [](const auto&) { return Status::success(); },
+        cancellation);
+  auto source_layout =
+      tensor_tile_storage(impl_->schema.tensors[slot], region, 0);
+  if (!source_layout.ok()) {
+    fail(source_layout.status());
+    return source_layout.status();
+  }
   return publish_tensor_kernel(
       slot, region,
       [&](const auto& writers) {
@@ -287,31 +365,40 @@ Status ResultBuilder::publish_tensor(
             auto run = writer.row_run(at);
             if (!run.ok())
               return run.status();
-            // Packed publication is descriptor ordered. A last-axis physical
-            // width run can be copied in one operation; channel-last input is
-            // scattered.
-            const auto last = at.size() - 1;
-            const auto n = writer.sample_axis() == last &&
-                                   run.value().sample_stride_bytes ==
-                                       static_cast<std::int64_t>(width)
-                               ? run.value().samples
-                               : 1;
-            std::uint64_t index = 0;
+            const auto x = writer.sample_axis();
+            const auto n = run.value().samples;
+            std::uint64_t pos = 0;
             for (std::size_t axis = 0; axis < at.size(); ++axis)
-              index = index * region.dimensions()[axis].extent + at[axis] -
-                      region.dimensions()[axis].offset;
-            std::memcpy(run.value().data, packed.data() + index * width,
-                        n * width);
-            at[last] += n - 1;
-            std::size_t axis = at.size();
-            while (axis) {
-              --axis;
+              pos += (at[axis] - region.dimensions()[axis].offset) *
+                     source_layout.value().strides[axis];
+            if (run.value().sample_stride_bytes ==
+                    static_cast<std::int64_t>(width) &&
+                source_layout.value().strides[x] ==
+                    static_cast<std::int64_t>(width)) {
+              std::memcpy(run.value().data, packed.data() + pos, n * width);
+            } else {
+              for (std::uint64_t j = 0; j < n; ++j)
+                std::memcpy(
+                    run.value().data + j * run.value().sample_stride_bytes,
+                    packed.data() + pos + j * source_layout.value().strides[x],
+                    width);
+            }
+            at[x] += n;
+            if (at[x] < dimensions[x].offset + dimensions[x].extent)
+              continue;
+            at[x] = dimensions[x].offset;
+            bool more = false;
+            for (auto axis = at.size(); axis-- > 0;) {
+              if (axis == x)
+                continue;
               if (++at[axis] <
-                  dimensions[axis].offset + dimensions[axis].extent)
+                  dimensions[axis].offset + dimensions[axis].extent) {
+                more = true;
                 break;
+              }
               at[axis] = dimensions[axis].offset;
             }
-            if (!axis && at[0] == dimensions[0].offset)
+            if (!more)
               break;
           }
         }
@@ -534,12 +621,24 @@ Status ResultBuilder::publish_tensor_kernel(
           break;
       }
     }
-    auto allocated = owner->budget.allocator().allocate(bytes);
-    if (!allocated.ok())
-      return reject(allocated.status());
-    auto buffer = allocated.take_value();
+    std::uint64_t backing_bytes = bytes;
+    if (spec.layout.spatial) {
+      backing_bytes = 0;
+      for (const auto& chunk : chunks) {
+        const auto n = chunk.element_count();
+        std::uint64_t row_bytes;
+        if (!n.ok() ||
+            !core_internal::checked_multiply(target.tile_extent, width,
+                                             &row_bytes) ||
+            !core_internal::checked_multiply_add(
+                n.value() / chunk.dimensions()[x].extent, row_bytes,
+                backing_bytes, &backing_bytes))
+          return reject(
+              {ErrorCode::ResourceExhausted, "planar tile size overflow"});
+      }
+    }
     std::uint64_t growth_bytes = 0;
-    if (!core_internal::checked_add(buffer.size(), metadata_bytes,
+    if (!core_internal::checked_add(backing_bytes, metadata_bytes,
                                     &growth_bytes))
       return reject(
           {ErrorCode::ResourceExhausted, "batch tensor growth count"});
@@ -568,7 +667,9 @@ Status ResultBuilder::publish_tensor_kernel(
     auto& destination = target.affine;
     reserve_append(&destination, boxes);
     reserve_append(&target.affine_growth, 1);
-    std::uint64_t offset = 0;
+    ResourceVector<MutableBuffer> buffers{
+        ResourceAllocator<MutableBuffer>(owner->budget)};
+    buffers.reserve(boxes);
     for (const auto& region : chunks) {
       if (cancellation.cancelled())
         return reject({ErrorCode::Cancelled, {}});
@@ -578,37 +679,32 @@ Status ResultBuilder::publish_tensor_kernel(
       window.region_ = region;
       publication_metadata.commit(window.region_.dimensions().capacity() *
                                   sizeof(RegionDimension));
-      window.affine_data_ = buffer.data() + offset;
       window.affine_strides_.resize(rank);
       publication_metadata.commit(window.affine_strides_.capacity() *
                                   sizeof(std::uint64_t));
       layouts.emplace_back();
       auto& layout = layouts.back();
-      layout.byte_offset = offset;
+      layout.byte_offset = 0;
       layout.byte_strides.resize(rank);
       publication_metadata.commit(layout.byte_strides.capacity() *
                                   sizeof(std::int64_t));
       layout.origin.resize(rank);
       publication_metadata.commit(layout.origin.capacity() *
                                   sizeof(std::uint64_t));
-      std::uint64_t stride = width;
-      std::array<std::size_t, 8> order{};
-      std::size_t ordered = 0;
-      if (x < rank)
-        order[ordered++] = x;
-      if (y < rank)
-        order[ordered++] = y;
-      for (std::size_t axis = rank; axis-- > 0;)
-        if (axis != x && axis != y)
-          order[ordered++] = axis;
-      for (std::size_t i = 0; i < ordered; ++i) {
-        const auto axis = order[i];
-        window.affine_strides_[axis] = stride;
-        layout.byte_strides[axis] = stride;
+      auto geometry = tensor_tile_storage(spec, region, target.tile_extent);
+      if (!geometry.ok())
+        return reject(geometry.status());
+      for (std::size_t axis = 0; axis < rank; ++axis) {
+        window.affine_strides_[axis] = geometry.value().strides[axis];
+        layout.byte_strides[axis] = geometry.value().strides[axis];
         layout.origin[axis] = region.dimensions()[axis].offset;
-        stride *= region.dimensions()[axis].extent;
       }
-      offset += stride;
+      auto allocated =
+          owner->budget.allocator().allocate(geometry.value().bytes);
+      if (!allocated.ok())
+        return reject(allocated.status());
+      buffers.push_back(allocated.take_value());
+      window.affine_data_ = buffers.back().data();
     }
     lock.unlock();
     Status written;
@@ -629,23 +725,25 @@ Status ResultBuilder::publish_tensor_kernel(
       return reject(written);
     if (cancellation.cancelled())
       return reject({ErrorCode::Cancelled, {}});
-    auto storage = std::move(buffer).freeze();
     TensorDescriptor descriptor;
     descriptor.element_type = spec.descriptor.element_type;
     descriptor.shape = samples.shape();
     publication_metadata.commit(descriptor.shape.capacity() *
                                 sizeof(std::uint64_t));
+    ResultRef::Impl::StorageOwners new_owners(
+        std::less<const void*>{},
+        ResourceAllocator<const void*>(owner->budget));
     for (std::size_t i = 0; i < boxes; ++i) {
-      auto value =
-          TensorSpan::from_storage(descriptor, chunks[i], layouts[i], storage);
+      auto storage = std::move(buffers[i]).freeze();
+      new_owners.insert(storage.get());
+      auto value = TensorSpan::from_storage_impl(
+          descriptor, chunks[i], layouts[i], std::move(storage),
+          spec.layout.spatial &&
+              chunks[i].dimensions()[x].extent < target.tile_extent);
       if (!value.ok())
         return reject(value.status());
       values.push_back(value.take_value());
     }
-    ResultRef::Impl::StorageOwners new_owners(
-        std::less<const void*>{},
-        ResourceAllocator<const void*>(owner->budget));
-    new_owners.insert(storage.get());
     if (cancellation.cancelled())
       return reject({ErrorCode::Cancelled, {}});
     const bool canonical = false;
@@ -929,8 +1027,11 @@ Status ResultBuilder::prepare_tensor_view(
                               spec.descriptor.shape.begin(),
                               spec.descriptor.shape.end());
       const Region mapped_region(std::move(dims));
-      auto value = TensorSpan::from_storage(descriptor, mapped_region, layout,
-                                            piece.storage());
+      const bool full = same_padded_view(piece, mapped_region, layout);
+      if (full)
+        layout.byte_strides = piece.layout().byte_strides;
+      auto value = TensorSpan::from_storage_impl(descriptor, mapped_region,
+                                                 layout, piece.storage(), full);
       if (!value.ok())
         return reject(value.status());
       mapped->push_back(value.take_value());
@@ -1054,8 +1155,12 @@ Status ResultBuilder::prepare_tensor_view(
     layout.byte_offset = offset.value();
     // Chunk factor cancellation proves equal logical sizes without requiring
     // their full-domain product to fit uint64. Zero strides remain zero.
-    auto reshaped = TensorSpan::from_storage(descriptor, region, layout,
-                                             common.value().storage());
+    const bool full = source.affine_.size() == 1 &&
+                      same_padded_view(source.affine_.front(), region, layout);
+    if (full)
+      layout.byte_strides = source.affine_.front().layout().byte_strides;
+    auto reshaped = TensorSpan::from_storage_impl(
+        descriptor, region, layout, common.value().storage(), full);
     if (!reshaped.ok())
       return reject(reshaped.status());
     mapped->push_back(reshaped.take_value());

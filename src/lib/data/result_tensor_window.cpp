@@ -20,6 +20,7 @@
 #include "data/affine_view.hpp"
 #include "data/footprint_index.hpp"
 #include "data/physical_piece.hpp"
+#include "data/planar_view.hpp"
 #include "data/result_device_access.hpp"
 #include "data/result_state.hpp"
 #include "data/result_support.hpp"
@@ -376,15 +377,33 @@ bool inside(const Region& region, const std::vector<std::uint64_t>& at) {
 // Bound cancellation latency and charge before writing each batch.
 constexpr std::uint64_t kCopyBatchSamples = 16384;
 }  // namespace
+Result<std::uint64_t> ResultTensorReadWindow::physical_byte_size() const {
+  using Answer = Result<std::uint64_t>;
+  if (!valid())
+    return Answer(Status{ErrorCode::InvalidArgument, {}});
+  std::uint64_t bytes = 0;
+  for (const auto& span : affine_) {
+    if (cancellation_.cancelled())
+      return Answer(Status{ErrorCode::Cancelled, {}});
+    auto piece = data_internal::physical_piece(span);
+    if (!piece.ok())
+      return Answer(piece.status());
+    if (!core_internal::checked_add(bytes, piece.value().size(), &bytes) ||
+        bytes > SIZE_MAX)
+      return Answer(Status{ErrorCode::ResourceExhausted,
+                           "physical window size overflow"});
+  }
+  return Answer(bytes);
+}
 Status ResultTensorReadWindow::copy_to(std::uint8_t* destination,
                                        std::uint64_t bytes) const try {
   if (!valid() || !destination)
     return {ErrorCode::InvalidArgument, {}};
-  auto count = region_.element_count();
+  auto size = physical_byte_size();
+  if (!size.ok())
+    return size.status();
   const auto width = TensorSpan::element_size(spec().descriptor.element_type);
-  if (!count.ok() ||
-      !core_internal::can_multiply(count.value(), width, SIZE_MAX) ||
-      bytes != count.value() * width)
+  if (size.value() != bytes)
     return {ErrorCode::InvalidArgument, "tensor copy byte count mismatch"};
   for (const auto& span : affine_) {
     if (cancellation_.cancelled())
@@ -478,6 +497,10 @@ Result<ResultTensorWriteWindow> ResultTensorWriteWindow::borrow_dense(
       writer.descriptor().shape != spec.sample_shape())
     return Result<ResultTensorWriteWindow>(
         Status{ErrorCode::TypeMismatch, "dense writer schema mismatch"});
+  if (!data_internal::planar_view(spec, writer.region(),
+                                  writer.layout().byte_strides.data()))
+    return Result<ResultTensorWriteWindow>(
+        {ErrorCode::TypeMismatch, "image writer must be planar"});
   ResultTensorWriteWindow window;
   window.spec_ = &spec;
   window.region_ = writer.region();

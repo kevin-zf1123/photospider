@@ -9,6 +9,7 @@
 #include <utility>
 #include <vector>
 
+#include "common/fixed_output.hpp"
 #include "common/fixed_point_inputs.hpp"
 #include "common/floating_environment.hpp"
 #include "common/image_contract.hpp"
@@ -242,9 +243,13 @@ void invoke(const ps_kernel_invocation_v8* invocation,
     result[3] = static_cast<float>(sums[3]);
     for (unsigned c = 0; c < 3; ++c)
       result[c] = sums[3] == 0 ? 0.0F : static_cast<float>(sums[c] / sums[3]);
-    std::memcpy(static_cast<std::uint8_t*>(output.allocation) +
-                    output.byte_offset + pixel * 16,
-                result.data(), 16);
+    for (unsigned c = 0; c < 4; ++c) {
+      at[layout.rank - 1] = layout.origin[layout.rank - 1] + c;
+      std::memcpy(static_cast<std::uint8_t*>(output.allocation) +
+                      output.byte_offset +
+                      fixed_tensor::coordinate_offset(layout, at.data()),
+                  &result[c], sizeof(float));
+    }
   }
   *status = {};
 }

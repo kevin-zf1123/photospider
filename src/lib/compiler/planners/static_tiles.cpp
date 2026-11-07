@@ -70,16 +70,16 @@ Status import_inputs(PlanBuilder& builder, const PlanningOptions& options,
       auto layout = p.layouts[tile.layout];
       auto shape =
           p.schemas[p.values[vi].schema]->tensors[tile.member].sample_shape();
-      std::uint64_t bytes = TensorSpan::element_size(layout.element_type);
+      auto storage = tensor_tile_storage(
+          p.schemas[p.values[vi].schema]->tensors[tile.member],
+          Region::whole(shape), 0);
+      if (!storage.ok())
+        return storage.status();
+      const auto bytes = storage.value().bytes;
+      layout.strides = storage.value().strides;
       layout.byte_offset = 0;
-      for (unsigned axis = layout.rank; axis-- > 0;) {
-        if (bytes > INT64_MAX || shape[axis] > UINT64_MAX / bytes ||
-            layout.origin[axis] > (UINT64_MAX - layout.byte_offset) / bytes)
-          return exhausted();
-        layout.strides[axis] = static_cast<std::int64_t>(bytes);
-        layout.byte_offset += layout.origin[axis] * bytes;
-        bytes *= shape[axis];
-      }
+      for (unsigned axis = 0; axis < layout.rank; ++axis)
+        layout.byte_offset += layout.origin[axis] * layout.strides[axis];
       if (!room(p, 1, options))
         return exhausted();
       tile.bytes = bytes;
@@ -410,16 +410,18 @@ Status expand(PlanBuilder& builder, const PlanningOptions& options) {
                                   .descriptor.element_type;
         layout.rank = static_cast<std::uint32_t>(region.value().rank());
         layout.strides.fill(0);
-        std::uint64_t bytes = TensorSpan::element_size(layout.element_type);
-        auto alignment = bytes;
-        for (unsigned axis = layout.rank; axis-- > 0;) {
+        auto storage = tensor_tile_storage(
+            p.schemas[p.values[vi].schema]->tensors[member.first],
+            region.value(), p.tile_extent);
+        if (!storage.ok())
+          return storage.status();
+        const auto bytes = storage.value().bytes;
+        const auto alignment = TensorSpan::element_size(layout.element_type);
+        layout.strides = storage.value().strides;
+        for (unsigned axis = 0; axis < layout.rank; ++axis) {
           const auto d = region.value().dimensions()[axis];
-          if (bytes > INT64_MAX || d.extent > UINT64_MAX / bytes)
-            return exhausted();
-          layout.strides[axis] = static_cast<std::int64_t>(bytes);
-          layout.origin[axis] = d.offset;
           layout.shape[axis] = d.extent;
-          bytes *= d.extent;
+          layout.origin[axis] = d.offset;
         }
         physical::TileDesc tile;
         tile.value = vi;

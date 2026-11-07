@@ -23,6 +23,7 @@ struct TensorSpan::Metadata {
   TensorDescriptor descriptor;
   Region region;
   StridedLayout layout;
+  bool tile_padding = false;
 };
 TensorSpan::~TensorSpan() noexcept {
   metadata_.reset();
@@ -61,6 +62,17 @@ Result<TensorSpan> TensorSpan::create(TensorDescriptor descriptor,
 Result<TensorSpan> TensorSpan::from_storage(
     const TensorDescriptor& descriptor, const Region& region,
     const StridedLayout& layout, std::shared_ptr<const CpuStorage> storage) {
+  return from_storage_impl(descriptor, region, layout, std::move(storage),
+                           false);
+}
+
+bool TensorSpan::has_tile_padding() const noexcept {
+  return metadata_ && metadata_->tile_padding;
+}
+Result<TensorSpan> TensorSpan::from_storage_impl(
+    const TensorDescriptor& descriptor, const Region& region,
+    const StridedLayout& layout, std::shared_ptr<const CpuStorage> storage,
+    bool tile_padding) {
   if (!storage)
     return Result<TensorSpan>(
         {ErrorCode::InvalidArgument, "missing tensor storage"});
@@ -81,6 +93,7 @@ Result<TensorSpan> TensorSpan::from_storage(
   }
   auto metadata = std::allocate_shared<Metadata>(ResourceAllocator<Metadata>{});
   metadata->lease = std::move(lease);
+  metadata->tile_padding = tile_padding;
   metadata->descriptor = descriptor;
   core_internal::ResourceMetadataAccess::commit(
       metadata->lease,
@@ -109,14 +122,19 @@ Result<TensorSpan> TensorSpan::view(const Region& region) const {
       !region.validate(metadata_->descriptor.shape).ok())
     return Result<TensorSpan>(Status::failure(ErrorCode::InvalidArgument,
                                               "invalid TensorSpan subview"));
+  bool entire = has_tile_padding();
   for (std::size_t axis = 0; axis < region.rank(); ++axis) {
     const auto wanted = region.dimensions()[axis];
     const auto available = metadata_->region.dimensions()[axis];
+    entire &=
+        wanted.offset == available.offset && wanted.extent == available.extent;
     if (wanted.offset < available.offset ||
         wanted.offset + wanted.extent > available.offset + available.extent)
       return Result<TensorSpan>(Status::failure(
           ErrorCode::TypeMismatch, "subview exceeds available coverage"));
   }
+  if (entire)
+    return Result<TensorSpan>(*this);
   return from_storage(metadata_->descriptor, region, metadata_->layout,
                       storage_);
 }

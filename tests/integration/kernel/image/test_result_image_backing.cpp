@@ -491,15 +491,20 @@ void lazy_spatial_backing() {
     layout.byte_strides.resize(shape.size(), 0);
 
     require(
-        builder.publish_tensor(0, Region::whole(shape), layout, storage).ok(),
-        "huge spatial affine source publishes without dense reservation");
-    auto result = take(builder.seal());
+        builder.publish_tensor(0, Region::whole(shape), layout, storage).code ==
+            ErrorCode::TypeMismatch,
+        "spatial storage rejects broadcast strides");
+    auto sparse = take(ResultBuilder::start(root, schema, "spatial.endpoint"));
     std::vector<RegionDimension> dimensions;
     std::vector<std::uint64_t> at;
     for (auto n : shape) {
       dimensions.push_back({n - 1, 1});
       at.push_back(n - 1);
     }
+    layout.origin = at;
+    require(sparse.publish_tensor(0, Region(dimensions), layout, storage).ok(),
+            "huge spatial domain admits a single endpoint");
+    auto result = take(sparse.seal());
     auto window = take(result.acquire_tensor(take(result.descriptor()), 0,
                                              Region(dimensions)));
     auto run = take(window.row_run(at));
@@ -524,8 +529,9 @@ void lazy_spatial_backing() {
             return Status::success();
           });
       require(written.ok() && called &&
-                  root.statistics().live[ResourceKind::Payload] == before + 4,
-              "huge spatial ROI write admits only its actual affine payload");
+                  root.statistics().live[ResourceKind::Payload] ==
+                      before + 128 * sizeof(float),
+              "huge spatial ROI admits only its padded row");
       auto output = take(materialized.seal());
       float produced = 0;
       require(
@@ -660,12 +666,18 @@ void backing_independent_spatial_runs() {
   auto storage = take(TensorSpan::create({ElementType::UInt8, {24}},
                                          Region::whole({24}), {0, {1}}, bytes))
                      .storage();
+  auto invalid =
+      take(ResultBuilder::start(root, schema, "spatial.interleaved"));
+  require(invalid.publish_tensor(0, Region::whole(slot.sample_shape()),
+                                 {0, {0, 0, 12, 3, 1}}, storage)
+                  .code == ErrorCode::TypeMismatch,
+          "spatial input rejects interleaved HWC storage");
   for (bool affine : {false, true}) {
     auto builder = take(ResultBuilder::start(root, schema, "spatial.runs"));
 
     auto status =
         affine ? builder.publish_tensor(0, Region::whole(slot.sample_shape()),
-                                        {0, {0, 0, 12, 3, 1}}, storage)
+                                        {0, {0, 0, 4, 1, 8}}, storage)
                : builder.publish_tensor(0, Region::whole(slot.sample_shape()),
                                         ByteView(bytes.data(), bytes.size()));
     require(status.ok(), "both physical backings publish same tensor");
@@ -681,7 +693,7 @@ void backing_independent_spatial_runs() {
                       3 * rectangle.row.sample_stride_bytes +
                       rectangle.row_stride_bytes;
     require(
-        *rectangle.row.data == 1 && *last == 22,
+        *rectangle.row.data == 8 && *last == 15,
         "affine and planar rectangle spans read same spatial/channel samples");
   }
   schema.tensors[0].batch_axes[0] = 2;
@@ -693,7 +705,7 @@ void backing_independent_spatial_runs() {
       take(ResultBuilder::start(root, schema, "spatial.affine.batches"));
 
   require(multi
-              .publish_tensor(0, Region::whole(shape), {0, {24, 0, 12, 3, 1}},
+              .publish_tensor(0, Region::whole(shape), {0, {24, 0, 4, 1, 8}},
                               std::move(buffer).freeze())
               .ok(),
           "affine multi-batch publication");
@@ -962,14 +974,12 @@ void spatial_backing_boundaries() {
                            y < dims[0].offset + dims[0].extent; ++y) {
                         const auto x = dims[1].offset;
                         auto rectangle = take(window.rectangle_run({y, x, c}));
-                        require(
-                            rectangle.row.samples == dims[1].extent &&
-                                rectangle.rows ==
-                                    dims[0].offset + dims[0].extent - y &&
-                                rectangle.row_stride_bytes ==
-                                    static_cast<std::int64_t>(dims[1].extent),
-                            "tile-local physical runs stop at clipped tile "
-                            "edges");
+                        require(rectangle.row.samples == dims[1].extent &&
+                                    rectangle.rows ==
+                                        dims[0].offset + dims[0].extent - y &&
+                                    rectangle.row_stride_bytes == 2,
+                                "tile-local physical runs stop at clipped tile "
+                                "edges");
                         for (std::uint64_t dx = 0; dx < dims[1].extent; ++dx)
                           rectangle.row.data[dx] = static_cast<std::uint8_t>(
                               y * 40 + (x + dx) * 2 + c);

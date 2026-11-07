@@ -11,6 +11,7 @@
 #include "02-format-color/color_point.hpp"
 #include "04-mask-morphology/common.hpp"
 #include "07-grade/threshold_math.hpp"
+#include "common/fixed_output.hpp"
 #include "common/registry.hpp"
 
 namespace ps::plugin_internal::grade::threshold {
@@ -158,7 +159,7 @@ struct Adjustment final : Program {
                     const ps_kernel_invocation_v8& inv,
                     const ps_kernel_mutable_view_v8& out, std::uint64_t count,
                     double control) const {
-    if (filter.kind != 0)
+    if (filter.kind != 0 || !fixed_tensor::packed_output(*out.layout, 1))
       return false;
     Coordinate at{};
     for (unsigned a = 0; a < out.layout->rank; ++a)

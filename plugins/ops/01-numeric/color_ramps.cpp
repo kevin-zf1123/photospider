@@ -16,6 +16,7 @@
 #include "01-numeric/exact_color_coordinate.hpp"
 #include "01-numeric/exact_rgb.hpp"
 #include "common/domain/icc_validation.hpp"
+#include "common/fixed_output.hpp"
 #include "common/fixed_point_inputs.hpp"
 #include "common/floating_environment.hpp"
 #include "common/registry.hpp"
@@ -401,7 +402,8 @@ void invoke(const ps_kernel_invocation_v8* invocation,
     for (unsigned channel = 0; channel < program.channels; ++channel)
       std::memcpy(static_cast<std::uint8_t*>(output.allocation) +
                       output.byte_offset +
-                      (point * program.channels + channel) * width,
+                      fixed_tensor::sample_offset(
+                          *output.layout, point * program.channels + channel),
                   &result[channel], width);
   }
   *status = {};

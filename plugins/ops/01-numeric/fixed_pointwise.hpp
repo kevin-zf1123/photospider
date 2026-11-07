@@ -11,6 +11,7 @@
 #include <utility>
 #include <vector>
 
+#include "common/fixed_output.hpp"
 #include "common/fixed_tensor.hpp"
 #include "common/floating_environment.hpp"
 #include "common/tensor_program.hpp"
@@ -110,7 +111,8 @@ void pointwise_invoke(const ps_kernel_invocation_v8* invocation,
     else
       value = a == 0 && b == 0 ? static_cast<Number>(0.0) : std::max(a, b);
     std::memcpy(static_cast<std::uint8_t*>(output.allocation) +
-                    output.byte_offset + sample * sizeof(Number),
+                    output.byte_offset +
+                    fixed_tensor::coordinate_offset(layout, at.data()),
                 &value, sizeof(Number));
     for (unsigned axis = layout.rank; axis-- > 0;) {
       if (++at[axis] < layout.origin[axis] + layout.shape[axis])

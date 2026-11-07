@@ -100,7 +100,7 @@ Typed f64 拒绝无法精确表示的整数 token；需要浮点舍入时使用�
 
 目录先按成员 slot，再按 tile 编号升序排列；编号沿用编译后 Plan 的网格，稀疏选择保留原编号。无选中 tile 的具名输出仍生成 24 字节文件头。每条记录只存储一个完整 tile，边缘 tile 的实际形状见 manifest。传输缓冲区的大小只影响写入批次。
 
-`outputs[].byte_length` 包含文件头。每条 tile 的 `file_offset` 从文件开头计数，`byte_length` 仅计算该 tile 的样本。逻辑起点和形状分别为 `offset` 和 `shape`。payload 按物理地址递增顺序存储，保留 NaN、负零和宿主字节序；manifest 的 `byte_order` 为 `little` 或 `big`。读取器使用带符号的 `byte_strides` 定位样本。对于负步长轴，逻辑起点相对 payload 开头的字节偏移是这些轴上 `(shape[i] - 1) * abs(byte_strides[i])` 之和。
+`outputs[].byte_length` 包含文件头。每条 tile 的 `file_offset` 从文件开头计数，`byte_length` 计算物理 payload 字节，包括 planar 图像每行末尾的填充。逻辑起点和形状分别为 `offset` 和 `shape`。payload 按物理地址递增顺序存储，保留 NaN、负零和宿主字节序；manifest 的 `byte_order` 为 `little` 或 `big`。读取器使用带符号的 `byte_strides` 定位样本。对于负步长轴，逻辑起点相对 payload 开头的字节偏移是这些轴上 `(shape[i] - 1) * abs(byte_strides[i])` 之和。
 
 导出要求可由 CPU 读取的完整 tile，其样本占据一个连续、互不重叠的物理区间。图像格式所需的行排列和 whole 算子需要的连续输入由相应 codec 处理。
 

@@ -212,7 +212,7 @@ int batch_admission_rollback() {
     tensor.batch_axes = {3, 1};
     tensor.layout.spatial = true;
     tensor.layout.channel_axis.reset();
-    auto started = ResultBuilder::start(root, schema, "batch.admission");
+    auto started = ResultBuilder::start(root, schema, "batch.admission", {}, 1);
     PS_REQUIRE_OK(started);
     auto builder = started.take_value();
     const float prior = 4;

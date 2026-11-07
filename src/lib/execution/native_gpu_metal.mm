@@ -1,5 +1,7 @@
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
+#include <mach/mach.h>
+#include <mach/mach_vm.h>
 
 #include <algorithm>
 #include <array>
@@ -90,14 +92,6 @@ std::shared_ptr<Device> Device::create(std::shared_ptr<ResourceBudget> budget) {
     id<MTLDevice> device = MTLCreateSystemDefaultDevice();
     if (!device || !device.hasUnifiedMemory ||
         ![device supportsFamily:MTLGPUFamilyApple1])
-      return {};
-    // A device can expose Apple-family shared memory while rounding even tiny
-    // buffers to full pages (for example Apple's paravirtual device). S4 plans
-    // require exact small-buffer capacity; probe that prerequisite before
-    // advertising native availability. Unavailable native plans fail prepare.
-    id<MTLBuffer> probe =
-        [device newBufferWithLength:4 options:MTLResourceStorageModeShared];
-    if (!probe || !probe.contents || probe.allocatedSize > 4)
       return {};
     auto impl = std::make_unique<Impl>(std::move(budget));
     impl->device = device;
@@ -250,22 +244,25 @@ std::string Device::description() const {
 bool Device::owns(const CpuStorage& storage) const noexcept {
   return available() && storage.native_domain_ == impl_->domain;
 }
-BufferAllocator Device::allocator(const BufferAllocator& host) {
+BufferAllocator Device::allocator(const BufferAllocator& host,
+                                  std::uint64_t alignment) {
   auto result = host;
   if (host.native_shared_reserve_)
     result.reserve_ = host.native_shared_reserve_;
   auto self = shared_from_this();
   result.native_allocate_ =
-      [self](std::uint64_t size, const BufferAllocator::Reserve& reserve,
-             std::shared_ptr<const void> domain,
-             const BufferAllocator::AllocationCommit& commit) {
-        return self->allocate(size, reserve, std::move(domain), commit);
+      [self, alignment](std::uint64_t size,
+                        const BufferAllocator::Reserve& reserve,
+                        std::shared_ptr<const void> domain,
+                        const BufferAllocator::AllocationCommit& commit) {
+        return self->allocate(size, alignment, reserve, std::move(domain),
+                              commit);
       };
   return result;
 }
 Result<MutableBuffer> Device::allocate(
-    std::uint64_t size, const BufferAllocator::Reserve& reserve,
-    std::shared_ptr<const void> domain,
+    std::uint64_t size, std::uint64_t alignment,
+    const BufferAllocator::Reserve& reserve, std::shared_ptr<const void> domain,
     const BufferAllocator::AllocationCommit& commit) {
   collect_expired_allocations();
   @autoreleasepool {
@@ -293,9 +290,32 @@ Result<MutableBuffer> Device::allocate(
     auto& storage = *result.storage_;
     auto owner = std::allocate_shared<NativeBuffer>(
         NativeAllocator<NativeBuffer>(impl_->account));
-    owner->buffer =
-        [impl_->device newBufferWithLength:capacity
-                                   options:MTLResourceStorageModeShared];
+    // Ask the VM for the final aligned address without reserving extra pages.
+    // The Shared owner retains exactly the capacity admitted during prepare.
+    mach_vm_address_t address = 0;
+    const auto mask =
+        std::max<std::uint64_t>(alignment, host_page_alignment()) - 1;
+    if (mach_vm_map(mach_task_self(), &address, capacity, mask,
+                    VM_FLAGS_ANYWHERE, MEMORY_OBJECT_NULL, 0, false,
+                    VM_PROT_READ | VM_PROT_WRITE, VM_PROT_READ | VM_PROT_WRITE,
+                    VM_INHERIT_DEFAULT) != KERN_SUCCESS)
+      return Result<MutableBuffer>({ErrorCode::ResourceExhausted,
+                                    "Metal Shared page allocation failed"});
+    void* pages = reinterpret_cast<void*>(address);
+    owner->buffer = [impl_->device
+        newBufferWithBytesNoCopy:pages
+                          length:capacity
+                         options:MTLResourceStorageModeShared
+                     deallocator:^(void* base, NSUInteger length) {
+                       mach_vm_deallocate(
+                           mach_task_self(),
+                           reinterpret_cast<mach_vm_address_t>(base), length);
+                     }];
+    if (!owner->buffer) {
+      mach_vm_deallocate(mach_task_self(), address, capacity);
+      return Result<MutableBuffer>(
+          {ErrorCode::ResourceExhausted, "Metal Shared mapping failed"});
+    }
     if (owner->buffer && commit)
       commit(storage.lease_, owner->buffer.allocatedSize, 0);
     if (!owner->buffer || !owner->buffer.contents ||
@@ -314,7 +334,7 @@ Result<MutableBuffer> Device::allocate(
     storage.byte_size_ = size;
     storage.capacity_ = capacity;
     storage.native_writable_ = true;
-    std::memset(storage.native_bytes_, 0, capacity);
+    // Anonymous pages start zeroed, including inaccessible row padding.
     {
       std::lock_guard<std::mutex> lock(impl_->allocation_mutex);
       for (auto it = impl_->allocations.begin();
@@ -414,7 +434,7 @@ using namespace metal;
 struct Copy {
   ulong source_origin, destination_origin, bytes, width;
   ulong shape[8];
-  long strides[8];
+  long strides[8], target_strides[8];
   uint rank, threads;
 };
 kernel void byte_copy(device const uchar* source [[buffer(0)]],
@@ -422,15 +442,16 @@ kernel void byte_copy(device const uchar* source [[buffer(0)]],
                       constant Copy& p [[buffer(2)]],
                       uint index [[thread_position_in_grid]]) {
   for (ulong i = index; i < p.bytes; i += p.threads) {
-    ulong sample = i / p.width, offset = p.source_origin;
+    ulong sample = i / p.width, offset = p.source_origin, target = p.destination_origin;
     for (uint axis = p.rank; axis-- > 0;) {
       ulong coordinate = sample % p.shape[axis];
       sample /= p.shape[axis];
+      target += coordinate * p.target_strides[axis];
       long stride = p.strides[axis];
       if (stride < 0) offset -= coordinate * (ulong(-(stride + 1)) + 1);
       else offset += coordinate * ulong(stride);
     }
-    destination[p.destination_origin + i] = source[offset + i % p.width];
+    destination[target + i % p.width] = source[offset + i % p.width];
   }
 }
 )";
@@ -520,7 +541,7 @@ ps_kernel_submission_v8 Device::submit_copy(
       };
       [encoder setBuffer:buffer(binding.source) offset:0 atIndex:0];
       [encoder setBuffer:buffer(binding.destination) offset:0 atIndex:1];
-      static_assert(sizeof(CopyGeometry) == 168);
+      static_assert(sizeof(CopyGeometry) == 232);
       [encoder setBytes:&binding.geometry
                  length:sizeof(CopyGeometry)
                 atIndex:2];
@@ -537,7 +558,7 @@ ps_kernel_submission_v8 Device::submit_copy(
       // task completion until Metal releases its completion-handler block.
       const auto* download_source = binding.download_source;
       auto* download_destination = binding.download_destination;
-      const auto download_bytes = binding.geometry.bytes;
+      const auto download_bytes = invocation->outputs[0].bytes;
       [command addCompletedHandler:^(id<MTLCommandBuffer> completed) {
         ps_kernel_status_v8 status{};
         if (completed.status == MTLCommandBufferStatusCompleted) {

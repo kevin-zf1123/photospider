@@ -12,6 +12,7 @@
 
 #include "01-numeric/sequence_profiles.hpp"
 #include "02-format-color/result_mapping.hpp"
+#include "common/fixed_output.hpp"
 #include "common/fixed_point_inputs.hpp"
 #include "common/registry.hpp"
 #include "photospider/core/content_digest.hpp"
@@ -332,7 +333,9 @@ void invoke(const ps_kernel_invocation_v8* invocation,
     [[clang::always_inline]]
 #endif
     bits = reader.bits(0, source, state.width);
-    std::memcpy(destination + sample * state.width, &bits, state.width);
+    std::memcpy(destination +
+                    fixed_tensor::coordinate_offset(*output.layout, at.data()),
+                &bits, state.width);
     for (unsigned axis = output.layout->rank; axis-- > 0;) {
       if (++at[axis] < output.layout->origin[axis] + output.layout->shape[axis])
         break;

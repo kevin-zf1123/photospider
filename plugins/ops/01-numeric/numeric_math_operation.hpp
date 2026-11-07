@@ -18,6 +18,7 @@
 #include "01-numeric/certified_math.hpp"
 #include "01-numeric/exact_elementary.hpp"
 #include "01-numeric/exp_simd.hpp"
+#include "common/fixed_output.hpp"
 #include "common/fixed_point_inputs.hpp"
 #include "common/tensor_program.hpp"
 #include "photospider/plugin/operation_registry.hpp"
@@ -197,7 +198,6 @@ void point_math_invoke(const ps_kernel_invocation_v8* invocation,
     fixed_tensor::PointReader<Ports> reader{state.inputs, *invocation};
     const auto& output = invocation->outputs[0];
     const auto& layout = *output.layout;
-    const auto width = TensorSpan::element_size(state.output_type);
     std::array<std::uint64_t, 8> at{};
     std::copy(layout.origin, layout.origin + layout.rank, at.begin());
     std::uint64_t count = 1;
@@ -218,7 +218,7 @@ void point_math_invoke(const ps_kernel_invocation_v8* invocation,
           scratch->block.bits[lane][1] = reader.bits(1, at, state.input_width);
         scratch->block.destination[lane] =
             static_cast<std::uint8_t*>(output.allocation) + output.byte_offset +
-            (offset + lane) * width;
+            fixed_tensor::coordinate_offset(layout, at.data());
         for (unsigned axis = layout.rank; axis-- > 0;) {
           if (++at[axis] < layout.origin[axis] + layout.shape[axis])
             break;

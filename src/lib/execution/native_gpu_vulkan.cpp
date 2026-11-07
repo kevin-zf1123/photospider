@@ -687,22 +687,25 @@ std::string Device::description() const {
 bool Device::owns(const CpuStorage& storage) const noexcept {
   return available() && storage.native_domain_ == impl_->domain;
 }
-BufferAllocator Device::allocator(const BufferAllocator& host) {
+BufferAllocator Device::allocator(const BufferAllocator& host,
+                                  std::uint64_t alignment) {
   auto result = host;
   if (host.native_shared_reserve_)
     result.reserve_ = host.native_shared_reserve_;
   auto self = shared_from_this();
   result.native_allocate_ =
-      [self](std::uint64_t size, const BufferAllocator::Reserve& reserve,
-             std::shared_ptr<const void> domain,
-             const BufferAllocator::AllocationCommit& commit) {
-        return self->allocate(size, reserve, std::move(domain), commit);
+      [self, alignment](std::uint64_t size,
+                        const BufferAllocator::Reserve& reserve,
+                        std::shared_ptr<const void> domain,
+                        const BufferAllocator::AllocationCommit& commit) {
+        return self->allocate(size, alignment, reserve, std::move(domain),
+                              commit);
       };
   return result;
 }
 Result<MutableBuffer> Device::allocate(
-    std::uint64_t size, const BufferAllocator::Reserve& reserve,
-    std::shared_ptr<const void> domain,
+    std::uint64_t size, std::uint64_t alignment,
+    const BufferAllocator::Reserve& reserve, std::shared_ptr<const void> domain,
     const BufferAllocator::AllocationCommit& commit) {
   collect_expired_allocations();
   if (!available())
@@ -792,6 +795,9 @@ Result<MutableBuffer> Device::allocate(
                      &owner->mapped);
   if (code != VK_SUCCESS)
     return Result<MutableBuffer>(failed(code, "vkMapMemory"));
+  if (!alignment || reinterpret_cast<std::uintptr_t>(owner->mapped) % alignment)
+    return Result<MutableBuffer>({ErrorCode::BackendUnavailable,
+                                  "native allocation alignment unavailable"});
   storage.domain_ = std::move(domain);
   storage.native_domain_ = impl_->domain;
   storage.native_bytes_ = static_cast<std::uint8_t*>(owner->mapped);
@@ -1387,7 +1393,7 @@ ps_kernel_submission_v8 Device::submit_copy(
     pending->views[1] = std::move(binding.destination);
     pending->download_source = binding.download_source;
     pending->download_destination = binding.download_destination;
-    pending->download_bytes = binding.geometry.bytes;
+    pending->download_bytes = invocation->outputs[0].bytes;
     auto& batch = pending->batch;
     VkCommandPoolCreateInfo pool{};
     pool.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
@@ -1447,7 +1453,8 @@ ps_kernel_submission_v8 Device::submit_copy(
     for (std::uint64_t offset = 0; offset < geometry.bytes;
          offset += contiguous) {
       regions[count++] = {geometry.source_offset(offset / geometry.width),
-                          geometry.destination_origin + offset, contiguous};
+                          geometry.target_offset(offset / geometry.width),
+                          contiguous};
       if (count == regions.size() || offset + contiguous == geometry.bytes) {
         if (invocation->cancellation.is_cancelled &&
             invocation->cancellation.is_cancelled(

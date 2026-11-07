@@ -331,6 +331,43 @@ Result<SchemaTemplate> SchemaTemplate::managed_copy(
     return Result<SchemaTemplate>(Status{ErrorCode::ResourceExhausted, {}});
   }
 }
+Result<TensorTileStorage> tensor_tile_storage(const ResultTensorSpec& spec,
+                                              const Region& region,
+                                              std::uint64_t row_pitch) {
+  using Answer = Result<TensorTileStorage>;
+  TensorTileStorage result;
+  result.bytes = TensorSpan::element_size(spec.descriptor.element_type);
+  if (!result.bytes || !region.rank() || region.rank() > result.strides.size())
+    return Answer({ErrorCode::InvalidArgument, "invalid tile rank or dtype"});
+  const auto x = spec.batch_axes.size() + spec.layout.width_axis;
+  const auto y = spec.batch_axes.size() + spec.layout.height_axis;
+  auto append = [&](std::size_t axis, std::uint64_t extent) {
+    if (!extent || result.bytes > INT64_MAX ||
+        extent > UINT64_MAX / result.bytes)
+      return false;
+    result.strides[axis] = static_cast<std::int64_t>(result.bytes);
+    result.bytes *= extent;
+    return true;
+  };
+  if (spec.layout.spatial) {
+    if (x >= region.rank() || y >= region.rank() || x == y)
+      return Answer({ErrorCode::InvalidArgument, "invalid image axes"});
+    const auto width = region.dimensions()[x].extent;
+    if (row_pitch && row_pitch < width)
+      return Answer(
+          {ErrorCode::InvalidArgument, "image pitch shorter than row"});
+    if (!append(x, row_pitch ? row_pitch : width) ||
+        !append(y, region.dimensions()[y].extent))
+      return Answer(
+          {ErrorCode::ResourceExhausted, "planar tile size overflow"});
+  }
+  for (auto axis = region.rank(); axis-- > 0;)
+    if ((!spec.layout.spatial || (axis != x && axis != y)) &&
+        !append(axis, region.dimensions()[axis].extent))
+      return Answer({ErrorCode::ResourceExhausted, "tile size overflow"});
+  return Answer(result);
+}
+
 bool SchemaTemplate::same_schema(const SchemaTemplate& other) const noexcept {
   if (id != other.id || version != other.version ||
       tensors.size() != other.tensors.size() ||

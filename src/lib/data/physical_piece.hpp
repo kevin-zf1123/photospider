@@ -12,6 +12,8 @@ namespace ps::data_internal {
 // The sorted stride magnitudes must cover exactly the authorized bytes. A
 // min/max address check alone would accept overlapping samples with a hole.
 inline Result<ByteView> physical_piece(const TensorSpan& span) {
+  if (span.has_tile_padding())
+    return Result<ByteView>(span.bytes());
   const auto& dims = span.region().dimensions();
   const auto& strides = span.layout().byte_strides;
   std::array<std::uint64_t, 8> first{};

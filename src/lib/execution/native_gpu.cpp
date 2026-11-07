@@ -56,13 +56,10 @@ Result<ps_prepared_kernel_v8> Device::prepare_kernel(
 }
 #endif
 std::uint64_t allocation_capacity(std::uint64_t bytes) noexcept {
-  // Apple Silicon buffers up to one 16 KiB page have exact payload capacity.
-  // Larger buffers are explicitly requested in complete pages.
-  constexpr std::uint64_t page = 16384;
-  if (bytes == 0 || !core_internal::can_add(bytes, page, INT64_MAX))
+  // Shared Metal buffers wrap whole, page-aligned VM regions.
+  const auto page = host_page_alignment();
+  if (!bytes)
     return 0;
-  if (bytes <= page)
-    return bytes;
   std::uint64_t capacity = 0;
   return core_internal::checked_align_up(bytes, page, &capacity, INT64_MAX)
              ? capacity
@@ -114,7 +111,7 @@ std::string Device::description() const {
 bool Device::owns(const CpuStorage&) const noexcept {
   return false;
 }
-BufferAllocator Device::allocator(const BufferAllocator& host) {
+BufferAllocator Device::allocator(const BufferAllocator& host, std::uint64_t) {
   return host;
 }
 Result<BufferView> Device::view(const std::uint8_t*, std::uint64_t, bool) {

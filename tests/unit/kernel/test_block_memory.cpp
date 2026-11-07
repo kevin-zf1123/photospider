@@ -13,7 +13,7 @@
 int main() {
   using ps::execution_internal::BlockMemory;
   auto program = ps::test::physical_fixture::diamond();
-  program.tiles[0].alignment = 4096;
+  program.tiles[0].alignment = 2 * ps::host_page_alignment();
   program.tasks[0].scratch[0] = 8;
   PS_REQUIRE_OK(ps::physical::finalize_program(&program));
   ps::ResourceLimits limits;
@@ -45,10 +45,14 @@ int main() {
              7 * sizeof(ps::CpuStorage));
     PS_CHECK(full_metadata.allocated_metadata_bytes <=
              full_metadata.live[ps::ResourceKind::Metadata]);
-    PS_CHECK(reinterpret_cast<std::uintptr_t>(block.tile(0).data()) % 4096 ==
+    PS_CHECK(reinterpret_cast<std::uintptr_t>(block.tile(0).data()) %
+                 program.tiles[0].alignment ==
              0);
     for (unsigned i = 0; i < 5; ++i) {
       PS_CHECK(block.tile(i).size() == 4);
+      PS_CHECK(reinterpret_cast<std::uintptr_t>(block.tile(i).data()) %
+                   ps::host_page_alignment() ==
+               0);
       for (unsigned j = 0; j < i; ++j)
         PS_CHECK(block.tile(i).data() != block.tile(j).data());
     }

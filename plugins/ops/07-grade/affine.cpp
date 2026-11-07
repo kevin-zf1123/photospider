@@ -318,10 +318,13 @@ struct Adjustment final : Program {
           });
       // Charge the descriptor-derived upper bound before reading or writing.
       work.poll(count * (lgg ? 128 : 8));
-      const bool interleaved = arithmetic && axis > 0 &&
-                               axis + 1 == dims.size() &&
-                               output.layout->origin[axis] == 0 &&
-                               output.layout->shape[axis] == dims[axis];
+      const bool interleaved =
+          arithmetic && axis > 0 &&
+          output.layout->strides[axis] ==
+              static_cast<std::int64_t>(TensorSpan::element_size(
+                  static_cast<ElementType>(output.layout->element_type))) &&
+          axis + 1 == dims.size() && output.layout->origin[axis] == 0 &&
+          output.layout->shape[axis] == dims[axis];
       if (interleaved && dims[axis] == 1)
         pixels<T, 1>(kernel, inv, output);
       else if (interleaved && dims[axis] == 3)

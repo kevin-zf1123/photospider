@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "01-numeric/exact_ratio.hpp"
+#include "common/fixed_output.hpp"
 #include "common/fixed_point_inputs.hpp"
 #include "common/floating_environment.hpp"
 #include "common/registry.hpp"
@@ -151,7 +152,8 @@ void range_invoke(const ps_kernel_invocation_v8* invocation,
       }
       const auto bits = value.value();
       std::memcpy(static_cast<std::uint8_t*>(output.allocation) +
-                      output.byte_offset + sample * width,
+                      output.byte_offset +
+                      fixed_tensor::coordinate_offset(layout, at.data()),
                   &bits, width);
       for (unsigned axis = layout.rank; axis-- > 0;) {
         if (++at[axis] < layout.origin[axis] + layout.shape[axis])

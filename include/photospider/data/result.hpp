@@ -77,6 +77,19 @@ struct ResultPublicationScope final {
   ResultPublicationPolicy policy = ResultPublicationPolicy::IndependentChunks;
   ResourceVector<std::uint32_t> members;
 };
+/** @brief Physical storage geometry of one tile. */
+struct TensorTileStorage final {
+  std::array<std::int64_t, 8> strides{};
+  std::uint64_t bytes = 0;
+};
+/** Physical strides and allocation length for a logical region. Spatial
+ * members store x first, then y, then planes. row_pitch is in samples; zero
+ * uses the logical width (whole planar input). Non-images use row-major order.
+ */
+PHOTOSPIDER_API Result<TensorTileStorage> tensor_tile_storage(
+    const ResultTensorSpec& spec, const Region& region,
+    std::uint64_t row_pitch);
+
 /** @brief Static compiler-visible directory of 1..16 tensor members.
  * Each member has a fixed positive shape and structural layout. Physical
  * storage, object generations and descriptor revisions do not affect schema
@@ -273,12 +286,16 @@ class PHOTOSPIDER_API ResultTensorReadWindow final {
   Result<bool> visit_backing_regions(
       const ResourceBudget& budget,
       const std::function<Status(const Region&)>& visitor) const;
+  /** Physical byte count for copy_to, including row padding of complete
+   * owned planar tiles. Returns the same unavailable-view error for holes.
+   */
+  Result<std::uint64_t> physical_byte_size() const;
   /** @brief Concatenate authorized backing pieces in visit_backing_regions
    * order. Copy each piece in increasing physical address order. Its samples
-   * must occupy one dense interval; holes or overlapping samples return
-   * InvalidArgument with reason ViewUnavailable.
+   * must occupy one dense interval or a complete owned padded tile. Other holes
+   * or overlapping samples return InvalidArgument with reason ViewUnavailable.
    * @param destination Caller-owned writable storage disjoint from the source.
-   * @param bytes Exact window element count times element size.
+   * @param bytes Exact physical_byte_size() of the window.
    * @return Status of the copy. Cancellation or failure may leave a prefix.
    * Root work limits apply; copying allocates no payload.
    */
@@ -425,9 +442,21 @@ class PHOTOSPIDER_API ResultBuilder final {
                         const StridedLayout& layout,
                         std::shared_ptr<const CpuStorage> storage,
                         const CancellationToken& cancellation = {});
+  /** Publish logical samples without row padding. Image bytes are in planar
+   * order (x, y, planes); nonspatial bytes are row-major. Materialization
+   * partitions the region and zero-fills row padding in owned Host tiles.
+   */
   Status publish_tensor(std::uint32_t slot, const Region& region,
                         ByteView packed,
                         const CancellationToken& cancellation = {});
+  /** Publish a complete owned Host image tile. The whole allocation, including
+   * its row padding, is authorized for physical copies. row_pitch counts
+   * samples; logical coordinates and coverage come exclusively from region.
+   */
+  Status publish_planar_tile(std::uint32_t slot, const Region& region,
+                             std::uint64_t row_pitch,
+                             std::shared_ptr<const CpuStorage> storage,
+                             const CancellationToken& cancellation = {});
   /** @brief Publish an exact affine partition in one zero-copy transaction.
    * Nonempty, disjoint piece regions must cover region exactly. Each piece has
    * an explicit source and transform; reshaping is supported only by the
@@ -461,7 +490,8 @@ class PHOTOSPIDER_API ResultBuilder final {
   /** @brief Write directly into unpublished authorized tensor windows.
    * Windows partition the requested coverage at member tile and batch
    * boundaries, with tile-local planar bytes for spatial axes. No full-domain
-   * backing is reserved. The callback receives windows in logical order,
+   * backing is reserved. Each writable tile owns a page-aligned Host buffer.
+   * The callback receives windows in logical order,
    * borrowed only until it returns. Use each window's spec,
    * region, sample_axis and row/rectangle run strides; do not assume planar or
    * contiguous storage. Failure or cancellation rolls back all new pages;

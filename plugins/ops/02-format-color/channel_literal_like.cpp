@@ -10,6 +10,7 @@
 
 #include "01-numeric/sequence_profiles.hpp"
 #include "02-format-color/result_mapping.hpp"
+#include "common/fixed_output.hpp"
 #include "common/fixed_point_inputs.hpp"
 #include "common/registry.hpp"
 #include "photospider/core/status_helpers.hpp"
@@ -76,8 +77,7 @@ void invoke(const ps_kernel_invocation_v8* invocation,
     samples *= output.layout->shape[axis];
   auto* destination =
       static_cast<std::uint8_t*>(output.allocation) + output.byte_offset;
-  // The physical Plan proves dense positive output strides. A constant fills
-  // the complete logical tile linearly, independent of its schema axis order.
+  const bool packed = fixed_tensor::packed_output(*output.layout, state.width);
   // Poll between at most 256 bitwise writes, including very long rows.
   for (std::uint64_t done = 0; done < samples;) {
     if (cancelled()) {
@@ -85,7 +85,15 @@ void invoke(const ps_kernel_invocation_v8* invocation,
       return;
     }
     const auto count = std::min<std::uint64_t>(256, samples - done);
-    fill(state, destination + done * state.width, count);
+    if (packed) {
+      fill(state, destination + done * state.width, count);
+    } else {
+      for (std::uint64_t i = 0; i < count; ++i)
+        fill(
+            state,
+            destination + fixed_tensor::sample_offset(*output.layout, done + i),
+            1);
+    }
     done += count;
   }
   *status = {};

@@ -325,12 +325,14 @@ int shaders(const std::shared_ptr<Device>& device) {
 }  // namespace
 int main() {
   using gpu_internal::allocation_capacity;
-  PS_CHECK(allocation_capacity(0) == 0 && allocation_capacity(1) == 1);
-  PS_CHECK(allocation_capacity(16384) == 16384 &&
-           allocation_capacity(16385) == 32768);
-  PS_CHECK(allocation_capacity(INT64_MAX - UINT64_C(16384)) ==
-           INT64_MAX - UINT64_C(16383));
-  PS_CHECK(allocation_capacity(INT64_MAX - UINT64_C(16383)) == 0 &&
+  const auto page = host_page_alignment();
+  const auto last = INT64_MAX / page * page;
+  PS_CHECK(allocation_capacity(0) == 0 && allocation_capacity(1) == page);
+  PS_CHECK(allocation_capacity(page) == page &&
+           allocation_capacity(page + 1) == 2 * page);
+  PS_CHECK(allocation_capacity(last - 1) == last &&
+           allocation_capacity(last) == last);
+  PS_CHECK(allocation_capacity(last + 1) == 0 &&
            allocation_capacity(UINT64_MAX) == 0);
   auto device = Device::create();
   if (!device || device->backend() != PS_NATIVE_METAL_V2) {

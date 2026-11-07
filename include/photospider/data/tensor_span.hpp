@@ -190,6 +190,10 @@ class PHOTOSPIDER_API TensorSpan final {
   [[nodiscard]] static Result<TensorSpan> from_storage(
       const TensorDescriptor& descriptor, const Region& region,
       const StridedLayout& layout, std::shared_ptr<const CpuStorage> storage);
+  /** True only for a complete producer-owned planar tile with row padding.
+   * A narrower subview cannot claim the tile's unused bytes.
+   */
+  [[nodiscard]] bool has_tile_padding() const noexcept;
   /** @brief Creates a shared read-only subview; rejects coverage outside this
    * TensorSpan. */
   [[nodiscard]] Result<TensorSpan> view(const Region& region) const;
@@ -231,6 +235,12 @@ class PHOTOSPIDER_API TensorSpan final {
   [[nodiscard]] static std::size_t element_size(ElementType type);
 
  private:
+  friend class ResultBuilder;
+  friend class Tensor;
+  static Result<TensorSpan> from_storage_impl(
+      const TensorDescriptor& descriptor, const Region& region,
+      const StridedLayout& layout, std::shared_ptr<const CpuStorage> storage,
+      bool tile_padding);
   void swap(TensorSpan& other) noexcept;
   struct Metadata;
   // Copies share immutable descriptor, coverage, layout and their admission.

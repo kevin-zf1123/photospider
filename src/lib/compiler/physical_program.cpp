@@ -436,9 +436,11 @@ class Checker {
         } else if (tile.producer != none) {
           return invalid("incoming tile has a producer");
         }
-        auto status = validate_layout(p_.layouts[tile.layout], tile.bytes,
-                                      value.kind == ValueKind::Produced ||
-                                          value.kind == ValueKind::Imported);
+        auto status = validate_layout(
+            p_.layouts[tile.layout], tile.bytes,
+            !p_.schemas[value.schema]->tensors[tile.member].layout.spatial &&
+                (value.kind == ValueKind::Produced ||
+                 value.kind == ValueKind::Imported));
         if (!status.ok())
           return status;
         const auto& layout = p_.layouts[tile.layout];
@@ -450,23 +452,27 @@ class Checker {
                                        ->tensors[tile.member]
                                        .descriptor.element_type)
           return invalid("tile layout disagrees with schema");
-        if (value.kind == ValueKind::Input &&
-            value.input_layout == InputLayout::DenseHost) {
-          auto shape =
-              p_.schemas[value.schema]->tensors[tile.member].sample_shape();
-          std::uint64_t bytes = scalar_bytes(layout.element_type), offset = 0;
-          for (unsigned axis = layout.rank; axis-- > 0;) {
-            std::uint64_t step;
-            if (bytes > INT64_MAX ||
-                layout.strides[axis] != static_cast<std::int64_t>(bytes) ||
-                !multiply(layout.origin[axis], bytes, &step) ||
-                !add(offset, step, &offset) ||
-                !multiply(bytes, shape[axis], &bytes))
-              return invalid("invalid dense input layout");
+        const auto& spec = p_.schemas[value.schema]->tensors[tile.member];
+        const bool dense = value.kind == ValueKind::Input &&
+                           value.input_layout == InputLayout::DenseHost;
+        if (dense || spec.layout.spatial) {
+          const auto physical_region =
+              dense ? Region::whole(spec.sample_shape()) : region.value();
+          auto storage = tensor_tile_storage(spec, physical_region,
+                                             dense ? 0 : p_.tile_extent);
+          if (!storage.ok())
+            return storage.status();
+          std::uint64_t offset = 0;
+          if (dense) {
+            if (tile.domain != Domain::Host)
+              return invalid("invalid dense input domain");
+            for (unsigned axis = 0; axis < layout.rank; ++axis)
+              offset += layout.origin[axis] * storage.value().strides[axis];
           }
-          if (tile.domain != Domain::Host || tile.bytes != bytes ||
+          if (layout.strides != storage.value().strides ||
+              tile.bytes != storage.value().bytes ||
               layout.byte_offset != offset)
-            return invalid("invalid dense input allocation");
+            return invalid("noncanonical physical tile layout");
         }
         for (Id axis = 0; axis < layout.rank; ++axis)
           if (layout.origin[axis] != region.value().dimensions()[axis].offset ||

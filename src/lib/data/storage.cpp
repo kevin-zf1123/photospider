@@ -8,6 +8,13 @@
 #include <utility>
 #if defined(__linux__) || defined(__APPLE__)
 #include <sys/mman.h>
+#endif
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#else
 #include <unistd.h>
 #endif
 
@@ -98,6 +105,19 @@ void notify_failure(const BufferAllocator::FailureObserver& observer,
   }
 }
 }  // namespace
+std::size_t host_page_alignment() noexcept {
+  static const std::size_t size = []() -> std::size_t {
+#if defined(_WIN32)
+    SYSTEM_INFO info{};
+    GetSystemInfo(&info);
+    return info.dwPageSize;
+#else
+    return static_cast<std::size_t>(getpagesize());
+#endif
+  }();
+  return size;
+}
+
 ByteView CpuStorage::bytes() const noexcept {
   if (native_owner_)
     return ByteView(native_bytes_, static_cast<std::size_t>(byte_size_));
@@ -265,11 +285,15 @@ bool BufferAllocator::owns_allocation(
   return false;
 }
 Result<MutableBuffer> BufferAllocator::allocate(std::uint64_t size) const {
-  return allocate_impl(size, alignof(std::max_align_t));
+  return allocate_impl(size, host_page_alignment());
 }
 Result<MutableBuffer> BufferAllocator::allocate_aligned(
     std::uint64_t size, std::uint64_t alignment) const {
-  return allocate_aligned_impl(size, alignment, false);
+  if (!alignment || (alignment & (alignment - 1)))
+    return Result<MutableBuffer>(
+        {ErrorCode::InvalidArgument, "invalid host allocation alignment"});
+  return allocate_aligned_impl(
+      size, std::max<std::uint64_t>(alignment, host_page_alignment()), false);
 }
 Result<MutableBuffer> BufferAllocator::allocate_aligned_impl(
     std::uint64_t size, std::uint64_t alignment, bool dense_host) const {

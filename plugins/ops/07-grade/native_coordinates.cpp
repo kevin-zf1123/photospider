@@ -454,10 +454,13 @@ struct Adjustment final : Program {
       work.poll(count * 12);
       if (direct<T>(kernel, inv, output))
         continue;
-      const bool interleaved = arithmetic && axis > 0 &&
-                               axis + 1 == dims.size() &&
-                               output.layout->origin[axis] == 0 &&
-                               output.layout->shape[axis] == dims[axis];
+      const bool interleaved =
+          arithmetic && axis > 0 &&
+          output.layout->strides[axis] ==
+              static_cast<std::int64_t>(TensorSpan::element_size(
+                  static_cast<ElementType>(output.layout->element_type))) &&
+          axis + 1 == dims.size() && output.layout->origin[axis] == 0 &&
+          output.layout->shape[axis] == dims[axis];
       if (interleaved && dims[axis] == 3)
         pixels<T, 3>(kernel, inv, output);
       else if (interleaved && dims[axis] == 4)

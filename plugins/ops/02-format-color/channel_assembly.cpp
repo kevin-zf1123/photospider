@@ -16,6 +16,7 @@
 #include "01-numeric/sequence_profiles.hpp"
 #include "02-format-color/result_mapping.hpp"
 #include "common/domain/model_coordinates.hpp"
+#include "common/fixed_output.hpp"
 #include "common/fixed_point_inputs.hpp"
 #include "common/registry.hpp"
 #include "photospider/core/checked_math.hpp"
@@ -613,7 +614,8 @@ void invoke(const ps_kernel_invocation_v8* invocation,
       offset +=
           static_cast<__int128>(source[axis] - cached->layout->origin[axis]) *
           cached->layout->strides[axis];
-    std::memcpy(destination + sample * state.width,
+    std::memcpy(destination +
+                    fixed_tensor::coordinate_offset(*output.layout, at.data()),
                 static_cast<const std::uint8_t*>(cached->allocation) +
                     static_cast<std::ptrdiff_t>(offset),
                 state.width);

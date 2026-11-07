@@ -204,16 +204,17 @@ Result<physical::Id> OperationProgramBuilder::tile(physical::Id value,
   layout.element_type = schema.tensors[member].descriptor.element_type;
   layout.rank = static_cast<std::uint32_t>(region.value().rank());
   layout.strides.fill(0);
-  std::uint64_t bytes = TensorSpan::element_size(layout.element_type);
-  const auto alignment = bytes;
-  for (unsigned axis = layout.rank; axis-- > 0;) {
+  auto storage = tensor_tile_storage(schema.tensors[member], region.value(),
+                                     p.tile_extent);
+  if (!storage.ok())
+    return Answer(storage.status());
+  const auto bytes = storage.value().bytes;
+  const auto alignment = TensorSpan::element_size(layout.element_type);
+  layout.strides = storage.value().strides;
+  for (unsigned axis = 0; axis < layout.rank; ++axis) {
     const auto d = region.value().dimensions()[axis];
-    if (bytes > INT64_MAX || d.extent > UINT64_MAX / bytes)
-      return Answer(limit());
-    layout.strides[axis] = static_cast<std::int64_t>(bytes);
     layout.shape[axis] = d.extent;
     layout.origin[axis] = d.offset;
-    bytes *= d.extent;
   }
   physical::TileDesc desc;
   desc.value = value;

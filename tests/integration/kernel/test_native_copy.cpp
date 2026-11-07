@@ -24,7 +24,8 @@ int transfer(const std::shared_ptr<gpu_internal::Device>& device,
              const physical::Layout& layout, const void* source,
              std::uint64_t source_bytes, Domain source_domain,
              void* destination, std::uint64_t bytes, Domain destination_domain,
-             bool cancelled = false, bool insufficient_staging = false) {
+             bool cancelled = false, bool insufficient_staging = false,
+             const physical::Layout* target = nullptr) {
   test::NativeKernel kernel;
   PS_REQUIRE_OK(kernel.prepare_copy(device, layout));
   const auto source_layout = kernel_layout(layout);
@@ -34,6 +35,8 @@ int transfer(const std::shared_ptr<gpu_internal::Device>& device,
     destination_layout.strides[axis] = static_cast<std::int64_t>(stride);
     stride *= layout.shape[axis];
   }
+  if (target)
+    destination_layout = kernel_layout(*target);
   const ps_kernel_const_view_v8 input{source,
                                       source_bytes,
                                       layout.byte_offset,
@@ -184,6 +187,49 @@ int affine(const std::shared_ptr<gpu_internal::Device>& device) {
                     Domain::Host, output.data(), 3, Domain::Host, false,
                     true) == 0);
   PS_CHECK(output == original);
+  return 0;
+}
+int shared_image_edge(const std::shared_ptr<gpu_internal::Device>& device) {
+  ResourceBudget root;
+  auto allocated = device->allocator(root.allocator()).allocate(8);
+  PS_REQUIRE_OK(allocated);
+  auto shared = allocated.take_value();
+  PS_CHECK(reinterpret_cast<std::uintptr_t>(shared.data()) %
+               host_page_alignment() ==
+           0);
+  physical::Layout source;
+  source.rank = 3;
+  source.shape = {2, 1, 2};
+  source.strides = {1, 1, 2};
+  auto target = source;
+  target.strides = {2, 1, 4};
+  const std::array<std::uint8_t, 4> input{12, 22, 32, 42};
+  PS_CHECK(transfer(device, source, input.data(), input.size(), Domain::Host,
+                    shared.data(), 8, Domain::Shared, false, false,
+                    &target) == 0);
+  SchemaTemplate schema;
+  schema.id = "test.shared_planar";
+  ResultTensorSpec spec;
+  spec.key = "samples";
+  spec.descriptor = {ElementType::UInt8, {2, 3, 2}};
+  spec.layout.spatial = true;
+  schema.tensors.push_back(spec);
+  Region edge({{0, 2}, {2, 1}, {0, 2}});
+  auto started = ResultBuilder::start(root, schema, "shared.edge", {}, 2);
+  PS_REQUIRE_OK(started);
+  auto builder = started.take_value();
+  PS_REQUIRE_OK(
+      builder.publish_planar_tile(0, edge, 2, std::move(shared).freeze()));
+  auto result = builder.seal();
+  PS_REQUIRE_OK(result);
+  auto descriptor = result.value().descriptor();
+  PS_REQUIRE_OK(descriptor);
+  auto window = result.value().acquire_tensor(descriptor.value(), 0, edge);
+  PS_REQUIRE_OK(window);
+  std::array<std::uint8_t, 8> copied{};
+  PS_REQUIRE_OK(window.value().copy_to(copied.data(), copied.size()));
+  const std::array<std::uint8_t, 8> expected{12, 0, 22, 0, 32, 0, 42, 0};
+  PS_CHECK(copied == expected);
   return 0;
 }
 OperationDefinition operation() {
@@ -350,6 +396,7 @@ int main() {
     return 77;
   std::cout << device->identity() << '\n';
   PS_CHECK(affine(device) == 0);
+  PS_CHECK(shared_image_edge(device) == 0);
   PS_CHECK(public_run(device->backend()) == 0);
   return 0;
 }

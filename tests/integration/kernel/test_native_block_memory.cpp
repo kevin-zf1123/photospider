@@ -6,6 +6,7 @@
 #include <new>
 #include <stdexcept>
 #include <utility>
+#include <vector>
 
 #include "core/resource_observation.hpp"
 #include "data/result_device_access.hpp"
@@ -746,6 +747,49 @@ int shared_execution() {
   PS_CHECK(budget.statistics().live[ResourceKind::Shared] == 0);
   return 0;
 }
+int aligned_shared_tiles(
+    const std::shared_ptr<ps::gpu_internal::Device>& device) {
+  using namespace ps;                      // NOLINT(build/namespaces)
+  using namespace ps::physical;            // NOLINT(build/namespaces)
+  using namespace ps::execution_internal;  // NOLINT(build/namespaces)
+  for (const auto multiple : {1U, 2U, 32U}) {
+    auto program = test::physical_fixture::program();
+    const auto id = test::physical_fixture::output(
+        &program, test::physical_fixture::task(&program, 0));
+    auto& tile = program.tiles[id];
+    tile.domain = Domain::Shared;
+    tile.alignment = multiple * host_page_alignment();
+    program.placements[0].backend = physical::Backend::Gpu;
+    program.placements[0].domain = Domain::Shared;
+    program.return_schemas = {0};
+    program.blocks[0].return_values = {tile.value};
+    PS_REQUIRE_OK(finalize_program(&program));
+    auto prepared = prepare_native_allocations(program, device);
+    PS_REQUIRE_OK(prepared);
+    ResourceBudget root;
+    {
+      std::vector<std::shared_ptr<const CpuStorage>> retained;
+      for (unsigned i = 0; i < 16; ++i) {
+        auto allocated =
+            BlockMemory::allocate(program, 0, 1, root, 1, &prepared.value());
+        PS_REQUIRE_OK(allocated);
+        auto block = allocated.take_value();
+        auto owner = block.publish(id);
+        PS_CHECK(owner->bytes().size() == 4 &&
+                 owner->capacity() == host_page_alignment());
+        PS_CHECK(reinterpret_cast<std::uintptr_t>(owner->bytes().data()) %
+                     tile.alignment ==
+                 0);
+        retained.push_back(std::move(owner));
+      }
+      PS_CHECK(root.statistics().live[ResourceKind::Shared] ==
+               retained.size() * host_page_alignment());
+    }
+    for (auto bytes : root.statistics().live.values)
+      PS_CHECK(bytes == 0);
+  }
+  return 0;
+}
 }  // namespace
 
 int main() {
@@ -758,6 +802,8 @@ int main() {
     return 77;
   }
   std::cout << device->identity() << '\n';
+  if (device->backend() == PS_NATIVE_METAL_V2)
+    PS_CHECK(aligned_shared_tiles(device) == 0);
   PS_CHECK(private_storage() == 0);
   PS_CHECK(private_kernels() == 0);
   PS_CHECK(private_block() == 0);

@@ -22,6 +22,11 @@ namespace gpu_internal {
 class Device;
 }
 
+/** @brief System page size in bytes, used as the minimum alignment of Host tile
+ * allocation bases. Thread-safe and independent of the Plan's saved alignment.
+ */
+PHOTOSPIDER_API std::size_t host_page_alignment() noexcept;
+
 /** @brief Borrowed immutable bytes; lifetime is bounded by the storage owner.
  */
 class ByteView final {
@@ -157,6 +162,7 @@ class PHOTOSPIDER_API BufferAllocator final {
    */
   bool same_owner(const BufferAllocator& other) const noexcept;
   /** @brief Allocates exactly size zero-initialized bytes after reservation.
+   * Ordinary Host backing starts on a system page boundary.
    * Local size, quota and allocation exhaustion use ResourceExhausted with
    * CapacityLimit. External reservation/native failures preserve their Status.
    * Host allocation exceptions become ResourceExhausted; other host exceptions
@@ -165,9 +171,10 @@ class PHOTOSPIDER_API BufferAllocator final {
    */
   Result<MutableBuffer> allocate(std::uint64_t size) const;
   /** @brief Allocate host storage at a positive power-of-two alignment.
-   * Alignment is an address contract, not additional logical payload. Native
-   * allocator conversions reject this overload; their device preparation owns
-   * alignment negotiation. No allocation occurs for invalid alignment.
+   * Host backing also satisfies host_page_alignment(). Alignment is an address
+   * contract, not additional logical payload. Native allocator conversions
+   * reject this overload; their device preparation owns alignment negotiation.
+   * No allocation occurs for invalid alignment.
    */
   Result<MutableBuffer> allocate_aligned(std::uint64_t size,
                                          std::uint64_t alignment) const;

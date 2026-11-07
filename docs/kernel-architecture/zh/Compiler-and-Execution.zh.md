@@ -112,7 +112,7 @@ ps::PlanningOptions options;
 options.input_layouts["image"] = ps::physical::InputLayout::DenseHost;
 ```
 
-省略的声明使用 `DirectTiles`，借用独立且兼容的 tile allocation。`DenseHost` 描述完整 tensor member 的 row-major Host 存储，包含 batch 轴。原始 tile view 共享 member 的 stride 和容量，偏移由各 tile 的逻辑原点计算。`submit` 相对于绑定基址检查这些 view；所属存储允许在该范围前后保留未使用字节。来源 owner 保持不可变，并保留到最后一次读取结束。对于 extent 为 2 的 UInt8 `[4,4]` member，原始 tile 的 stride 为 `[4,1]`，偏移为 `0,2,8,10`，容量为 16。四个 COPY 产生独立的 4 字节 tile，stride 为 `[2,1]`。
+省略的声明使用 `DirectTiles`，借用独立且兼容的 tile allocation。`DenseHost` 描述包含 batch 轴的完整 Host 存储：空间图像为 planar 布局，普通数值张量为 row-major 布局。原始 tile view 共享 member 的 stride 和容量，偏移由各 tile 的逻辑原点计算。`submit` 相对于绑定基址检查这些 view；所属存储允许在该范围前后保留未使用字节。来源 owner 保持不可变，并保留到最后一次读取结束。对于 extent 为 2 的 UInt8 `[4,4]` member，原始 tile 的 stride 为 `[4,1]`，偏移为 `0,2,8,10`，容量为 16。四个 COPY 产生独立的 4 字节 tile，stride 为 `[2,1]`。
 
 Planner 为每个使用到的 `(block, input)` 建立一个 `Imported` value，为每个选定 tile 建立一个 COPY，同一 block 内的消费者共享该导入结果。`import_source` 标识规范 Input，`owner` 标识 block，`source_value` 为零。Validator 证明每个 import 从该输入复制相同 member、tile index、类型和逻辑范围。Payload 消费者与终结符使用 imported value；schema-only read 仍可引用原始输入。边参数将 imported handle 重命名为目标 block 的 dense argument。每次 block activation 创建新的 import allocation。
 

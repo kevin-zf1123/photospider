@@ -11,6 +11,7 @@
 
 #include "01-numeric/exact_bake_error.hpp"
 #include "01-numeric/lut3d_bake_common.hpp"
+#include "common/fixed_output.hpp"
 #include "common/fixed_point_inputs.hpp"
 #include "common/registry.hpp"
 #include "common/tensor_program.hpp"
@@ -372,10 +373,10 @@ bool measure(const BakeKernel& state, const ps_kernel_invocation_v8& invocation,
         remaining /= output.layout->shape[axis];
         stride *= shape[axis];
       }
-      std::memcpy(static_cast<std::uint8_t*>(output.allocation) +
-                      output.byte_offset + i * width,
-                  static_cast<const std::uint8_t*>(source) + index * width,
-                  width);
+      std::memcpy(
+          static_cast<std::uint8_t*>(output.allocation) + output.byte_offset +
+              fixed_tensor::sample_offset(*output.layout, i),
+          static_cast<const std::uint8_t*>(source) + index * width, width);
     }
   }
   return true;
@@ -439,7 +440,8 @@ void invoke(const ps_kernel_invocation_v8* invocation,
     }
     const auto bits = reader.bits(0, at, width);
     std::memcpy(static_cast<std::uint8_t*>(output.allocation) +
-                    output.byte_offset + i * width,
+                    output.byte_offset +
+                    fixed_tensor::sample_offset(*output.layout, i),
                 &bits, width);
   }
   *status = {};

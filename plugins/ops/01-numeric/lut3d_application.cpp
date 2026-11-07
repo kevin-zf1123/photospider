@@ -14,6 +14,7 @@
 #include "01-numeric/array_parameters.hpp"
 #include "01-numeric/exact_lut3d.hpp"
 #include "01-numeric/exact_sampling.hpp"
+#include "common/fixed_output.hpp"
 #include "common/fixed_point_inputs.hpp"
 #include "common/floating_environment.hpp"
 #include "common/registry.hpp"
@@ -344,9 +345,10 @@ void invoke(const ps_kernel_invocation_v8* invocation,
     if (!accept(values.status()))
       return;
     for (unsigned channel = 0; channel < 3; ++channel)
-      std::memcpy(static_cast<std::uint8_t*>(output.allocation) +
-                      output.byte_offset + (point * 3 + channel) * width,
-                  &values.value()[channel], width);
+      std::memcpy(
+          static_cast<std::uint8_t*>(output.allocation) + output.byte_offset +
+              fixed_tensor::sample_offset(*output.layout, point * 3 + channel),
+          &values.value()[channel], width);
   }
   *status = {};
 }

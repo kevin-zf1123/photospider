@@ -14,6 +14,7 @@
 
 #include "01-numeric/accelerated_matrix.hpp"
 #include "01-numeric/exact_dot.hpp"
+#include "common/fixed_output.hpp"
 #include "common/fixed_point_inputs.hpp"
 #include "common/floating_environment.hpp"
 #include "common/registry.hpp"
@@ -220,10 +221,12 @@ void matrix_invoke(const ps_kernel_invocation_v8* invocation,
             }
             word = exact.value();
           }
-          std::memcpy(static_cast<std::uint8_t*>(output.allocation) +
-                          output.byte_offset +
-                          ((begin + r) * output_components + o) * width,
-                      &*word, width);
+          std::memcpy(
+              static_cast<std::uint8_t*>(output.allocation) +
+                  output.byte_offset +
+                  fixed_tensor::sample_offset(
+                      *output.layout, (begin + r) * output_components + o),
+              &*word, width);
         }
       }
     }

@@ -14,6 +14,7 @@
 #include "01-numeric/array_parameters.hpp"
 #include "01-numeric/array_profiles.hpp"
 #include "01-numeric/exact_aggregate.hpp"
+#include "common/fixed_output.hpp"
 #include "common/fixed_point_inputs.hpp"
 #include "common/floating_environment.hpp"
 #include "common/registry.hpp"
@@ -336,6 +337,7 @@ void values_invoke(const ps_kernel_invocation_v8* invocation,
       count *= layout.shape[axis];
     std::array<std::uint64_t, 8> at{}, source{};
     std::array<std::uint8_t, 32> buffer{};
+    const bool packed = fixed_tensor::packed_output(layout, width);
     unsigned buffered = 0;
     const auto update_position = [&](std::uint64_t index) {
       return load_pair(indices, index).position;
@@ -384,9 +386,16 @@ void values_invoke(const ps_kernel_invocation_v8* invocation,
       std::memcpy(buffer.data() + buffered, &bits, width);
       buffered += width;
       if (buffered == buffer.size() || index + 1 == count) {
-        numeric_ops::array_copy_block(destination, buffer.data(), buffered,
-                                      state.profile);
-        destination += buffered;
+        const auto first = index + 1 - buffered / width;
+        if (packed) {
+          numeric_ops::array_copy_block(destination + first * width,
+                                        buffer.data(), buffered, state.profile);
+        } else {
+          for (unsigned j = 0; j < buffered / width; ++j)
+            std::memcpy(
+                destination + fixed_tensor::sample_offset(layout, first + j),
+                buffer.data() + j * width, width);
+        }
         buffered = 0;
       }
     }

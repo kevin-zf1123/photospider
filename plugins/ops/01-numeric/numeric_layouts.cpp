@@ -13,6 +13,7 @@
 
 #include "01-numeric/array_parameters.hpp"
 #include "01-numeric/array_profiles.hpp"
+#include "common/fixed_output.hpp"
 #include "common/fixed_point_inputs.hpp"
 #include "common/registry.hpp"
 #include "common/tensor_program.hpp"
@@ -346,6 +347,7 @@ void layout_invoke(const ps_kernel_invocation_v8* query,
   for (unsigned axis = 0; axis < layout.rank; ++axis)
     count *= layout.shape[axis];
   std::array<std::uint8_t, 32> block{};
+  const bool packed = fixed_tensor::packed_output(layout, width);
   unsigned buffered = 0;
   for (std::uint64_t index = 0; index < count; ++index) {
     if (index % 64 == 0 && cancelled()) {
@@ -378,9 +380,16 @@ void layout_invoke(const ps_kernel_invocation_v8* query,
     std::memcpy(block.data() + buffered, &bits, width);
     buffered += width;
     if (buffered == block.size() || index + 1 == count) {
-      numeric_ops::array_copy_block(destination, block.data(), buffered,
-                                    state.profile);
-      destination += buffered;
+      const auto first = index + 1 - buffered / width;
+      if (packed) {
+        numeric_ops::array_copy_block(destination + first * width, block.data(),
+                                      buffered, state.profile);
+      } else {
+        for (unsigned j = 0; j < buffered / width; ++j)
+          std::memcpy(
+              destination + fixed_tensor::sample_offset(layout, first + j),
+              block.data() + j * width, width);
+      }
       buffered = 0;
     }
   }

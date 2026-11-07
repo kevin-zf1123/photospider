@@ -58,6 +58,8 @@ CPU lane reservation is bounded by the maximum static CPU task count among the p
 
 ## Storage and Results
 
+Owned Host and host-visible Shared tile buffers start on system page boundaries, including clipped edge tiles. A stronger Plan alignment takes precedence. DirectTiles binding checks the allocation base; affine sample offsets and DenseHost input views retain their declared layouts. Result publication hands each writable tile an independent page-aligned allocation. Logical tile bytes exclude allocator padding.
+
 CPU `BufferAllocator` storage remains zero-initialized. On Linux, ordinary eligible allocations from
 1 MiB use private anonymous mappings; on macOS the threshold is 32 MiB. The requested alignment must
 divide the OS page size. Other requests retain aligned allocation followed by zero initialization.

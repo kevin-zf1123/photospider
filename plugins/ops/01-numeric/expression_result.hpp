@@ -15,6 +15,7 @@
 
 #include "01-numeric/expression.hpp"
 #include "01-numeric/expression_metadata.hpp"
+#include "common/fixed_output.hpp"
 #include "common/fixed_point_inputs.hpp"
 #include "common/floating_environment.hpp"
 #include "common/numeric_common.hpp"
@@ -201,7 +202,8 @@ void invoke(const ps_kernel_invocation_v8* invocation,
       }
       const float number = static_cast<float>(value);
       std::memcpy(static_cast<std::uint8_t*>(output.allocation) +
-                      output.byte_offset + local * 4,
+                      output.byte_offset +
+                      fixed_tensor::sample_offset(*output.layout, local),
                   &number, 4);
       for (unsigned axis = output.layout->rank; axis-- > 0;) {
         if (++at[axis] <

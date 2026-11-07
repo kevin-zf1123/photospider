@@ -15,6 +15,40 @@ using multi_result::take;
 ByteView bytes(const double& value) {
   return {reinterpret_cast<const std::uint8_t*>(&value), sizeof(value)};
 }
+int page_aligned_windows() {
+  ResourceBudget root;
+  auto schema = multi_result::schema(ElementType::UInt8, {3, 5});
+  schema.tensors[0].layout.spatial = true;
+  schema.tensors[0].layout.channel_axis.reset();
+  auto builder = take(ResultBuilder::start(root, schema, "pages", {}, 2));
+  const auto whole = Region::whole({3, 5});
+  std::vector<const void*> starts;
+  check(builder.publish_tensor_kernel(0, whole, [&](const auto& windows) {
+    for (const auto& window : windows) {
+      const auto& dims = window.region().dimensions();
+      auto run = take(window.row_run({dims[0].offset, dims[1].offset}));
+      if (reinterpret_cast<std::uintptr_t>(run.data) % host_page_alignment())
+        return Status{ErrorCode::Internal, "misaligned Host tile"};
+      starts.push_back(run.data);
+      *run.data = static_cast<std::uint8_t>(starts.size());
+    }
+    return Status::success();
+  }));
+  PS_CHECK(starts.size() == 6);
+  auto result = take(builder.seal());
+  const auto descriptor = take(result.descriptor());
+  std::size_t index = 0;
+  for (unsigned y : {0U, 2U})
+    for (unsigned x : {0U, 2U, 4U}) {
+      const auto window =
+          take(result.acquire_tensor(descriptor, 0, Region({{y, 1}, {x, 1}})));
+      const auto run = take(window.row_run({y, x}));
+      PS_CHECK(run.data == starts[index] && *run.data == index + 1);
+      ++index;
+    }
+  return 0;
+}
+
 int tensor_transaction() {
   for (bool spatial : {false, true}) {
     for (unsigned mode = 0; mode < 4; ++mode) {
@@ -313,9 +347,10 @@ int affine_views() {
 }  // namespace
 int main() {
   try {
-    return tensor_transaction() || affine_views() || irregular_partition() ||
-           incremental_owners() || window_copy_order() ||
-           window_copy_strides() || window_copy_work_limit();
+    return page_aligned_windows() || tensor_transaction() || affine_views() ||
+           irregular_partition() || incremental_owners() ||
+           window_copy_order() || window_copy_strides() ||
+           window_copy_work_limit();
   } catch (const std::exception& failure) {
     std::cerr << failure.what() << '\n';
     return 1;

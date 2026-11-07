@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "01-numeric/lut3d_bake_common.hpp"
+#include "common/fixed_output.hpp"
 #include "common/fixed_point_inputs.hpp"
 #include "common/registry.hpp"
 #include "common/tensor_metadata.hpp"
@@ -326,7 +327,8 @@ void invoke(const ps_kernel_invocation_v8* invocation,
       }
     }
     std::memcpy(static_cast<std::uint8_t*>(output.allocation) +
-                    output.byte_offset + i * width,
+                    output.byte_offset +
+                    fixed_tensor::sample_offset(*output.layout, i),
                 &bits, width);
   }
   *status = {};

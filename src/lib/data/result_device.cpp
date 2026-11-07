@@ -5,6 +5,7 @@
 #include <new>
 #include <utility>
 
+#include "data/planar_view.hpp"
 #include "data/resource_storage.hpp"
 #include "data/result_device_access.hpp"
 #include "data/result_state.hpp"
@@ -87,6 +88,9 @@ Status ResultDeviceAccess::publish(
                                              retained.take_value());
   if (!span.ok())
     return reject(span.status());
+  if (!data_internal::planar_view(spec, region, layout.byte_strides.data()))
+    return reject(
+        {ErrorCode::TypeMismatch, "device image backing must be planar"});
   std::uint64_t growth_bytes =
       sizeof(DeviceTensorSpan) +
       region.rank() * (sizeof(RegionDimension) + 3 * sizeof(std::uint64_t));

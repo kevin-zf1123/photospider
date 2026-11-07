@@ -31,12 +31,21 @@ std::uint64_t CopyGeometry::source_offset(std::uint64_t sample) const noexcept {
   }
   return offset;
 }
+std::uint64_t CopyGeometry::target_offset(std::uint64_t sample) const noexcept {
+  auto offset = destination_origin;
+  for (unsigned axis = rank; axis-- > 0;) {
+    offset += (sample % shape[axis]) * target_strides[axis];
+    sample /= shape[axis];
+  }
+  return offset;
+}
 std::uint64_t CopyGeometry::contiguous_bytes() const noexcept {
   auto contiguous = width;
   for (unsigned axis = rank; axis-- > 0;) {
     if (shape[axis] > 1 &&
         (strides[axis] < 0 ||
-         static_cast<std::uint64_t>(strides[axis]) != contiguous))
+         static_cast<std::uint64_t>(strides[axis]) != contiguous ||
+         static_cast<std::uint64_t>(target_strides[axis]) != contiguous))
       break;
     contiguous *= shape[axis];
   }
@@ -52,14 +61,21 @@ Result<CopyBinding> bind_copy(Device& device, CopyGeometry geometry,
   };
   if (cancelled())
     return Answer({ErrorCode::Cancelled, "native COPY cancelled"});
-  CopyBinding result(geometry);
+
   const auto& input = invocation.inputs[0];
   const auto& output = invocation.outputs[0];
+  std::copy_n(output.layout->strides, geometry.rank, geometry.target_strides);
+  CopyBinding result(geometry);
   const auto host_source = input.domain == PS_KERNEL_DOMAIN_HOST_V8;
   const auto host_destination = output.domain == PS_KERNEL_DOMAIN_HOST_V8;
   std::uint8_t* staging = nullptr;
   if (host_source || host_destination) {
-    const auto required = geometry.bytes * (host_source + host_destination);
+    // Writable COPY tiles own their complete destination allocation.
+    if ((host_destination && output.byte_offset) ||
+        (host_destination && host_source && output.bytes > UINT64_MAX / 2))
+      return Answer(
+          {ErrorCode::InvalidArgument, "invalid Host COPY destination"});
+    const auto required = output.bytes * (host_source + host_destination);
     for (unsigned i = 0; i < invocation.scratch_count; ++i)
       if (invocation.scratch[i].domain == PS_KERNEL_DOMAIN_SHARED_V8 &&
           invocation.scratch[i].bytes >= required)
@@ -75,16 +91,16 @@ Result<CopyBinding> bind_copy(Device& device, CopyGeometry geometry,
                              writable);
   };
   auto source =
-      host_source ? device.view(staging, geometry.bytes, true)
+      host_source ? device.view(staging, output.bytes, true)
                   : resolve(input.allocation, input.bytes, input.domain, false);
   if (!source.ok())
     return Answer(source.status());
   result.source = source.take_value();
   auto* output_staging =
-      staging ? staging + (host_source ? geometry.bytes : 0) : nullptr;
+      staging ? staging + (host_source ? output.bytes : 0) : nullptr;
   auto destination =
       host_destination
-          ? device.view(output_staging, geometry.bytes, true)
+          ? device.view(output_staging, output.bytes, true)
           : resolve(output.allocation, output.bytes, output.domain, true);
   if (!destination.ok())
     return Answer(destination.status());
@@ -97,22 +113,20 @@ Result<CopyBinding> bind_copy(Device& device, CopyGeometry geometry,
          offset += contiguous, ++chunk) {
       if ((chunk & 4095) == 0 && cancelled())
         return Answer({ErrorCode::Cancelled, "native COPY gather cancelled"});
-      std::memcpy(staging + offset,
+      std::memcpy(staging + geometry.target_offset(offset / geometry.width),
                   static_cast<const std::uint8_t*>(input.allocation) +
                       geometry.source_offset(offset / geometry.width),
                   contiguous);
     }
-    auto stride = geometry.width;
-    for (unsigned axis = geometry.rank; axis-- > 0;) {
-      result.geometry.strides[axis] = static_cast<std::int64_t>(stride);
-      stride *= geometry.shape[axis];
-    }
+    std::copy_n(geometry.target_strides, geometry.rank,
+                result.geometry.strides);
   }
   result.geometry.source_origin =
       result.source.offset + (host_source ? 0 : input.byte_offset);
   result.geometry.destination_origin =
       result.destination.offset + (host_destination ? 0 : output.byte_offset);
   if (host_destination) {
+    std::memset(output_staging, 0, output.bytes);
     result.download_source = output_staging;
     result.download_destination =
         static_cast<std::uint8_t*>(output.allocation) + output.byte_offset;

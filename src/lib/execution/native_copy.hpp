@@ -10,10 +10,11 @@ namespace ps::gpu_internal {
 struct CopyGeometry final {
   std::uint64_t source_origin = 0, destination_origin = 0, bytes = 0, width = 0;
   std::uint64_t shape[8]{};
-  std::int64_t strides[8]{};
+  std::int64_t strides[8]{}, target_strides[8]{};
   std::uint32_t rank = 0, threads = 0;
   explicit CopyGeometry(const physical::Layout& layout) noexcept;
   std::uint64_t contiguous_bytes() const noexcept;
+  std::uint64_t target_offset(std::uint64_t sample) const noexcept;
   std::uint64_t source_offset(std::uint64_t sample) const noexcept;
 };
 

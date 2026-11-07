@@ -60,7 +60,8 @@ class Device final : public std::enable_shared_from_this<Device> {
   bool owns(const DeviceStorage& storage) const noexcept;
   std::string identity() const;
   std::string description() const;
-  BufferAllocator allocator(const BufferAllocator& host);
+  BufferAllocator allocator(const BufferAllocator& host,
+                            std::uint64_t alignment = 1);
   bool owns(const CpuStorage& storage) const noexcept;
   Result<BufferView> view(const std::uint8_t* bytes, std::uint64_t size,
                           bool writable);
@@ -93,7 +94,8 @@ class Device final : public std::enable_shared_from_this<Device> {
       const ps_kernel_completion_v8* completion) noexcept;
   explicit Device(std::unique_ptr<Impl> impl);
   Result<MutableBuffer> allocate(
-      std::uint64_t size, const BufferAllocator::Reserve& reserve,
+      std::uint64_t size, std::uint64_t alignment,
+      const BufferAllocator::Reserve& reserve,
       std::shared_ptr<const void> domain,
       const BufferAllocator::AllocationCommit& commit);
   std::unique_ptr<Impl> impl_;
