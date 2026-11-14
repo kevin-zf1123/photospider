@@ -253,9 +253,36 @@ OperationDefinition array_operation(const std::string& key, bool constant,
     return Answer(
         std::vector<OperationOutputSpecialization>{std::move(result)});
   };
-  operation.lower = [constant](const auto& query) {
-    return lower_array(constant, query);
-  };
+  if (constant) {
+    operation.lower = [](const OperationLowering& q) {
+      return lower_array(true, q);
+    };
+  } else {
+    auto& tilewise = operation.tilewise.emplace();
+    tilewise.describe = [](const OperationLowering&, const MappingQuery&) {
+      TileTask task;
+      task.symbol = "broadcast";
+      task.contract = "array-bitcopy-v1";
+      return Result<TileTask>(std::move(task));
+    };
+    tilewise.configuration = [](const OperationLowering& q) {
+      auto parsed = metadata(false, q.inputs[0], q.parameters);
+      using Answer = Result<std::vector<std::uint64_t>>;
+      if (!parsed.ok())
+        return Answer(parsed.status());
+      const auto& d = parsed.value();
+      return Answer(std::vector<std::uint64_t>(
+          d.axes.begin(), d.axes.begin() + d.source.size()));
+    };
+    tilewise.local = [](const MappingQuery& q, MappingSink& sink) {
+      std::vector<RegionDimension> dims;
+      for (unsigned i = 0; i < q.config.size(); ++i)
+        dims.push_back(q.sources[0].grid.shape()[i] == 1
+                           ? RegionDimension{0, 1}
+                           : q.region.dimensions().at(q.config[i]));
+      return sink.region(0, Region(std::move(dims)));
+    };
+  }
   operation.prepare_kernel =
       [constant, profile](
           const physical::KernelDesc& kernel,

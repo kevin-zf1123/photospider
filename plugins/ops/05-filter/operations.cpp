@@ -278,6 +278,26 @@ OperationDefinition make_filter(const std::string& key, Kind kind,
       [kind, profile](const auto& in, const auto& p) {
         return std::make_shared<Filter>(kind, profile, in, p);
       });
+  if (kind == Kind::BoxSum || kind == Kind::BoxMean) {
+    definition.lower = {};
+    definition.mapping_dependencies.push_back({"support", "halo", "geometry"});
+    auto& t = definition.tilewise.emplace();
+    t.external = "support";
+    t.configuration = [](const OperationLowering& q) {
+      const auto& g = static_cast<const Filter*>(q.static_state)->geometry;
+      return Result<std::vector<std::uint64_t>>(std::vector<std::uint64_t>{
+          g.ya, g.xa, g.ay, g.kh - 1 - g.ay, g.ax, g.kw - 1 - g.ax,
+          static_cast<std::uint64_t>(g.boundary)});
+    };
+    t.describe = [](const OperationLowering& q, const MappingQuery& m) {
+      TileTask task;
+      task.symbol = "generation";
+      task.contract = "generation-unchecked-v1";
+      task.scratch[0] = static_cast<const Filter*>(q.static_state)
+                            ->task_scratch(m.output, m.region);
+      return Result<TileTask>(std::move(task));
+    };
+  }
   definition.reusable_tiles = true;
   return definition;
 }

@@ -241,10 +241,13 @@ OperationDefinition comparison(const std::string& key, Comparison kind,
     return Answer(
         std::vector<OperationOutputSpecialization>{std::move(result)});
   };
-  operation.lower = [](const OperationLowering& query) {
-    return fixed_tensor::lower_pointwise(query, "compare",
-                                         "exact-predicate-unchecked-v2",
-                                         sizeof(ComparisonMath));
+  operation.tilewise.emplace().describe = [](const OperationLowering&,
+                                             const MappingQuery&) {
+    TileTask task;
+    task.symbol = "compare";
+    task.contract = "exact-predicate-unchecked-v2";
+    task.scratch[0] = sizeof(ComparisonMath);
+    return Result<TileTask>(std::move(task));
   };
   operation.prepare_kernel =
       [kind, profile](
@@ -382,9 +385,13 @@ OperationDefinition selection(const std::string& key, SequenceProfile profile) {
     return Answer(
         std::vector<OperationOutputSpecialization>{std::move(result)});
   };
-  operation.lower = [](const OperationLowering& query) {
-    return fixed_tensor::lower_pointwise(query, "select", "bits-unchecked-v1",
-                                         0);
+  operation.tilewise.emplace().describe = [](const OperationLowering&,
+                                             const MappingQuery&) {
+    TileTask task;
+    task.symbol = "select";
+    task.contract = "bits-unchecked-v1";
+    task.scratch[0] = 0;
+    return Result<TileTask>(std::move(task));
   };
   operation.prepare_kernel =
       [profile](

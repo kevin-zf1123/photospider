@@ -343,13 +343,21 @@ Result<OperationProgram> lower_pyramid(const OperationLowering& q) {
     for (const auto& item : groups) {
       const auto task = take(b.add_task("generation", "generation-unchecked-v1",
                                         {}, {s.scratch_bytes, 0, 0}));
-      auto bound = s;
-      bound.selected = item.second.region;
-      for (const auto& read : bound.support(0, {})) {
-        const auto grid = take(TileGrid::from_schema(
-            *q.inputs[read.port].result_schema, q.tile_extent, read.member));
-        for (auto tile : take(sdk::tiles_for_region(budget, grid, read.region)))
-          check(b.read_input(task, read.port, read.member, tile));
+      MappingQuery mapping;
+      mapping.tile_extent = q.tile_extent;
+      mapping.region = item.second.region;
+      mapping.output_metadata = q.outputs[0];
+      mapping.config = {s.geometry.ya, s.geometry.xa};
+      const auto& members = q.inputs[0].result_schema->tensors;
+      for (unsigned member = 0; member < (s.kind == 2 ? members.size() : 1);
+           ++member) {
+        auto grid = take(TileGrid::from_schema(*q.inputs[0].result_schema,
+                                               q.tile_extent, member));
+        mapping.sources.push_back({0, member, std::move(grid), q.inputs[0]});
+      }
+      for (const auto& need : take(q.map("plane", mapping))) {
+        for (auto tile : need.tiles)
+          check(b.read_input(task, need.input, need.tensor_slot, tile));
       }
       for (const auto& write : item.second.writes)
         check(b.write_output(task, 0, write.first, write.second));
@@ -390,6 +398,7 @@ OperationDefinition make_pyramid(const std::string& key, int kind,
     result.traits.input_schema[0].result_schema_id = kLaplacian;
     result.traits.input_schema[0].result_schema_version = 1;
   }
+  result.mapping_dependencies.push_back({"plane", "plane", "geometry"});
   result.lower = lower_pyramid;
   const auto prepare = result.prepare_kernel;
   result.prepare_kernel =
