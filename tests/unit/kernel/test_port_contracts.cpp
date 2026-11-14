@@ -528,8 +528,14 @@ int c_contract() {
     auto builder =
         ResultBuilder::start(root, schema, "contract.source").take_value();
 
-    multi_result::check(builder.publish_tensor(
-        0, backing.region(), backing.layout(), backing.storage()));
+    if (layout == 0) {
+      // DirectTiles inputs use owned, page-aligned Host storage.
+      multi_result::check(
+          builder.publish_tensor(0, backing.region(), backing.bytes()));
+    } else {
+      multi_result::check(builder.publish_tensor(
+          0, backing.region(), backing.layout(), backing.storage()));
+    }
     ExecutionBinding binding;
     binding.name = declaration.name;
     binding.result = builder.seal().take_value();

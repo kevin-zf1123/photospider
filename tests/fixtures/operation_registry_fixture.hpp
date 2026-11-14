@@ -39,17 +39,17 @@ inline ps_operation_output_v8 make_output(
 }
 inline const auto output = make_output();
 /** @brief Import-only fixture; any unexpected lowering fails explicitly. */
-inline ps_kernel_status_v8 never(void*, const ps_lowering_query_v8*,
-                                 const ps_operation_builder_v8*) {
+inline ps_kernel_status_v8 never(void*, const ps_lowering_query_v9*,
+                                 const ps_operation_builder_v10*) {
   ps_kernel_status_v8 status{};
   status.code = PS_KERNEL_OPERATION_FAILED_V8;
   return status;
 }
-inline ps_operation_v8 make_operation(
+inline ps_operation_v10 make_operation(
     const char* key, std::uint32_t key_size,
     const ps_parameter_spec_v8* parameters, std::uint32_t parameter_count,
     const ps_operation_output_v8* result_output = &output) {
-  ps_operation_v8 operation{};
+  ps_operation_v10 operation{};
   operation.struct_size = sizeof(operation);
   operation.key = {key, key_size};
   operation.flags = PS_OPERATION_DETERMINISTIC_V8 | PS_OPERATION_PURE_V8 |
@@ -61,13 +61,15 @@ inline ps_operation_v8 make_operation(
   operation.lower = never;
   return operation;
 }
-inline ps_operation_module_v8 make_api(const ps_operation_v8* operation,
-                                       void (*destroy)(void*)) {
-  return {sizeof(ps_operation_module_v8),
-          PS_OPERATION_MODULE_ABI_VERSION_8,
+inline ps_operation_module_v10 make_api(const ps_operation_v10* operation,
+                                        void (*destroy)(void*)) {
+  return {sizeof(ps_operation_module_v10),
+          PS_OPERATION_MODULE_ABI_VERSION_10,
           operation,
           1,
           nullptr,
-          destroy};
+          destroy,
+          nullptr,
+          0};
 }
 }  // namespace operation_registry_fixture

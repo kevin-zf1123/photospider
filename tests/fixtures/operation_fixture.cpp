@@ -66,8 +66,8 @@ ps_kernel_status_v8 prepare(void*, const ps_static_query_v8* query,
   return sink->set_output(sink->context, 0, &query->inputs[0], nullptr,
                           UINT32_MAX);
 }
-ps_kernel_status_v8 lower(void*, const ps_lowering_query_v8* query,
-                          const ps_operation_builder_v8* builder) {
+ps_kernel_status_v8 lower(void*, const ps_lowering_query_v9* query,
+                          const ps_operation_builder_v10* builder) {
   const ps_placement_v8 placement{PS_BACKEND_CPU_V8,
                                   PS_KERNEL_DOMAIN_HOST_V8,
                                   {"cpu", 3},
@@ -79,7 +79,7 @@ ps_kernel_status_v8 lower(void*, const ps_lowering_query_v8* query,
       std::uint32_t task = 0;
       auto result = builder->add_task(builder->context, {"scale", 5},
                                       {"scale-f64-v1", 12}, &placement, scratch,
-                                      0, &task);
+                                      0, 8, &task);
       if (!result.code)
         result = builder->read_input(builder->context, task, 0, 0, tile,
                                      PS_KERNEL_DOMAIN_HOST_V8);
@@ -149,8 +149,8 @@ ps_kernel_status_v8 prepare_kernel(void*, const ps_kernel_preparation_v8* query,
 void destroy(void*) {
   ++destroy_count;
 }
-const ps_operation_v8 operation = [] {
-  ps_operation_v8 value{};
+const ps_operation_v10 operation = [] {
+  ps_operation_v10 value{};
   value.struct_size = sizeof(value);
   value.key = {"fixture.double", 14};
   value.flags = PS_OPERATION_CPU_V8 | PS_OPERATION_DETERMINISTIC_V8 |
@@ -167,12 +167,15 @@ const ps_operation_v8 operation = [] {
   return value;
 }();
 // NOLINTBEGIN(whitespace/indent_namespace)
-const ps_operation_module_v8 api{sizeof(api), 8,       &operation,
-                                 1,           nullptr, destroy};
+const ps_operation_module_v10 api{
+    sizeof(api), PS_OPERATION_MODULE_ABI_VERSION_10,
+    &operation,  1,
+    nullptr,     destroy,
+    nullptr,     0};
 // NOLINTEND
 }  // namespace
-extern "C" PS_OPERATION_MODULE_EXPORT const ps_operation_module_v8*
-ps_operation_module_get_api_v8(void) {
+extern "C" PS_OPERATION_MODULE_EXPORT const ps_operation_module_v10*
+ps_operation_module_get_api_v10(void) {
   return &api;
 }
 extern "C" PS_OPERATION_MODULE_EXPORT std::uint32_t

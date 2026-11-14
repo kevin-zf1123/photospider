@@ -415,40 +415,39 @@ target_include_directories(
             $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
 
 
-add_library(photospider_ops
+add_library(photospider_ops_runtime
   ${PHOTOSPIDER_OPERATION_SOURCES}
-  plugins/ops/01-numeric/lut3d_baking.cpp
   plugins/ops/registry.cpp
   $<TARGET_OBJECTS:photospider_numeric_math>)
-add_library(Photospider::ops ALIAS photospider_ops)
-set_target_properties(photospider_ops PROPERTIES
-  EXPORT_NAME ops CXX_EXTENSIONS OFF POSITION_INDEPENDENT_CODE ON
+add_library(Photospider::ops_runtime ALIAS photospider_ops_runtime)
+set_target_properties(photospider_ops_runtime PROPERTIES
+  EXPORT_NAME ops_runtime CXX_EXTENSIONS OFF POSITION_INDEPENDENT_CODE ON
   CXX_VISIBILITY_PRESET hidden VISIBILITY_INLINES_HIDDEN YES
   VERSION ${PROJECT_VERSION} SOVERSION "${PROJECT_VERSION_MAJOR}.${PROJECT_VERSION_MINOR}")
-target_compile_features(photospider_ops PUBLIC cxx_std_17)
-target_compile_definitions(photospider_ops PRIVATE PHOTOSPIDER_OPS_BUILD)
-foreach(_target IN ITEMS photospider_ops photospider_numeric_math)
+target_compile_features(photospider_ops_runtime PUBLIC cxx_std_17)
+target_compile_definitions(photospider_ops_runtime PRIVATE PHOTOSPIDER_OPS_BUILD)
+foreach(_target IN ITEMS photospider_ops_runtime photospider_numeric_math)
   target_compile_definitions(${_target} PRIVATE
     PHOTOSPIDER_TRANSFER_FAST_MATH=$<BOOL:${PHOTOSPIDER_TRANSFER_FAST_MATH}>
     PHOTOSPIDER_TRANSFER_COMPACT_MATH=$<BOOL:${PHOTOSPIDER_TRANSFER_COMPACT_MATH}>
     PHOTOSPIDER_TRANSFER_GAMMA2_SIMD=$<BOOL:${PHOTOSPIDER_TRANSFER_GAMMA2_SIMD}>)
 endforeach()
 if(NOT BUILD_SHARED_LIBS)
-  target_compile_definitions(photospider_ops PUBLIC PHOTOSPIDER_OPS_STATIC)
+  target_compile_definitions(photospider_ops_runtime PUBLIC PHOTOSPIDER_OPS_STATIC)
 endif()
 include(${CMAKE_CURRENT_LIST_DIR}/ColorEngines.cmake)
-target_link_libraries(photospider_ops PUBLIC Photospider::ops_sdk Photospider::ops_headers)
-target_link_libraries(photospider_ops PRIVATE photospider_color_engine)
-target_include_directories(photospider_ops PRIVATE
+target_link_libraries(photospider_ops_runtime PUBLIC Photospider::ops_sdk Photospider::ops_headers)
+target_link_libraries(photospider_ops_runtime PRIVATE photospider_color_engine)
+target_include_directories(photospider_ops_runtime PRIVATE
   "${CMAKE_CURRENT_SOURCE_DIR}/plugins/ops")
 if(APPLE AND PHOTOSPIDER_ENABLE_ACCELERATE)
-  target_link_libraries(photospider_ops PRIVATE "-framework Accelerate")
+  target_link_libraries(photospider_ops_runtime PRIVATE "-framework Accelerate")
 endif()
 if(NOT PHOTOSPIDER_SANITIZER_MODE STREQUAL "none")
-  target_compile_options(photospider_ops PRIVATE ${PHOTOSPIDER_SANITIZER_FLAG} -fno-omit-frame-pointer)
-  target_link_options(photospider_ops PRIVATE ${PHOTOSPIDER_SANITIZER_FLAG})
+  target_compile_options(photospider_ops_runtime PRIVATE ${PHOTOSPIDER_SANITIZER_FLAG} -fno-omit-frame-pointer)
+  target_link_options(photospider_ops_runtime PRIVATE ${PHOTOSPIDER_SANITIZER_FLAG})
 endif()
-install(TARGETS photospider_ops photospider_ops_headers EXPORT PhotospiderTargets
+install(TARGETS photospider_ops_runtime photospider_ops_headers EXPORT PhotospiderTargets
   ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
   LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
   RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
@@ -458,3 +457,17 @@ install(DIRECTORY plugins/ops/include/photospider/
   FILES_MATCHING PATTERN "*.hpp" PATTERN "*.h")
 install(FILES third_party/sleef/LICENSE.txt
   DESTINATION ${CMAKE_INSTALL_DATADIR}/licenses/Photospider RENAME SLEEF.txt)
+
+
+if(PHOTOSPIDER_BUILD_COMPILER)
+  add_library(photospider_ops host/builtin_operations.cpp plugins/ops/01-numeric/lut3d_baking.cpp)
+  add_library(Photospider::ops ALIAS photospider_ops)
+  set_target_properties(photospider_ops PROPERTIES
+    EXPORT_NAME ops CXX_EXTENSIONS OFF POSITION_INDEPENDENT_CODE ON
+    CXX_VISIBILITY_PRESET hidden VISIBILITY_INLINES_HIDDEN YES
+    VERSION ${PROJECT_VERSION} SOVERSION "${PROJECT_VERSION_MAJOR}.${PROJECT_VERSION_MINOR}")
+  target_link_libraries(photospider_ops PUBLIC Photospider::ops_runtime Photospider::compiler_default Photospider::mapper_geometry)
+  target_include_directories(photospider_ops PRIVATE plugins/ops)
+  target_compile_definitions(photospider_ops PRIVATE PHOTOSPIDER_OPS_BUILD)
+  install(TARGETS photospider_ops EXPORT PhotospiderTargets)
+endif()

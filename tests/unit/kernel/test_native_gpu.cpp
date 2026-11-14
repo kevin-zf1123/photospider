@@ -7,8 +7,8 @@
 #include <thread>
 #include <utility>
 
-#include "execution/native_gpu.hpp"
 #include "photospider/core/resource_allocator.hpp"
+#include "plugins/executors/physical/native_gpu.hpp"
 #include "support/fixed_native_fixture.hpp"
 #include "support/native_allocation_quota.hpp"
 #include "support/native_atlas_budget.hpp"

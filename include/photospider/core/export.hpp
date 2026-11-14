@@ -11,7 +11,7 @@
  */
 
 #if defined(_WIN32)
-#if defined(PHOTOSPIDER_STATIC)
+#if defined(PHOTOSPIDER_STATIC) || defined(PHOTOSPIDER_COMPONENT_BUILD)
 #define PHOTOSPIDER_API
 #elif defined(PHOTOSPIDER_BUILD)
 #define PHOTOSPIDER_API __declspec(dllexport)

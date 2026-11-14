@@ -123,7 +123,7 @@ ps_parameter_spec_v8 make_parameter() noexcept {
 /** @brief Static parameter declaration for the selected UTF-8 case. */
 const ps_parameter_spec_v8 parameter = make_parameter();
 
-ps_operation_v8 make_descriptor() noexcept {
+ps_operation_v10 make_descriptor() noexcept {
   const KeyBytes key = operation_key();
   return operation_registry_fixture::make_operation(key.data, key.size,
                                                     &parameter, 1);
@@ -136,8 +136,8 @@ const auto api =
 
 }  // namespace
 
-extern "C" PS_OPERATION_MODULE_EXPORT const ps_operation_module_v8*
-ps_operation_module_get_api_v8(void) {
+extern "C" PS_OPERATION_MODULE_EXPORT const ps_operation_module_v10*
+ps_operation_module_get_api_v10(void) {
   return &api;
 }
 

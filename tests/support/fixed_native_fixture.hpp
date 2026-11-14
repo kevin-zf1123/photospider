@@ -7,8 +7,8 @@
 #include <memory>
 #include <mutex>
 
-#include "execution/native_gpu.hpp"
 #include "photospider/plugin/fixed_invocation.hpp"
+#include "plugins/executors/physical/native_gpu.hpp"
 
 namespace ps::test {
 /** @brief Owns a native prepared kernel for direct backend behavior tests. */

@@ -289,10 +289,11 @@ class PHOTOSPIDER_API PreparedOperation final {
   PreparedOperation(PreparedOperation&&) = delete;
   PreparedOperation& operator=(PreparedOperation&&) = delete;
   /** @brief Expand one fixed physical subgraph during compilation only. */
-  Result<OperationProgram> lower(
-      const std::vector<TileRequest>& requests, std::uint64_t tile_extent,
-      physical::Backend backend,
-      const physical::ValidationLimits& limits) const;
+  Result<OperationProgram> lower(const std::vector<TileRequest>& requests,
+                                 std::uint64_t tile_extent,
+                                 physical::Backend backend,
+                                 const physical::ValidationLimits& limits,
+                                 LoweringSession* session = nullptr) const;
   /** @brief Bind a direct CPU/GPU kernel after Plan publication.
    * Returned ownership retains static resources and the defining module.
    * program must be validated; outputs names this call's operation outputs
@@ -360,8 +361,7 @@ struct PHOTOSPIDER_API OperationDefinition final {
       const ps_native_gpu_service_v2*)>
       prepare_kernel;
   /** @brief Explicit CPU preparation selected by KernelDesc abi_version=9.
-   * Version 8 continues to select prepare_kernel. The module ABI8 export
-   * remains v8-only; this capability is negotiated by trusted C++ registration.
+   * The C module ABI 10 and C++ registration expose separate typed factories.
    * Lifetime, ownership and exception rules match prepare_kernel.
    */
   std::function<Result<ps_prepared_kernel_v9>(
@@ -398,6 +398,9 @@ struct PHOTOSPIDER_API OperationDefinition final {
    * external state. The registry's determinism and purity checks also apply.
    */
   bool reusable_tiles = false;
+  /** @brief Exclusive alternative to a complete lowerer. */
+  std::optional<TilewiseLowering> tilewise;
+  std::vector<MapperRequirement> mapping_dependencies;
 };
 
 /**
@@ -467,6 +470,12 @@ class PHOTOSPIDER_API OperationRegistry final {
    * signatures before execution; samples remain unchecked. Passing an rvalue
    * transfers the callables into immutable registry ownership before locking.
    */
+  /** @brief Publish one immutable compile-time solver before freezing.
+   * Duplicate contract/provider pairs reject atomically.
+   */
+  Status register_mapper(MapperDefinition definition);
+  bool has_mapper(const std::string& contract,
+                  const std::string& provider) const;
   [[nodiscard]] Status register_operation(OperationDefinition definition);
 
   /**
@@ -478,7 +487,7 @@ class PHOTOSPIDER_API OperationRegistry final {
    * ABI/descriptor validation failure.
    * @throws std::bad_alloc If staging allocation fails without publication.
    * @note Path rejection precedes the platform loader. The loader accepts
-   * only ps_operation_module_get_api_v8 and its exact ABI 8 table layout.
+   * only ps_operation_module_get_api_v10 and its exact ABI 10 table layout.
    * Missing entry points fail TypeMismatch; malformed headers fail
    * InvalidArgument. Import validates every declaration before atomically
    * publishing operations with fixed lowering and kernel preparation hooks.

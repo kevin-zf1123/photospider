@@ -9,10 +9,10 @@
 #include <vector>
 
 #include "core/radix_sort.hpp"
-#include "core/resource_observation.hpp"
 #include "data/footprint_index.hpp"
 #include "photospider/core/checked_math.hpp"
 #include "photospider/core/resource_allocator.hpp"
+#include "photospider/core/resource_observation.hpp"
 
 namespace ps {
 namespace {

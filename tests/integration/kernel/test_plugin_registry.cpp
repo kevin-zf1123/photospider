@@ -15,11 +15,11 @@
 #include <variant>
 #include <vector>
 
-#include "core/dense_layout_validation.hpp"
 #include "photospider/compiler/compiler.hpp"
+#include "photospider/core/dense_layout_validation.hpp"
 #include "photospider/execution/execution.hpp"
 #include "photospider/plugin/operation_registry.hpp"
-#include "plugin/library_test_hooks.hpp"
+#include "sdk/operation/library_test_hooks.hpp"
 #include "support/operation_result_fixture.hpp"
 #include "support/test_support.hpp"
 

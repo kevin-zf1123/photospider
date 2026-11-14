@@ -78,8 +78,8 @@ static ps_kernel_status_v8 prepare(void* user, const ps_static_query_v8* query,
   selected.tensors = &member;
   return sink->set_output(sink->context, 0, &selected, NULL, UINT32_MAX);
 }
-static ps_kernel_status_v8 lower(void* user, const ps_lowering_query_v8* query,
-                                 const ps_operation_builder_v8* builder) {
+static ps_kernel_status_v8 lower(void* user, const ps_lowering_query_v9* query,
+                                 const ps_operation_builder_v10* builder) {
   (void)user;
   const ps_string_v8 symbol = STR("gather"), contract = STR("first-values-v1");
   const ps_placement_v8 placement = {PS_BACKEND_CPU_V8,
@@ -92,7 +92,7 @@ static ps_kernel_status_v8 lower(void* user, const ps_lowering_query_v8* query,
     for (uint64_t tile = request->begin; tile < request->end; ++tile) {
       uint32_t task;
       TRY(builder->add_task(builder->context, symbol, contract, &placement,
-                            scratch, 0, &task));
+                            scratch, 0, 8, &task));
       const uint64_t begin = tile * query->tile_extent;
       const uint64_t available = query->facts.input_count - begin;
       const uint64_t count =
@@ -188,15 +188,15 @@ static ps_kernel_status_v8 prepare_kernel(void* user,
   if (!owned)
     return status(PS_KERNEL_RESOURCE_EXHAUSTED_V8);
   *owned = state;
-  *kernel =
-      (ps_prepared_kernel_v8){.struct_size = sizeof(*kernel),
-                              .abi_version = PS_FIXED_INVOCATION_ABI_VERSION_8,
-                              .context = owned,
-                              .release = release,
-                              .invoke_cpu = invoke};  // NOLINT(readability/braces)
+  *kernel = (ps_prepared_kernel_v8){
+      .struct_size = sizeof(*kernel),
+      .abi_version = PS_FIXED_INVOCATION_ABI_VERSION_8,
+      .context = owned,
+      .release = release,
+      .invoke_cpu = invoke};  // NOLINT(readability/braces)
   return status(PS_KERNEL_OK_V8);
 }
-static ps_operation_v8 operation = {
+static ps_operation_v10 operation = {
     .struct_size = sizeof(operation),
     .key = STR("fixture.contract"),
     .flags = PS_OPERATION_CPU_V8 | PS_OPERATION_DETERMINISTIC_V8 |
@@ -215,14 +215,14 @@ static ps_operation_v8 operation = {
 static void destroy(void* context) {
   (void)context;
 }
-static const ps_operation_module_v8 api = {
+static const ps_operation_module_v10 api = {
     .struct_size = sizeof(api),
-    .abi_version = PS_OPERATION_MODULE_ABI_VERSION_8,
+    .abi_version = PS_OPERATION_MODULE_ABI_VERSION_10,
     .operations = &operation,
     .operation_count = 1,
     .destroy = destroy};
-PS_OPERATION_MODULE_EXPORT const ps_operation_module_v8*
-ps_operation_module_get_api_v8(void) {
+PS_OPERATION_MODULE_EXPORT const ps_operation_module_v10*
+ps_operation_module_get_api_v10(void) {
 #if PS_BAD_CONTRACT_CASE == 1
   operation.struct_size = 0;
 #elif PS_BAD_CONTRACT_CASE == 3

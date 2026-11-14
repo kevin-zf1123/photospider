@@ -5,7 +5,7 @@
 #include <type_traits>
 #include <utility>
 
-#include "data/result_identity.hpp"
+#include "photospider/data/result_identity.hpp"
 #include "support/fixed_operation_fixture.hpp"
 #include "support/status_check.hpp"
 

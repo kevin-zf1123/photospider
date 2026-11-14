@@ -8,8 +8,8 @@
 #include <utility>
 #include <vector>
 
-#include "execution/native_gpu.hpp"
 #include "photospider/photospider.hpp"
+#include "plugins/executors/physical/native_gpu.hpp"
 #include "support/multi_output_result_fixture.hpp"
 #include "support/status_check.hpp"
 

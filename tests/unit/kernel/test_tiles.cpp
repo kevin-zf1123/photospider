@@ -140,9 +140,9 @@ int storage_tiles() {
                      std::min(5 - x, extent - x % extent));
             PS_CHECK(rectangle.row.sample_stride_bytes == 1 &&
                      rectangle.row_stride_bytes ==
-                         static_cast<std::int64_t>(
-                             std::min(extent, 5 - (x / extent) * extent)));
-            const auto index = chw ? (c * 3 + y) * 5 + x : (y * 5 + x) * 2 + c;
+                         static_cast<std::int64_t>(extent));
+            // ByteView contains packed planes in both HWC and CHW schemas.
+            const auto index = (c * 3 + y) * 5 + x;
             PS_CHECK(*rectangle.row.data == bytes[index]);
           }
     }

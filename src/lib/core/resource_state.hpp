@@ -8,15 +8,17 @@
 #include <mutex>
 #include <utility>
 
-#include "core/resource_observation.hpp"
 #include "photospider/core/checked_math.hpp"
+#include "photospider/core/resource_observation.hpp"
 #include "photospider/core/resources.hpp"
 
 namespace ps {
 // Root and lease state own admission and counters. Storage aliases are opaque
 // here; the data adapter owns their intrusive registrations and retirement.
 struct ResourceBudget::Impl {
-  explicit Impl(ResourceLimits value) : limits(std::move(value)) {
+  std::shared_ptr<const void> code_owner;
+  Impl(ResourceLimits value, std::shared_ptr<const void> owner)
+      : code_owner(std::move(owner)), limits(std::move(value)) {
     stats.protected_cleanup = limits.cleanup;
   }
   struct Reference;

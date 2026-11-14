@@ -6,9 +6,10 @@
 #include <thread>
 #include <utility>
 
-#include "execution/cpu_workers.hpp"
-#include "execution/diagnostics.hpp"
 #include "photospider/execution/execution.hpp"
+#include "plugins/executors/physical/cpu_workers.hpp"
+#include "plugins/executors/physical/diagnostics.hpp"
+#include "plugins/executors/physical/physical_context.hpp"
 #include "support/fixed_operation_fixture.hpp"
 
 namespace {

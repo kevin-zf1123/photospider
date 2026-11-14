@@ -2,7 +2,7 @@
 
 #include <memory>
 
-#include "data/device_tensor_span.hpp"
+#include "photospider/data/device_tensor_span.hpp"
 #include "photospider/data/result.hpp"
 
 namespace ps::data_internal {

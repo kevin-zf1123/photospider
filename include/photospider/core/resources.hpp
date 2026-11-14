@@ -153,7 +153,11 @@ class PHOTOSPIDER_API ResourceBudget final {
   /** @throws std::invalid_argument For inconsistent cleanup/capacity limits.
    * @throws std::bad_alloc For root bookkeeping outside the managed arena.
    */
-  explicit ResourceBudget(ResourceLimits limits = {});
+  explicit ResourceBudget(ResourceLimits limits = {},
+                          std::shared_ptr<const void> code_owner = {});
+  /** @brief Native provider lease retained by every backing charged to this
+   * root. */
+  std::shared_ptr<const void> code_owner() const noexcept;
   /** @brief Per-lease object capacity added automatically to Host/Metadata.
    * Allocator control blocks and heap headers remain outside this model.
    */

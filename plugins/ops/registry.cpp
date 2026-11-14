@@ -168,7 +168,7 @@ namespace ps {
  * @brief Implements the maintained frozen built-in operation set.
  * @copydetails make_default_operation_registry
  */
-std::shared_ptr<OperationRegistry> make_default_operation_registry(
+std::shared_ptr<OperationRegistry> make_runtime_operation_registry(
     bool freeze) {
   auto registry = std::make_shared<OperationRegistry>();
   const auto status =

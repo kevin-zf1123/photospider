@@ -235,6 +235,7 @@ class PHOTOSPIDER_API ValidatedIR final {
 
  private:
   friend class Compiler;
+  friend class ProgramServices;
   friend class CompilerArtifact;
 
   IRProvenance provenance_;

@@ -18,4 +18,7 @@ namespace ps {
 [[nodiscard]] PHOTOSPIDER_OPS_API std::shared_ptr<OperationRegistry>
 make_default_operation_registry(bool freeze = true);
 
+/** @brief Construct the execution catalog without compile-time solvers. */
+PHOTOSPIDER_OPS_API std::shared_ptr<OperationRegistry>
+make_runtime_operation_registry(bool freeze = true);
 }  // namespace ps

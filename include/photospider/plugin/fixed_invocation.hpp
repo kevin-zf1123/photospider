@@ -27,6 +27,15 @@ PHOTOSPIDER_API void assign_kernel_status(Status* target,
 PHOTOSPIDER_API ps_kernel_status_v8
 kernel_failure(ErrorCode code, const char* message = nullptr,
                FailureReason reason = FailureReason::None) noexcept;
+/** @brief Encode the C status fields, including the operation-owned domain
+ * code. The message is bounded and terminated; conversion allocates no storage.
+ */
+inline ps_kernel_status_v8 kernel_failure(const Status& status) noexcept {
+  auto result =
+      kernel_failure(status.code, status.message.c_str(), status.reason);
+  result.domain_code = status.detail.domain_code;
+  return result;
+}
 /** @brief Resolve the fixed C layout from a checked physical layout. */
 PHOTOSPIDER_API ps_kernel_layout_v8
 kernel_layout(const physical::Layout& layout) noexcept;

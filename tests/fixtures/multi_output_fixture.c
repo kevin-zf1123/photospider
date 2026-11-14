@@ -3,6 +3,10 @@
 
 #include "photospider/plugin/operation_module_api.h"
 
+static const ps_kernel_status_v8 invalid_status = {
+    .code = PS_KERNEL_INVALID_ARGUMENT_V8};
+static const ps_kernel_status_v8 ok_status = {0};
+
 #define TEXT(s) {s, sizeof(s) - 1}
 
 static const ps_tensor_spec_v8 tensor = {.struct_size = sizeof(tensor),
@@ -29,8 +33,8 @@ static const ps_operation_output_v8 outputs[] = {
                   .schema_id = TEXT("test.multi_output"),
                   .schema_version = 1},
      .prototype = &schema}};
-static ps_kernel_status_v8 lower(void* user, const ps_lowering_query_v8* query,
-                                 const ps_operation_builder_v8* builder) {
+static ps_kernel_status_v8 lower(void* user, const ps_lowering_query_v9* query,
+                                 const ps_operation_builder_v10* builder) {
   (void)user;
   const ps_string_v8 symbol = TEXT("value");
   const ps_string_v8 contract = TEXT("value-v1");
@@ -43,7 +47,7 @@ static ps_kernel_status_v8 lower(void* user, const ps_lowering_query_v8* query,
     for (uint64_t tile = request->begin; tile < request->end; ++tile) {
       uint32_t task;
       ps_kernel_status_v8 status = builder->add_task(
-          builder->context, symbol, contract, &placement, scratch, 0, &task);
+          builder->context, symbol, contract, &placement, scratch, 0, 8, &task);
       if (status.code)
         return status;
       status = builder->write_output(builder->context, task, request->output,
@@ -52,7 +56,7 @@ static ps_kernel_status_v8 lower(void* user, const ps_lowering_query_v8* query,
         return status;
     }
   }
-  return (ps_kernel_status_v8){0};
+  return ok_status;
 }
 static void invoke(const ps_kernel_invocation_v8* invocation,
                    ps_kernel_status_v8* status) {
@@ -81,25 +85,25 @@ static ps_kernel_status_v8 prepare_kernel(void* user,
       memcmp(query->contract.data, "value-v1", 8) || query->read_count ||
       query->write_count != 1 || query->parameter_bytes || query->scratch[0] ||
       query->scratch[1] || query->scratch[2])
-    return (ps_kernel_status_v8){.code = PS_KERNEL_INVALID_ARGUMENT_V8};
+    return invalid_status;
   const ps_kernel_view_spec_v8* output = &query->writes[0];
   if (output->port >= 2 || output->member || output->tile_index ||
       output->domain != PS_KERNEL_DOMAIN_HOST_V8 || output->byte_offset ||
       output->bytes != 8 || output->layout.rank != 1 ||
       output->layout.element_type != 3 || output->layout.shape[0] != 1 ||
       output->layout.origin[0] || output->layout.strides[0] != 8)
-    return (ps_kernel_status_v8){.code = PS_KERNEL_INVALID_ARGUMENT_V8};
+    return invalid_status;
   *kernel = (ps_prepared_kernel_v8){.struct_size = sizeof(*kernel),
                                     .abi_version = 8,
                                     .context = &values[output->port],
                                     .release = release,
                                     .invoke_cpu = invoke};
-  return (ps_kernel_status_v8){0};
+  return ok_status;
 }
 static void destroy(void* context) {
   (void)context;
 }
-static const ps_operation_v8 operation = {
+static const ps_operation_v10 operation = {
     .struct_size = sizeof(operation),
     .key = TEXT("test.c_results"),
     .flags = PS_OPERATION_CPU_V8 | PS_OPERATION_DETERMINISTIC_V8 |
@@ -108,12 +112,13 @@ static const ps_operation_v8 operation = {
     .output_count = 2,
     .lower = lower,
     .prepare_kernel = prepare_kernel};
-static const ps_operation_module_v8 api = {.struct_size = sizeof(api),
-                                           .abi_version = 8,
-                                           .operations = &operation,
-                                           .operation_count = 1,
-                                           .destroy = destroy};
-PS_OPERATION_MODULE_EXPORT const ps_operation_module_v8*
-ps_operation_module_get_api_v8(void) {
+static const ps_operation_module_v10 api = {
+    .struct_size = sizeof(api),
+    .abi_version = PS_OPERATION_MODULE_ABI_VERSION_10,
+    .operations = &operation,
+    .operation_count = 1,
+    .destroy = destroy};
+PS_OPERATION_MODULE_EXPORT const ps_operation_module_v10*
+ps_operation_module_get_api_v10(void) {
   return &api;
 }

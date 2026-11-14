@@ -10,6 +10,11 @@
 #include "photospider/compiler/planner.hpp"
 
 namespace ps {
+struct CompilerComponents final {
+  std::shared_ptr<const OptimizerRegistry> optimizers;
+  std::shared_ptr<const PlannerRegistry> planners;
+  std::shared_ptr<const FrontendRegistry> frontends;
+};
 
 /**
  * @brief Typed compiler, optimizer, and local physical planner facade.
@@ -36,6 +41,10 @@ class PHOTOSPIDER_API Compiler final {
                     std::shared_ptr<const PlannerRegistry> planners = {},
                     std::shared_ptr<const FrontendRegistry> frontends = {});
 
+  /** @brief Explicit frozen catalogs for hosts that link only selected
+   * providers. */
+  Compiler(std::shared_ptr<OperationRegistry> operations,
+           CompilerComponents components);
   /**
    * @brief Builds normalized typed semantic IR.
    * @param snapshot Coherent GraphContext document/revision snapshot.
@@ -152,17 +161,6 @@ class PHOTOSPIDER_API Compiler final {
   }
 
  private:
-  friend class CompilerArtifact;
-  friend class ExecutionPlan;
-  /** @brief Link declarations, derive grids and privately lower dependency
-   * paths to control flow. Saved placements bypass backend selection; callers
-   * validate the completed instructions before computing Plan/cache identities.
-   */
-  Result<ExecutionPlan> link_plan(const ValidatedIR& ir,
-                                  const PlanningOptions& options) const;
-  Status select_plan(ExecutionPlan* plan) const;
-  Status finalize_plan(ExecutionPlan* plan) const;
-  Status validate_plan(const ExecutionPlan& plan) const;
   /** @brief Frozen shared operation set. */
   std::shared_ptr<OperationRegistry> operations_;
   std::shared_ptr<const OptimizerRegistry> optimizers_;

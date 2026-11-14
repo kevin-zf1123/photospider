@@ -7,9 +7,9 @@
 #include <utility>
 #include <vector>
 
-#include "execution/native_gpu.hpp"
 #include "photospider/photospider.hpp"
 #include "photospider/plugin/fragment_atlas_msl.h"
+#include "plugins/executors/physical/native_gpu.hpp"
 #include "support/fixed_native_fixture.hpp"
 #include "support/status_check.hpp"
 

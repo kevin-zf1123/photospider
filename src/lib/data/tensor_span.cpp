@@ -11,11 +11,11 @@
 #include <utility>
 #include <vector>
 
-#include "core/resource_observation.hpp"
 #include "data/tensor_geometry.hpp"
-#include "data/tensor_validation.hpp"
 #include "photospider/core/checked_math.hpp"
 #include "photospider/core/resource_allocator.hpp"
+#include "photospider/core/resource_observation.hpp"
+#include "photospider/data/tensor_validation.hpp"
 
 namespace ps {
 struct TensorSpan::Metadata {

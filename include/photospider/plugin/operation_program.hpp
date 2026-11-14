@@ -12,6 +12,7 @@
 #include "photospider/compiler/workflow_document.hpp"
 #include "photospider/data/tiles.hpp"
 #include "photospider/plugin/operation_types.hpp"
+#include "photospider/plugin/tile_mapping.hpp"
 
 namespace ps {
 /** @brief Static input to a pure bounded operation lowering callback.
@@ -32,6 +33,12 @@ struct OperationLowering final {
   physical::Backend backend = physical::Backend::Cpu;
   const void* static_state = nullptr;
   physical::ValidationLimits limits;
+  /** @brief Borrowed for this lowering, shared across calls of the same plan.
+   */
+  LoweringSession* session = nullptr;
+  std::function<Result<std::vector<TileNeed>>(const std::string&,
+                                              const MappingQuery&)>
+      map;
 };
 
 /** @brief Payload-free description of one fixed input/output allocation view.
@@ -104,7 +111,8 @@ class PHOTOSPIDER_API OperationProgramBuilder final {
                                 const std::string& contract,
                                 physical::Placement placement = {},
                                 std::array<std::uint64_t, 3> scratch = {},
-                                bool effect = false);
+                                bool effect = false,
+                                std::uint32_t invocation_abi = 8);
   /** @brief Add one explicit transfer with no operation kernel or parameters.
    * Declare exactly one read and one write with the same logical tile layout.
    * COPY chooses its own backend independently of the call's numerical kernel.

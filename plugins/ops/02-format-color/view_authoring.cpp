@@ -491,7 +491,7 @@ Result<WorkflowNodeOutput> compose_impl(
     plugin_internal::FloatingEnvironment environment;
     typed(environment.active(), "floating environment unavailable");
     if (!registry) {
-      registry = make_default_operation_registry();
+      registry = make_runtime_operation_registry();
     }
     auto metadata = checked(plugin_internal::basis_ops::workflow_metadata(
         document, input, *registry, resources));

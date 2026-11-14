@@ -3,7 +3,7 @@
 #include <string>
 #include <vector>
 
-#include "execution/task_schedule.hpp"
+#include "plugins/executors/physical/task_schedule.hpp"
 #include "support/physical_program_fixture.hpp"
 #include "support/status_check.hpp"
 

@@ -2,6 +2,7 @@
 #include <array>
 #include <condition_variable>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <functional>
 #include <future>
@@ -9,19 +10,54 @@
 #include <iterator>
 #include <memory>
 #include <mutex>
+#include <new>
 #include <thread>
 #include <utility>
 #include <vector>
 
-#include "execution/execution_test_hooks.hpp"
-#include "execution/native_gpu.hpp"
 #include "fixtures/native_vulkan_spirv.hpp"
 #include "photospider/photospider.hpp"
+#include "plugins/executors/physical/execution_test_hooks.hpp"
+#include "plugins/executors/physical/native_gpu.hpp"
 #include "support/fixed_native_fixture.hpp"
 #include "support/fixed_operation_fixture.hpp"
 #include "support/native_allocation_quota.hpp"
 #include "support/native_atlas_budget.hpp"
 #include "support/status_check.hpp"
+
+#if !defined(PHOTOSPIDER_TEST_NO_GLOBAL_ALLOCATOR_INTERPOSITION)
+namespace {
+thread_local int adoption_allocation_countdown = -1;
+thread_local int adoption_failure_point = 0;
+thread_local bool adoption_failure_injected = false;
+}  // namespace
+// Fault only the two metadata allocations after the native backing is ready.
+void* operator new(std::size_t size) {
+  if (adoption_allocation_countdown >= 0 &&
+      adoption_allocation_countdown-- == 0) {
+    adoption_failure_injected = true;
+    throw std::bad_alloc();
+  }
+  if (void* pointer = std::malloc(size ? size : 1))
+    return pointer;
+  throw std::bad_alloc();
+}
+void operator delete(void* pointer) noexcept {
+  std::free(pointer);
+}
+void operator delete(void* pointer, std::size_t) noexcept {
+  std::free(pointer);
+}
+void* operator new[](std::size_t size) {
+  return ::operator new(size);
+}
+void operator delete[](void* pointer) noexcept {
+  ::operator delete(pointer);
+}
+void operator delete[](void* pointer, std::size_t) noexcept {
+  ::operator delete(pointer);
+}
+#endif
 
 namespace {
 using namespace ps;  // NOLINT(build/namespaces)
@@ -138,7 +174,60 @@ void observe_free() noexcept {
   memory_freed = true;
 }
 int allocation_failure(const std::shared_ptr<Device>& device) {
-  for (std::uint32_t point : {1, 2, 3}) {
+  for (const bool private_storage : {false, true}) {
+    for (std::uint32_t point : {1, 2, 3}) {
+      if (private_storage && point == 2)
+        continue;  // Device-only storage never maps host memory.
+      memory_freed = false;
+      bool retired = false, ordered = false;
+      struct Lease {
+        bool& retired;
+        bool& ordered;
+        ~Lease() {
+          retired = true;
+          ordered = memory_freed;
+        }
+      };
+      const BufferAllocator::Reserve reserve = [&](std::uint64_t) {
+        return Result<std::shared_ptr<void>>(
+            std::shared_ptr<void>(new Lease{retired, ordered}));
+      };
+      auto host = BufferAllocator(reserve).limited_requested(4);
+      execution_testing::ExecutionTestHooks hooks;
+      hooks.native_allocation_failure = point;
+      hooks.native_memory_freed = observe_free;
+      execution_testing::install_execution_test_hooks(&hooks);
+      const auto status = private_storage
+                              ? device->allocate_private(4, reserve).status()
+                              : device->allocator(host).allocate(4).status();
+      execution_testing::install_execution_test_hooks(nullptr);
+      PS_CHECK(status.code == ErrorCode::ResourceExhausted);
+      PS_CHECK(retired && ordered && memory_freed);
+      if (private_storage)
+        PS_CHECK(device->allocate_private(4, reserve).ok());
+      else
+        PS_CHECK(device->allocator(host).allocate(4).ok());
+    }
+  }
+  execution_testing::ExecutionTestHooks hooks;
+  hooks.native_allocation_limit = 1;
+  execution_testing::install_execution_test_hooks(&hooks);
+  auto first = device->allocator(BufferAllocator()).allocate(4);
+  const bool first_ok = first.ok();
+  auto blocked = device->allocator(BufferAllocator()).allocate(4);
+  first = Result<MutableBuffer>(MutableBuffer());
+  auto reused = device->allocator(BufferAllocator()).allocate(4);
+  execution_testing::install_execution_test_hooks(nullptr);
+  PS_CHECK(first_ok && !blocked.ok() &&
+           blocked.status().code == ErrorCode::ResourceExhausted);
+  PS_CHECK(reused.ok());
+  return 0;
+}
+int adoption_failure(const std::shared_ptr<Device>& device) {
+#if defined(PHOTOSPIDER_TEST_NO_GLOBAL_ALLOCATOR_INTERPOSITION)
+  static_cast<void>(device);
+#else
+  for (int point : {0, 1}) {
     memory_freed = false;
     bool retired = false, ordered = false;
     struct Lease {
@@ -153,30 +242,25 @@ int allocation_failure(const std::shared_ptr<Device>& device) {
       return Result<std::shared_ptr<void>>(
           std::shared_ptr<void>(new Lease{retired, ordered}));
     });
-    host = host.limited_requested(4);
     execution_testing::ExecutionTestHooks hooks;
-    hooks.native_allocation_failure = point;
     hooks.native_memory_freed = observe_free;
+    hooks.before_shared_adoption = []() noexcept {
+      adoption_allocation_countdown = adoption_failure_point;
+    };
+    adoption_failure_point = point;
+    adoption_failure_injected = false;
     execution_testing::install_execution_test_hooks(&hooks);
     auto failed = device->allocator(host).allocate(4);
     execution_testing::install_execution_test_hooks(nullptr);
+    const auto remaining = adoption_allocation_countdown;
+    adoption_allocation_countdown = -1;
     PS_CHECK(!failed.ok() &&
              failed.status().code == ErrorCode::ResourceExhausted);
-    PS_CHECK(retired && ordered && memory_freed);
+    PS_CHECK(adoption_failure_injected && remaining == -1 && retired &&
+             ordered && memory_freed);
     PS_CHECK(device->allocator(host).allocate(4).ok());
   }
-  execution_testing::ExecutionTestHooks hooks;
-  hooks.native_allocation_limit = 1;
-  execution_testing::install_execution_test_hooks(&hooks);
-  auto first = device->allocator(BufferAllocator()).allocate(4);
-  const bool first_ok = first.ok();
-  auto blocked = device->allocator(BufferAllocator()).allocate(4);
-  first = Result<MutableBuffer>(MutableBuffer());
-  auto reused = device->allocator(BufferAllocator()).allocate(4);
-  execution_testing::install_execution_test_hooks(nullptr);
-  PS_CHECK(first_ok && !blocked.ok() &&
-           blocked.status().code == ErrorCode::ResourceExhausted);
-  PS_CHECK(reused.ok());
+#endif
   return 0;
 }
 int compute(const std::shared_ptr<Device>& device) {
@@ -683,6 +767,7 @@ int main() {
   PS_CHECK(native_requested_quota(device) == 0);
   PS_CHECK(native_atlas_budget(device) == 0);
   PS_CHECK(allocation_failure(device) == 0);
+  PS_CHECK(adoption_failure(device) == 0);
   PS_CHECK(compute(device) == 0);
   PS_CHECK(validation(device) == 0);
   PS_CHECK(numeric_probe(device) == 0);

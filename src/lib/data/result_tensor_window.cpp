@@ -16,18 +16,18 @@
 #include <utility>
 #include <vector>
 
-#include "core/resource_observation.hpp"
 #include "data/affine_view.hpp"
 #include "data/footprint_index.hpp"
 #include "data/physical_piece.hpp"
 #include "data/planar_view.hpp"
-#include "data/result_device_access.hpp"
 #include "data/result_state.hpp"
 #include "data/result_support.hpp"
 #include "data/result_window_access.hpp"
-#include "data/tensor_validation.hpp"
 #include "photospider/core/checked_math.hpp"
+#include "photospider/core/resource_observation.hpp"
 #include "photospider/data/result.hpp"
+#include "photospider/data/result_device_access.hpp"
+#include "photospider/data/tensor_validation.hpp"
 
 namespace ps {
 ResultTensorReadWindow& ResultTensorReadWindow::operator=(

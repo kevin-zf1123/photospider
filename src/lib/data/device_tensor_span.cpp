@@ -1,11 +1,11 @@
-#include "data/device_tensor_span.hpp"
+#include "photospider/data/device_tensor_span.hpp"
 
 #include <memory>
 #include <utility>
 
-#include "core/resource_observation.hpp"
 #include "data/tensor_geometry.hpp"
 #include "photospider/core/resource_allocator.hpp"
+#include "photospider/core/resource_observation.hpp"
 
 namespace ps::data_internal {
 struct DeviceTensorSpan::Metadata {

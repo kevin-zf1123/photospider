@@ -3,7 +3,7 @@
 #include <string_view>
 #include <vector>
 
-#include "execution/native_gpu_metadata.hpp"
+#include "plugins/executors/physical/native_gpu_metadata.hpp"
 #include "support/test_support.hpp"
 
 int main() {

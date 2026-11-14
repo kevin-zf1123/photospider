@@ -320,6 +320,12 @@ Result<MutableBuffer> BufferAllocator::allocate_impl(std::uint64_t size,
     return Result<MutableBuffer>(std::move(status));
   };
   try {
+    if (size == 0 || size > static_cast<std::uint64_t>(INT64_MAX) ||
+        size > std::numeric_limits<std::size_t>::max()) {
+      return reject(Status{ErrorCode::ResourceExhausted,
+                           "CPU allocation size is not addressable",
+                           FailureReason::CapacityLimit});
+    }
     std::shared_ptr<void> requested_lease;
     if (requested_reserve_) {
       auto reserved = requested_reserve_(size);
@@ -332,15 +338,16 @@ Result<MutableBuffer> BufferAllocator::allocate_impl(std::uint64_t size,
           native_allocate_(size, reserve_, domain_, allocation_committed_);
       if (!result.ok())
         return reject(result.status());
+      if (!result.value().storage_ ||
+          !result.value().storage_->bytes().data() ||
+          result.value().size() != size ||
+          result.value().storage_->capacity() < size ||
+          result.value().storage_->domain_ != domain_)
+        return reject({ErrorCode::InvalidArgument,
+                       "native factory returned invalid backing"});
       result.value().storage_->allocation_scope_ = allocation_scope_;
       result.value().storage_->requested_lease_ = std::move(requested_lease);
       return result;
-    }
-    if (size == 0 || size > static_cast<std::uint64_t>(INT64_MAX) ||
-        size > std::numeric_limits<std::size_t>::max()) {
-      return reject(Status{ErrorCode::ResourceExhausted,
-                           "CPU allocation size is not addressable",
-                           FailureReason::CapacityLimit});
     }
     std::shared_ptr<void> storage_lease;
     if (reserve_) {
@@ -384,5 +391,39 @@ Result<MutableBuffer> BufferAllocator::allocate_impl(std::uint64_t size,
     return reject(
         Status{ErrorCode::OperationFailed, {}, FailureReason::HostException});
   }
+}
+
+Result<MutableBuffer> MutableBuffer::adopt_shared(
+    std::uint8_t* bytes, std::uint64_t size, std::uint64_t capacity,
+    std::shared_ptr<void> native, std::shared_ptr<const void> native_domain,
+    std::shared_ptr<const void> domain, std::shared_ptr<void> lease) {
+  if (!bytes || !size || capacity < size || !native || !native_domain)
+    return Result<MutableBuffer>(
+        {ErrorCode::InvalidArgument, "invalid shared backing"});
+  MutableBuffer buffer;
+  buffer.storage_.reset(new CpuStorage);
+  auto& s = *buffer.storage_;
+  s.domain_ = std::move(domain);
+  s.native_domain_ = std::move(native_domain);
+  s.native_owner_ = std::move(native);
+  s.lease_ = std::move(lease);
+  s.native_bytes_ = bytes;
+  s.capacity_ = capacity;
+  s.byte_size_ = size;
+  s.native_writable_ = true;
+  return Result<MutableBuffer>(std::move(buffer));
+}
+BufferAllocator BufferAllocator::native_adapter(NativeAllocate factory) const {
+  auto copy = *this;
+  if (native_shared_reserve_)
+    copy.reserve_ = native_shared_reserve_;
+  copy.native_allocate_ = std::move(factory);
+  return copy;
+}
+void BufferAllocator::set_reservations(Reserve host, Reserve shared,
+                                       AllocationCommit commit) {
+  reserve_ = std::move(host);
+  native_shared_reserve_ = std::move(shared);
+  allocation_committed_ = std::move(commit);
 }
 }  // namespace ps

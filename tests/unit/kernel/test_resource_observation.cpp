@@ -5,13 +5,13 @@
 #include <utility>
 #include <vector>
 
-#include "core/resource_observation.hpp"
-#include "execution/execution_test_hooks.hpp"
-#include "execution/native_gpu.hpp"
-#include "execution/native_gpu_metadata.hpp"
 #include "photospider/core/resource_allocator.hpp"
+#include "photospider/core/resource_observation.hpp"
 #include "photospider/photospider.hpp"
 #include "photospider/plugin/native_kernel_api.h"
+#include "plugins/executors/physical/execution_test_hooks.hpp"
+#include "plugins/executors/physical/native_gpu.hpp"
+#include "plugins/executors/physical/native_gpu_metadata.hpp"
 #include "support/test_support.hpp"
 
 namespace {

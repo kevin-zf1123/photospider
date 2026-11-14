@@ -25,7 +25,7 @@ set_target_properties(photospider_ops_sdk PROPERTIES EXPORT_NAME ops_sdk
   CXX_EXTENSIONS OFF POSITION_INDEPENDENT_CODE ON
   VERSION ${PROJECT_VERSION} SOVERSION "${PROJECT_VERSION_MAJOR}.${PROJECT_VERSION_MINOR}")
 target_compile_features(photospider_ops_sdk PUBLIC cxx_std_17)
-target_link_libraries(photospider_ops_sdk PUBLIC Photospider::kernel)
+target_link_libraries(photospider_ops_sdk PUBLIC Photospider::operation_runtime)
 target_include_directories(photospider_ops_sdk PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/plugins/ops"
   PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/plugins/ops/include>)
 target_compile_options(photospider_ops_sdk PRIVATE -Wall -Wextra -Wpedantic -Werror

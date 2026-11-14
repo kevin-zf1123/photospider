@@ -4,9 +4,9 @@
 #include <new>
 #include <utility>
 
-#include "core/resource_observation.hpp"
 #include "photospider/core/checked_math.hpp"
 #include "photospider/core/resource_allocator.hpp"
+#include "photospider/core/resource_observation.hpp"
 
 namespace ps::data_internal {
 SampleDescriptor::SampleDescriptor(const ResultTensorSpec& spec) {

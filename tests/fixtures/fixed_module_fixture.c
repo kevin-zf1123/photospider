@@ -109,8 +109,8 @@ static ps_kernel_status_v8 validate_resources(
   return status(PS_KERNEL_OK_V8);
 }
 static ps_kernel_status_v8 lower(void* context,
-                                 const ps_lowering_query_v8* query,
-                                 const ps_operation_builder_v8* builder) {
+                                 const ps_lowering_query_v9* query,
+                                 const ps_operation_builder_v10* builder) {
   const struct StaticState* state =
       (const struct StaticState*)query->static_state;
   const ps_placement_v8 placement = {PS_BACKEND_CPU_V8,
@@ -138,7 +138,7 @@ static ps_kernel_status_v8 lower(void* context,
       uint32_t task;
       uint8_t delta = 3;
       TRY(builder->add_task(builder->context, symbol, contract, &placement,
-                            scratch, 0, &task));
+                            scratch, 0, 8, &task));
       if (state->mode == 1) {
         uint32_t copy, temporary, private_tile;
         TRY(builder->add_temporary(builder->context, &query->outputs[0],
@@ -165,8 +165,8 @@ static ps_kernel_status_v8 lower(void* context,
   return status(PS_KERNEL_OK_V8);
 }
 static ps_kernel_status_v8 lower_copy(void* context,
-                                      const ps_lowering_query_v8* query,
-                                      const ps_operation_builder_v8* builder) {
+                                      const ps_lowering_query_v9* query,
+                                      const ps_operation_builder_v10* builder) {
   const ps_placement_v8 placement = {PS_BACKEND_CPU_V8,
                                      PS_KERNEL_DOMAIN_HOST_V8,
                                      STR("cpu"),
@@ -299,8 +299,8 @@ static const ps_parameter_spec_v8 parameter = {
     .key = STR("mode"),
     .type = PS_PARAMETER_INT64_V8,
     .required = 1};
-static const ps_operation_v8 operations[] = {
-    {.struct_size = sizeof(ps_operation_v8),
+static const ps_operation_v10 operations[] = {
+    {.struct_size = sizeof(ps_operation_v10),
      .key = STR("module.increment"),
      .flags = PS_OPERATION_CPU_V8 | PS_OPERATION_PURE_V8 |
               PS_OPERATION_DETERMINISTIC_V8,
@@ -314,7 +314,7 @@ static const ps_operation_v8 operations[] = {
      .validate_resources = validate_resources,
      .lower = PS_MODULE_BAD == 4 ? NULL : lower,
      .prepare_kernel = prepare_kernel},
-    {.struct_size = sizeof(ps_operation_v8),
+    {.struct_size = sizeof(ps_operation_v10),
 #if PS_MODULE_BAD == 3
      .key = STR("module.increment"),
 #else
@@ -330,7 +330,7 @@ static const ps_operation_v8 operations[] = {
      .parameter_count = 1,
      .prepare = prepare,
      .lower = lower_copy},
-    {.struct_size = sizeof(ps_operation_v8),
+    {.struct_size = sizeof(ps_operation_v10),
      .key = STR("module.null"),
      .flags = PS_OPERATION_CPU_V8 | PS_OPERATION_PURE_V8 |
               PS_OPERATION_DETERMINISTIC_V8,
@@ -340,13 +340,13 @@ static const ps_operation_v8 operations[] = {
      .output_count = 1,
      .prepare = prepare_null,
      .lower = lower_copy}};
-static const ps_operation_module_v8 module = {
-    .struct_size = PS_MODULE_BAD == 2 ? 0 : sizeof(ps_operation_module_v8),
-    .abi_version = PS_MODULE_BAD == 1 ? 7 : 8,
+static const ps_operation_module_v10 module = {
+    .struct_size = PS_MODULE_BAD == 2 ? 0 : sizeof(ps_operation_module_v10),
+    .abi_version = PS_MODULE_BAD == 1 ? 9 : PS_OPERATION_MODULE_ABI_VERSION_10,
     .operations = operations,
     .operation_count = 3,
     .destroy = destroy};
-PS_OPERATION_MODULE_EXPORT const ps_operation_module_v8*
-ps_operation_module_get_api_v8(void) {
+PS_OPERATION_MODULE_EXPORT const ps_operation_module_v10*
+ps_operation_module_get_api_v10(void) {
   return &module;
 }

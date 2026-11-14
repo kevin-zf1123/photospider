@@ -3,7 +3,7 @@
 #include <chrono>
 #include <thread>
 
-#include "execution/fair_admission.hpp"
+#include "plugins/executors/physical/fair_admission.hpp"
 #include "support/status_check.hpp"
 
 using ps::execution_internal::FairAdmission;

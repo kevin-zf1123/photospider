@@ -94,6 +94,8 @@ class PHOTOSPIDER_API PlannerRegistry final {
    * or repeated IR form, or frozen registry. Allocation failures may throw.
    */
   Status add(PlannerDefinition definition);
+  /** @brief Load one trusted planner module before freeze. */
+  Status load_plugin(const std::string& path);
   void freeze() noexcept { frozen_ = true; }
   bool frozen() const noexcept { return frozen_; }
   const std::vector<PlannerDefinition>& definitions() const noexcept {

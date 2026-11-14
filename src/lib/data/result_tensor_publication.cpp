@@ -16,17 +16,17 @@
 #include <utility>
 #include <vector>
 
-#include "core/callback_environment.hpp"
-#include "core/resource_observation.hpp"
 #include "data/affine_view.hpp"
 #include "data/planar_view.hpp"
 #include "data/result_state.hpp"
 #include "data/result_support.hpp"
 #include "data/result_window_access.hpp"
 #include "data/tensor_access.hpp"
-#include "data/tensor_validation.hpp"
+#include "photospider/core/callback_environment.hpp"
 #include "photospider/core/checked_math.hpp"
+#include "photospider/core/resource_observation.hpp"
 #include "photospider/data/result.hpp"
+#include "photospider/data/tensor_validation.hpp"
 
 namespace ps {
 Result<std::uint64_t> ResultViewAxis::source_coordinate(

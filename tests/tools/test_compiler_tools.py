@@ -30,7 +30,7 @@ def write(path, value):
 
 # Compiler diagnostics are accepted only by the compiler driver.
 for tool in [psc, psx]:
-    assert b"fixed invocation ABI 8; operation module ABI 8" in run(tool, "--version").stdout
+    assert b"fixed invocation ABI 8/9; operation module ABI 10" in run(tool, "--version").stdout
 warning_flags = ["-Wall", "-Wextra", "-Werror", "-Wno-error",
                  "-Wunused-optimizer", "-Wno-unused-optimizer",
                  "-Werror=unused-optimizer", "-Wno-error=unused-optimizer"]

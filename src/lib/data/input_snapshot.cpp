@@ -10,10 +10,10 @@
 
 #include "data/memory_budget.hpp"
 #include "data/tensor_access.hpp"
-#include "data/tensor_validation.hpp"
 #include "photospider/core/checked_math.hpp"
 #include "photospider/core/content_digest.hpp"
 #include "photospider/core/status_helpers.hpp"
+#include "photospider/data/tensor_validation.hpp"
 
 namespace ps {
 namespace {

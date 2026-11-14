@@ -21,6 +21,17 @@ int main() {
   PS_CHECK(p.blocks[0].reservation.outputs[0] == 20);
   PS_CHECK(p.blocks[0].calls == std::vector<Id>({0, 1, 2, 3, 4}));
 
+  auto native = program();
+  task(&native, 0);
+  native.kernels[0].abi_version = 9;
+  PS_REQUIRE_OK(finalize_program(&native));
+  native.kernels[0].abi_version = 8;
+  native.placements[0] = {Backend::Gpu, Domain::Shared, "gpu", "compute"};
+  PS_REQUIRE_OK(finalize_program(&native));
+  native.kernels[0].abi_version = 9;
+  PS_CHECK(validate_program(native).code == ps::ErrorCode::InvalidArgument);
+  PS_CHECK(finalize_program(&native).code == ps::ErrorCode::InvalidArgument);
+
   // A consumer can precede its producer in the physical task table.
   auto permuted = program(2);
   auto consumer = task(&permuted, 1);

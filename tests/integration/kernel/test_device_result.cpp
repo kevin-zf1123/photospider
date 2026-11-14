@@ -6,11 +6,11 @@
 #include <thread>
 #include <utility>
 
-#include "data/device_tensor_span.hpp"
-#include "data/result_device_access.hpp"
-#include "execution/native_gpu.hpp"
 #include "fixtures/native_vulkan_spirv.hpp"
+#include "photospider/data/device_tensor_span.hpp"
+#include "photospider/data/result_device_access.hpp"
 #include "photospider/execution/execution.hpp"
+#include "plugins/executors/physical/native_gpu.hpp"
 #include "support/fixed_native_fixture.hpp"
 #include "support/fixed_operation_fixture.hpp"
 

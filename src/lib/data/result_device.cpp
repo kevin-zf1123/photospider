@@ -7,10 +7,10 @@
 
 #include "data/planar_view.hpp"
 #include "data/resource_storage.hpp"
-#include "data/result_device_access.hpp"
 #include "data/result_state.hpp"
 #include "data/result_support.hpp"
 #include "photospider/core/checked_math.hpp"
+#include "photospider/data/result_device_access.hpp"
 
 namespace ps::data_internal {
 Result<std::shared_ptr<const gpu_internal::DeviceStorage>>

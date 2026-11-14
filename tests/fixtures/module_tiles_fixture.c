@@ -69,8 +69,8 @@ static int valid_grid(const ps_tile_grid_v8* grid, uint64_t extent) {
       return 0;
   return 1;
 }
-static ps_kernel_status_v8 lower(void* user, const ps_lowering_query_v8* query,
-                                 const ps_operation_builder_v8* builder) {
+static ps_kernel_status_v8 lower(void* user, const ps_lowering_query_v9* query,
+                                 const ps_operation_builder_v10* builder) {
   const unsigned mode = *(const unsigned*)user;
   if (!query->tile_extent || query->output_count != 1 ||
       query->output_grid_count != 1 ||
@@ -90,7 +90,7 @@ static ps_kernel_status_v8 lower(void* user, const ps_lowering_query_v8* query,
     for (uint64_t tile = request->begin; tile < request->end; ++tile) {
       uint32_t task;
       TRY(builder->add_task(builder->context, symbol, contract, &placement,
-                            scratch, 0, &task));
+                            scratch, 0, 8, &task));
       if (mode == 1)
         TRY(builder->read_input(builder->context, task, 0, 0, tile,
                                 PS_KERNEL_DOMAIN_HOST_V8));
@@ -106,6 +106,7 @@ static ps_kernel_status_v8 lower(void* user, const ps_lowering_query_v8* query,
 struct KernelState {
   unsigned mode;
   uint64_t count, origin[5], extent[5], tensor_count;
+  int64_t input_strides[5], output_strides[5];
 };
 static void release(const void* state) {
   free((void*)state);
@@ -122,24 +123,29 @@ static void invoke(const ps_kernel_invocation_v8* query,
   atomic_fetch_add(&invocations[state->mode], 1);
   unsigned char* output = (unsigned char*)query->outputs[0].allocation +
                           query->outputs[0].byte_offset;
-  if (state->mode == 1) {
-    memcpy(output,
-           (const unsigned char*)query->inputs[0].allocation +
-               query->inputs[0].byte_offset,
-           state->count * sizeof(double));
-    return;
-  }
   for (uint64_t index = 0; index < state->count; ++index) {
     uint64_t remainder = index, at[5], flat = 0;
+    uint64_t output_offset = 0, input_offset = 0;
     for (unsigned axis = 5; axis-- > 0;) {
-      at[axis] = state->origin[axis] + remainder % state->extent[axis];
+      const uint64_t local = remainder % state->extent[axis];
+      at[axis] = state->origin[axis] + local;
+      output_offset += local * (uint64_t)state->output_strides[axis];
+      if (state->mode == 1)
+        input_offset += local * (uint64_t)state->input_strides[axis];
       remainder /= state->extent[axis];
+    }
+    if (state->mode == 1) {
+      const unsigned char* input =
+          (const unsigned char*)query->inputs[0].allocation +
+          query->inputs[0].byte_offset;
+      memcpy(output + output_offset, input + input_offset, sizeof(double));
+      continue;
     }
     for (unsigned axis = 0; axis < 5; ++axis)
       flat = flat * shape[axis] + at[axis];
     const double value =
         (double)(state->mode == 2 ? state->tensor_count : flat + 1);
-    memcpy(output + index * sizeof(value), &value, sizeof(value));
+    memcpy(output + output_offset, &value, sizeof(value));
   }
 }
 /* Validate the actual fixed view independently from the query's grid table. */
@@ -156,14 +162,18 @@ static int valid_view(const ps_kernel_view_spec_v8* view, uint64_t extent) {
   const uint64_t origin[5] = {batch / 2, batch % 2, 0, y, x};
   const uint64_t sizes[5] = {1, 1, 2, 3 - y < extent ? 3 - y : extent,
                              5 - x < extent ? 5 - x : extent};
-  uint64_t bytes = sizeof(double);
-  for (unsigned axis = 5; axis-- > 0;) {
+  if (extent > INT64_MAX / (2 * 3 * sizeof(double)))
+    return 0;
+  /* Planar rows keep the tile pitch, including clipped right-edge tiles. */
+  const uint64_t row = extent * sizeof(double);
+  const uint64_t plane = sizes[3] * row;
+  const uint64_t bytes = sizes[2] * plane;
+  const uint64_t strides[5] = {bytes, bytes, plane, row, sizeof(double)};
+  for (unsigned axis = 0; axis < 5; ++axis)
     if (view->layout.origin[axis] != origin[axis] ||
         view->layout.shape[axis] != sizes[axis] ||
-        view->layout.strides[axis] != (int64_t)bytes)
+        view->layout.strides[axis] != (int64_t)strides[axis])
       return 0;
-    bytes *= sizes[axis];
-  }
   return view->bytes == bytes;
 }
 static ps_kernel_status_v8 prepare_kernel(void* user,
@@ -187,10 +197,17 @@ static ps_kernel_status_v8 prepare_kernel(void* user,
   if (!state)
     return status(PS_KERNEL_RESOURCE_EXHAUSTED_V8);
   state->mode = mode;
-  state->count = query->writes[0].bytes / sizeof(double);
+  state->count = 1;
+  for (unsigned axis = 0; axis < 5; ++axis)
+    state->count *= query->writes[0].layout.shape[axis];
   state->tensor_count = mode ? query->facts.inputs[0].tensor_count : 0;
   memcpy(state->origin, query->writes[0].layout.origin, sizeof(state->origin));
   memcpy(state->extent, query->writes[0].layout.shape, sizeof(state->extent));
+  memcpy(state->output_strides, query->writes[0].layout.strides,
+         sizeof(state->output_strides));
+  if (mode == 1)
+    memcpy(state->input_strides, query->reads[0].layout.strides,
+           sizeof(state->input_strides));
   *kernel = (ps_prepared_kernel_v8){.struct_size = sizeof(*kernel),
                                     .abi_version = 8,
                                     .context = state,
@@ -198,8 +215,8 @@ static ps_kernel_status_v8 prepare_kernel(void* user,
                                     .invoke_cpu = invoke};
   return status(PS_KERNEL_OK_V8);
 }
-static const ps_operation_v8 operations[] = {
-    {.struct_size = sizeof(ps_operation_v8),
+static const ps_operation_v10 operations[] = {
+    {.struct_size = sizeof(ps_operation_v10),
      .key = TEXT("test.c_tiles.generate"),
      .flags = PS_OPERATION_CPU_V8 | PS_OPERATION_DETERMINISTIC_V8 |
               PS_OPERATION_PURE_V8,
@@ -208,7 +225,7 @@ static const ps_operation_v8 operations[] = {
      .user_data = (void*)&modes[0],
      .lower = lower,
      .prepare_kernel = prepare_kernel},
-    {.struct_size = sizeof(ps_operation_v8),
+    {.struct_size = sizeof(ps_operation_v10),
      .key = TEXT("test.c_tiles.copy"),
      .flags = PS_OPERATION_CPU_V8 | PS_OPERATION_DETERMINISTIC_V8 |
               PS_OPERATION_PURE_V8,
@@ -219,7 +236,7 @@ static const ps_operation_v8 operations[] = {
      .user_data = (void*)&modes[1],
      .lower = lower,
      .prepare_kernel = prepare_kernel},
-    {.struct_size = sizeof(ps_operation_v8),
+    {.struct_size = sizeof(ps_operation_v10),
      .key = TEXT("test.c_tiles.schema"),
      .flags = PS_OPERATION_CPU_V8 | PS_OPERATION_DETERMINISTIC_V8 |
               PS_OPERATION_PURE_V8,
@@ -233,15 +250,16 @@ static const ps_operation_v8 operations[] = {
 static void destroy(void* context) {
   (void)context;
 }
-static const ps_operation_module_v8 api = {.struct_size = sizeof(api),
-                                           .abi_version = 8,
-                                           .operations = operations,
-                                           .operation_count = 3,
-                                           .destroy = destroy};
+static const ps_operation_module_v10 api = {
+    .struct_size = sizeof(api),
+    .abi_version = PS_OPERATION_MODULE_ABI_VERSION_10,
+    .operations = operations,
+    .operation_count = 3,
+    .destroy = destroy};
 PS_OPERATION_MODULE_EXPORT uint64_t ps_module_tiles_invocations(unsigned mode) {
   return mode < 3 ? atomic_load(&invocations[mode]) : UINT64_MAX;
 }
-PS_OPERATION_MODULE_EXPORT const ps_operation_module_v8*
-ps_operation_module_get_api_v8(void) {
+PS_OPERATION_MODULE_EXPORT const ps_operation_module_v10*
+ps_operation_module_get_api_v10(void) {
   return &api;
 }

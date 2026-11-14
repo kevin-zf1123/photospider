@@ -15,9 +15,9 @@
 
 #include "data/affine_view.hpp"
 #include "data/result_window_access.hpp"
-#include "execution/task_schedule.hpp"
-#include "execution/tile_view.hpp"
 #include "photospider/photospider.hpp"
+#include "plugins/executors/physical/task_schedule.hpp"
+#include "plugins/executors/physical/tile_view.hpp"
 #include "support/fixed_operation_fixture.hpp"
 #include "support/physical_program_fixture.hpp"
 #include "support/test_support.hpp"

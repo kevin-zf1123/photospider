@@ -38,8 +38,8 @@ static ps_kernel_status_v8 status(uint32_t code) {
   return result;
 }
 static ps_kernel_status_v8 lower(void* context,
-                                 const ps_lowering_query_v8* query,
-                                 const ps_operation_builder_v8* builder) {
+                                 const ps_lowering_query_v9* query,
+                                 const ps_operation_builder_v10* builder) {
   const unsigned mode = *(const unsigned*)context;
   const ps_string_v8 symbol = TEXT("native-u8"), contract = TEXT("tiles-v1");
   const ps_placement_v8 placement = {
@@ -56,7 +56,7 @@ static ps_kernel_status_v8 lower(void* context,
         TRY(builder->add_copy(builder->context, &placement, &task));
       else
         TRY(builder->add_task(builder->context, symbol, contract, &placement,
-                              scratch, 0, &task));
+                              scratch, 0, 8, &task));
       if (mode)
         TRY(builder->read_input(
             builder->context, task, 0, 0, tile,
@@ -130,8 +130,8 @@ static ps_kernel_status_v8 prepare(void* context,
   memset(bindings, 0xff, sizeof(bindings));
   return result;
 }
-static const ps_operation_v8 operations[] = {
-    {.struct_size = sizeof(ps_operation_v8),
+static const ps_operation_v10 operations[] = {
+    {.struct_size = sizeof(ps_operation_v10),
      .key = TEXT("native.fill"),
      .flags = PS_OPERATION_GPU_V8 | PS_OPERATION_DETERMINISTIC_V8 |
               PS_OPERATION_PURE_V8,
@@ -140,7 +140,7 @@ static const ps_operation_v8 operations[] = {
      .user_data = (void*)&modes[0],
      .lower = lower,
      .prepare_kernel = prepare},
-    {.struct_size = sizeof(ps_operation_v8),
+    {.struct_size = sizeof(ps_operation_v10),
      .key = TEXT("native.add"),
      .flags = PS_OPERATION_GPU_V8 | PS_OPERATION_DETERMINISTIC_V8 |
               PS_OPERATION_PURE_V8,
@@ -151,7 +151,7 @@ static const ps_operation_v8 operations[] = {
      .user_data = (void*)&modes[1],
      .lower = lower,
      .prepare_kernel = prepare},
-    {.struct_size = sizeof(ps_operation_v8),
+    {.struct_size = sizeof(ps_operation_v10),
      .key = TEXT("native.download"),
      .flags = PS_OPERATION_GPU_V8 | PS_OPERATION_DETERMINISTIC_V8 |
               PS_OPERATION_PURE_V8,
@@ -161,7 +161,7 @@ static const ps_operation_v8 operations[] = {
      .output_count = 1,
      .user_data = (void*)&modes[2],
      .lower = lower},
-    {.struct_size = sizeof(ps_operation_v8),
+    {.struct_size = sizeof(ps_operation_v10),
      .key = TEXT("native.upload"),
      .flags = PS_OPERATION_GPU_V8 | PS_OPERATION_DETERMINISTIC_V8 |
               PS_OPERATION_PURE_V8,
@@ -174,12 +174,13 @@ static const ps_operation_v8 operations[] = {
 static void destroy(void* context) {
   (void)context;
 }
-static const ps_operation_module_v8 api = {.struct_size = sizeof(api),
-                                           .abi_version = 8,
-                                           .operations = operations,
-                                           .operation_count = 4,
-                                           .destroy = destroy};
-PS_OPERATION_MODULE_EXPORT const ps_operation_module_v8*
-ps_operation_module_get_api_v8(void) {
+static const ps_operation_module_v10 api = {
+    .struct_size = sizeof(api),
+    .abi_version = PS_OPERATION_MODULE_ABI_VERSION_10,
+    .operations = operations,
+    .operation_count = 4,
+    .destroy = destroy};
+PS_OPERATION_MODULE_EXPORT const ps_operation_module_v10*
+ps_operation_module_get_api_v10(void) {
   return &api;
 }

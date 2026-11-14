@@ -260,13 +260,17 @@ void commit_metadata(ResourceLease& lease, std::uint64_t bytes) noexcept {
   core_internal::ResourceMetadataAccess::commit(lease, bytes);
 }
 }  // namespace resource_internal
-ResourceBudget::ResourceBudget(ResourceLimits limits) {
+std::shared_ptr<const void> ResourceBudget::code_owner() const noexcept {
+  return impl_->code_owner;
+}
+ResourceBudget::ResourceBudget(ResourceLimits limits,
+                               std::shared_ptr<const void> owner) {
   if (!coherent(limits.cleanup))
     throw std::invalid_argument("inconsistent managed capacity dimensions");
   for (std::size_t i = 0; i < limits.capacity.values.size(); ++i)
     if (limits.cleanup.values[i] > limits.capacity.values[i])
       throw std::invalid_argument("cleanup capacity exceeds root limit");
-  impl_ = std::make_shared<Impl>(std::move(limits));
+  impl_ = std::make_shared<Impl>(std::move(limits), std::move(owner));
 }
 std::uint64_t ResourceBudget::lease_metadata_bytes() noexcept {
   return sizeof(ResourceLease::Impl);

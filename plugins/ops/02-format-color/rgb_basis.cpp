@@ -1321,7 +1321,7 @@ Result<WorkflowNodeOutput> author(WorkflowDocument& document,
     plugin_internal::FloatingEnvironment environment;
     typed(environment.active(), "floating environment unavailable");
     if (!registry) {
-      registry = make_default_operation_registry();
+      registry = make_runtime_operation_registry();
     }
     const auto source = edge_metadata(document, input, *registry, resources);
     WorkflowDocument staged = document;

@@ -16,11 +16,11 @@
 #include <utility>
 #include <vector>
 
-#include "core/resource_observation.hpp"
 #include "data/result_support.hpp"
-#include "data/tensor_validation.hpp"
 #include "photospider/core/checked_math.hpp"
+#include "photospider/core/resource_observation.hpp"
 #include "photospider/data/result.hpp"
+#include "photospider/data/tensor_validation.hpp"
 
 namespace ps {
 namespace {

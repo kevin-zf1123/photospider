@@ -126,8 +126,8 @@ static ps_kernel_status_v8 prepare(void* user, const ps_static_query_v8* query,
   state->release = release;
   return status(PS_KERNEL_OK_V8);
 }
-static ps_kernel_status_v8 lower(void* user, const ps_lowering_query_v8* query,
-                                 const ps_operation_builder_v8* builder) {
+static ps_kernel_status_v8 lower(void* user, const ps_lowering_query_v9* query,
+                                 const ps_operation_builder_v10* builder) {
   (void)user;
   const ps_string_v8 symbol = TEXT("fill"), contract = TEXT("f64-v1");
   const ps_placement_v8 placement = {.backend = PS_BACKEND_CPU_V8,
@@ -139,7 +139,7 @@ static ps_kernel_status_v8 lower(void* user, const ps_lowering_query_v8* query,
     for (uint64_t tile = request->begin; tile < request->end; ++tile) {
       uint32_t task;
       TRY(builder->add_task(builder->context, symbol, contract, &placement,
-                            scratch, 0, &task));
+                            scratch, 0, 8, &task));
       for (uint32_t port = 0; port < query->facts.input_count; ++port)
         TRY(builder->read_input_schema(builder->context, task, port));
       TRY(builder->write_output(builder->context, task, request->output,
@@ -203,7 +203,7 @@ static ps_kernel_status_v8 prepare_kernel(void* user,
 // ClangFormat aligns C designated initializers inside this macro.
 // NOLINTBEGIN(whitespace/indent)
 #define OP(KEY, MODE, INPUTS, COUNT, OUTPUT, PARAMETERS, PARAM_COUNT) \
-  {.struct_size = sizeof(ps_operation_v8),                            \
+  {.struct_size = sizeof(ps_operation_v10),                           \
    .key = TEXT(KEY),                                                  \
    .flags = PS_OPERATION_CPU_V8 | PS_OPERATION_PURE_V8 |              \
             PS_OPERATION_DETERMINISTIC_V8,                            \
@@ -289,12 +289,12 @@ static ps_kernel_status_v8 vocabulary_prepare(
   result.domain_code = UINT64_C(0xfedcba9876543210);
   return result;
 }
-static const ps_operation_v8 operations[] = {
+static const ps_operation_v10 operations[] = {
     OP(operation_key, 0, &ports[0], 1, &outputs[0], NULL, 0),
     OP("contract.sole", 1, &ports[1], 1, &outputs[0], NULL, 0),
     OP("contract.parameters", 2, NULL, 0, &outputs[0], parameters, 2),
     OP("contract.sparse", 3, NULL, 0, &outputs[1], NULL, 0),
-    {.struct_size = sizeof(ps_operation_v8),
+    {.struct_size = sizeof(ps_operation_v10),
      .key = TEXT("contract.vocabulary"),
      .flags = PS_OPERATION_CPU_V8 | PS_OPERATION_PURE_V8 |
               PS_OPERATION_DETERMINISTIC_V8,
@@ -307,13 +307,13 @@ static const ps_operation_v8 operations[] = {
 static void destroy(void* context) {
   (void)context;
 }
-static const ps_operation_module_v8 module = {
+static const ps_operation_module_v10 module = {
     .struct_size = sizeof(module),
-    .abi_version = 8,
+    .abi_version = PS_OPERATION_MODULE_ABI_VERSION_10,
     .operations = operations,
     .operation_count = sizeof(operations) / sizeof(*operations),
     .destroy = destroy};
-PS_OPERATION_MODULE_EXPORT const ps_operation_module_v8*
-ps_operation_module_get_api_v8(void) {
+PS_OPERATION_MODULE_EXPORT const ps_operation_module_v10*
+ps_operation_module_get_api_v10(void) {
   return &module;
 }

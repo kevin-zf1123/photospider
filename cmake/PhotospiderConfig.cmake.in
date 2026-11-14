@@ -1,37 +1,19 @@
 @PACKAGE_INIT@
 
-if(NOT Photospider_FIND_COMPONENTS OR
-   "kernel" IN_LIST Photospider_FIND_COMPONENTS OR
-   "ops" IN_LIST Photospider_FIND_COMPONENTS OR
-   "ops_sdk" IN_LIST Photospider_FIND_COMPONENTS OR
-   "result_files" IN_LIST Photospider_FIND_COMPONENTS OR
-   "benchmark_tools" IN_LIST Photospider_FIND_COMPONENTS)
-  include(CMakeFindDependencyMacro)
-  find_dependency(Threads)
-  if(@PHOTOSPIDER_ENABLE_VULKAN@)
-    find_dependency(Vulkan)
-  endif()
+include(CMakeFindDependencyMacro)
+find_dependency(Threads)
+if(@PHOTOSPIDER_BUILD_EXECUTOR@ AND @PHOTOSPIDER_ENABLE_VULKAN@ AND (NOT Photospider_FIND_COMPONENTS OR
+   "kernel" IN_LIST Photospider_FIND_COMPONENTS OR "executor_physical" IN_LIST Photospider_FIND_COMPONENTS OR "execution_default" IN_LIST Photospider_FIND_COMPONENTS OR "benchmark_tools" IN_LIST Photospider_FIND_COMPONENTS))
+  find_dependency(Vulkan)
 endif()
-
-set(Photospider_kernel_FOUND TRUE)
-set(Photospider_result_files_FOUND @PHOTOSPIDER_BUILD_TOOLS@)
-set(Photospider_ops_FOUND @PHOTOSPIDER_BUILD_OPS@)
-set(Photospider_ops_headers_FOUND @PHOTOSPIDER_BUILD_OPS@)
-set(Photospider_operation_sdk_FOUND TRUE)
-set(Photospider_ops_sdk_FOUND @PHOTOSPIDER_BUILD_OPS_SDK@)
-set(Photospider_benchmark_tools_FOUND @PHOTOSPIDER_BUILD_BENCHMARK_TOOLS@)
-
-foreach(_Photospider_component IN LISTS Photospider_FIND_COMPONENTS)
-  if(NOT _Photospider_component STREQUAL "kernel" AND
-     NOT _Photospider_component STREQUAL "ops" AND
-     NOT _Photospider_component STREQUAL "operation_sdk" AND
-     NOT _Photospider_component STREQUAL "ops_headers" AND
-     NOT _Photospider_component STREQUAL "ops_sdk" AND
-     NOT _Photospider_component STREQUAL "result_files" AND
-     NOT _Photospider_component STREQUAL "benchmark_tools")
-    set(Photospider_${_Photospider_component}_FOUND FALSE)
+include("${CMAKE_CURRENT_LIST_DIR}/PhotospiderTargets.cmake")
+foreach(component IN ITEMS kernel data model program operation_runtime plugin_host operation_sdk mapper_geometry
+    compiler compiler_default frontend_dag optimizer_deduplicate planner_static_tiles executor_physical
+    execution execution_default ops ops_runtime ops_sdk ops_headers benchmark_tools result_files)
+  if(TARGET Photospider::${component})
+    set(Photospider_${component}_FOUND TRUE)
+  else()
+    set(Photospider_${component}_FOUND FALSE)
   endif()
 endforeach()
-
 check_required_components(Photospider)
-include("${CMAKE_CURRENT_LIST_DIR}/PhotospiderTargets.cmake")

@@ -6,12 +6,13 @@
 namespace {
 std::atomic<std::uint32_t> calls{0};
 // NOLINTBEGIN(whitespace/indent_namespace)
-const ps_operation_module_v8 api{sizeof(api), 1, nullptr, 0, nullptr, nullptr};
+const ps_operation_module_v10 api{sizeof(api), 1,       nullptr, 0,
+                                  nullptr,     nullptr, nullptr, 0};
 // NOLINTEND
 }  // namespace
 
-extern "C" PS_OPERATION_MODULE_EXPORT const ps_operation_module_v8*
-ps_operation_module_get_api_v8(void) {
+extern "C" PS_OPERATION_MODULE_EXPORT const ps_operation_module_v10*
+ps_operation_module_get_api_v10(void) {
   ++calls;
   return &api;
 }

@@ -110,6 +110,10 @@ class PHOTOSPIDER_API ExecutionPlan final {
   const IRDigest& input_ir_digest() const noexcept { return data().input_ir_; }
   const ExecutionPlanDigest& digest() const noexcept { return data().digest_; }
   const ResourceSet& resources() const noexcept { return data().resources_; }
+  /** @brief Match the exact operation catalog retained at binding. */
+  bool bound_to(const OperationRegistry& registry) const noexcept {
+    return data().operation_registry_.lock().get() == &registry;
+  }
   bool current() const noexcept {
     return data().current_check_ && data().current_check_();
   }
@@ -123,6 +127,7 @@ class PHOTOSPIDER_API ExecutionPlan final {
 
  private:
   friend class Compiler;
+  friend class ProgramServices;
   friend class PlanBuilder;
   friend class CompilerArtifact;
   friend class ExecutionContext;

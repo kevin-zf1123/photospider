@@ -8,9 +8,9 @@
 #include <utility>
 #include <vector>
 
-#include "data/tensor_validation.hpp"
 #include "photospider/core/checked_math.hpp"
 #include "photospider/core/status_helpers.hpp"
+#include "photospider/data/tensor_validation.hpp"
 
 namespace ps {
 namespace {

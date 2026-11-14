@@ -35,8 +35,46 @@
 !src/**/*.hpp
 !src/**/*.mm
 
+# Kernel SDK, host assembly, CLI and provider sources.
+!apps/
+!apps/**/
+!apps/**/*.cpp
+!apps/**/*.hpp
+!sdk/
+!sdk/**/
+!sdk/**/*.cpp
+!sdk/**/*.hpp
+!host/
+!host/*.cpp
+!host/*.hpp
+!host/*.mm
 # Maintained repository-owned operation implementations.
 !plugins/
+!plugins/compiler/
+!plugins/compiler/**/
+!plugins/compiler/**/*.cpp
+!plugins/compiler/**/*.hpp
+!plugins/frontends/
+!plugins/frontends/**/
+!plugins/frontends/**/*.cpp
+!plugins/frontends/**/*.hpp
+!plugins/optimizers/
+!plugins/optimizers/**/
+!plugins/optimizers/**/*.cpp
+!plugins/optimizers/**/*.hpp
+!plugins/planners/
+!plugins/planners/**/
+!plugins/planners/**/*.cpp
+!plugins/planners/**/*.hpp
+!plugins/executors/
+!plugins/executors/**/
+!plugins/executors/**/*.cpp
+!plugins/executors/**/*.hpp
+!plugins/mappers/
+!plugins/mappers/**/
+!plugins/mappers/**/*.cpp
+!plugins/mappers/**/*.hpp
+!plugins/executors/**/*.mm
 !plugins/ops/
 !plugins/ops/**/
 !plugins/ops/**/*.cpp

@@ -8,14 +8,14 @@
 #include <utility>
 #include <vector>
 
-#include "core/resource_observation.hpp"
-#include "data/result_device_access.hpp"
-#include "execution/block_memory.hpp"
-#include "execution/diagnostics.hpp"
-#include "execution/execution_test_hooks.hpp"
-#include "execution/native_gpu.hpp"
 #include "fixtures/native_vulkan_spirv.hpp"
+#include "photospider/core/resource_observation.hpp"
+#include "photospider/data/result_device_access.hpp"
 #include "photospider/execution/execution.hpp"
+#include "plugins/executors/physical/block_memory.hpp"
+#include "plugins/executors/physical/diagnostics.hpp"
+#include "plugins/executors/physical/execution_test_hooks.hpp"
+#include "plugins/executors/physical/native_gpu.hpp"
 #include "support/fixed_native_fixture.hpp"
 #include "support/fixed_operation_fixture.hpp"
 #include "support/physical_program_fixture.hpp"

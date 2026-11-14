@@ -12,8 +12,8 @@ namespace {
 std::atomic<std::uint32_t> destroy_count{0};
 std::atomic<std::uint32_t> callback_count{0};
 int context_marker;
-ps_kernel_status_v8 never(void*, const ps_lowering_query_v8*,
-                          const ps_operation_builder_v8*) {
+ps_kernel_status_v8 never(void*, const ps_lowering_query_v9*,
+                          const ps_operation_builder_v10*) {
   ++callback_count;
   ps_kernel_status_v8 status{};
   status.code = PS_KERNEL_OPERATION_FAILED_V8;
@@ -56,7 +56,7 @@ ps_schema_v8 make_schema() {
 }
 const auto schema = make_schema();
 const auto output = operation_registry_fixture::make_output(&schema);
-ps_operation_v8 make_operation() {
+ps_operation_v10 make_operation() {
   auto operation = operation_registry_fixture::make_operation(
       "fixture.tensor.extents", 22, nullptr, 0, &output);
   operation.lower = never;
@@ -68,15 +68,16 @@ void destroy_fixture(void* context) {
     ++destroy_count;
 }
 // NOLINTBEGIN(whitespace/indent_namespace)
-const ps_operation_module_v8 api = {
-    sizeof(api),     PS_OPERATION_MODULE_ABI_VERSION_8,
+const ps_operation_module_v10 api = {
+    sizeof(api),     PS_OPERATION_MODULE_ABI_VERSION_10,
     &operation,      1,
-    &context_marker, destroy_fixture};
+    &context_marker, destroy_fixture,
+    nullptr,         0};
 // NOLINTEND
 }  // namespace
 
-extern "C" PS_OPERATION_MODULE_EXPORT const ps_operation_module_v8*
-ps_operation_module_get_api_v8(void) {
+extern "C" PS_OPERATION_MODULE_EXPORT const ps_operation_module_v10*
+ps_operation_module_get_api_v10(void) {
   return &api;
 }
 extern "C" PS_OPERATION_MODULE_EXPORT std::uint32_t

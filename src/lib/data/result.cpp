@@ -22,8 +22,8 @@
 #include "data/result_state.hpp"
 #include "data/result_support.hpp"
 #include "data/result_window_access.hpp"
-#include "data/tensor_validation.hpp"
 #include "photospider/core/checked_math.hpp"
+#include "photospider/data/tensor_validation.hpp"
 
 namespace ps {
 bool ResultRef::owned_by(const ResourceBudget& budget) const noexcept {

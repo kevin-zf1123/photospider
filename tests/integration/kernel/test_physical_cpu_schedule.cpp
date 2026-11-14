@@ -8,9 +8,9 @@
 #include <utility>
 #include <vector>
 
-#include "execution/block_memory.hpp"
-#include "execution/cpu_workers.hpp"
-#include "execution/task_schedule.hpp"
+#include "plugins/executors/physical/block_memory.hpp"
+#include "plugins/executors/physical/cpu_workers.hpp"
+#include "plugins/executors/physical/task_schedule.hpp"
 #include "support/physical_program_fixture.hpp"
 #include "support/status_check.hpp"
 

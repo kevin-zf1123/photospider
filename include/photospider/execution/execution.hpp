@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -16,13 +17,16 @@
 #include "photospider/data/result.hpp"
 #include "photospider/plugin/fixed_invocation_api.h"
 
+struct ps_executor_module_v2;
 namespace ps {
-namespace execution_internal {
-struct ContextState;
-struct PreparedState;
-struct RunState;
-struct DiagnosticsState;
-}  // namespace execution_internal
+namespace executor_sdk {
+struct Context;
+struct Prepared;
+struct Run;
+struct Observation;
+struct Provider;
+}  // namespace executor_sdk
+class ExecutorRegistry;
 /** @brief Fixed local resources. CPU workers are always available. */
 struct ExecutionContextConfig final {
   std::uint32_t cpu_workers = 0;
@@ -42,6 +46,11 @@ struct ExecutionContextConfig final {
    * this context. Zero disables reuse. Active Runs retain independent owners.
    */
   std::uint64_t tile_cache_bytes = 0;
+  /** @brief Growth bound for Results created under this configuration.
+   * The resource root enforces its own capacity on each allocation. */
+  ResultGrowthLimits result_growth_limits() const noexcept {
+    return {std::max(ResultGrowthLimits{}.maximum_bytes, maximum_live_bytes)};
+  }
 };
 struct ExecutionBinding final {
   std::string name;
@@ -262,7 +271,7 @@ class PHOTOSPIDER_API ExecutionObservation final {
 
  private:
   friend class RunHandle;
-  std::shared_ptr<execution_internal::DiagnosticsState> state_;
+  std::shared_ptr<executor_sdk::Observation> state_;
 };
 struct ExecutionResult final {
   ResourceMap<ResultRef> results;
@@ -280,7 +289,7 @@ class PHOTOSPIDER_API PreparedPlan final {
 
  private:
   friend class ExecutionContext;
-  std::shared_ptr<const execution_internal::PreparedState> state_;
+  std::shared_ptr<const executor_sdk::Prepared> state_;
 };
 /** @brief Shared mutable Run owner with explicit cancellation and drain.
  * Destroying a handle releases that reference; accepted work keeps its own
@@ -306,7 +315,7 @@ class PHOTOSPIDER_API RunHandle final {
 
  private:
   friend class ExecutionContext;
-  std::shared_ptr<execution_internal::RunState> state_;
+  std::shared_ptr<executor_sdk::Run> state_;
 };
 /** @brief Owner of bounded worker resources and the frozen operation registry.
  * Direct methods must not race destruction. Destruction rejects submissions,
@@ -325,6 +334,11 @@ class PHOTOSPIDER_API ExecutionContext final {
  public:
   explicit ExecutionContext(std::shared_ptr<OperationRegistry> operations,
                             ExecutionContextConfig config = {});
+  /** @brief Create a context with an explicitly selected frozen provider. */
+  ExecutionContext(std::shared_ptr<OperationRegistry> operations,
+                   ExecutionContextConfig config,
+                   const ExecutorRegistry& providers,
+                   const std::string& executor);
   ~ExecutionContext() noexcept;
   ExecutionContext(const ExecutionContext&) = delete;
   ExecutionContext& operator=(const ExecutionContext&) = delete;
@@ -362,6 +376,22 @@ class PHOTOSPIDER_API ExecutionContext final {
   std::string native_device_description() const;
 
  private:
-  std::shared_ptr<execution_internal::ContextState> state_;
+  std::shared_ptr<executor_sdk::Context> state_;
+};
+/** @brief Startup catalog of executor providers. Load explicit modules first,
+ * then add bundled defaults and freeze before sharing among context creators.
+ */
+class PHOTOSPIDER_API ExecutorRegistry final {
+ public:
+  Status load_plugin(const std::string& path);
+  Status add_physical();
+  void freeze() noexcept { frozen_ = true; }
+
+ private:
+  friend class ExecutionContext;
+  Status add_builtin(const ps_executor_module_v2& api);
+  bool frozen_ = false;
+  std::map<std::string, std::shared_ptr<const executor_sdk::Provider>>
+      providers_;
 };
 }  // namespace ps

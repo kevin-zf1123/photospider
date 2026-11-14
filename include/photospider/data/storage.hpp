@@ -6,6 +6,7 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <utility>
 #include <vector>
 
 #include "photospider/core/resources.hpp"
@@ -15,13 +16,6 @@ namespace ps {
 namespace data_internal {
 struct AllocationScope;
 }
-namespace execution_internal {
-class BlockMemory;
-}
-namespace gpu_internal {
-class Device;
-}
-
 /** @brief System page size in bytes, used as the minimum alignment of Host tile
  * allocation bases. Thread-safe and independent of the Plan's saved alignment.
  */
@@ -78,9 +72,15 @@ class PHOTOSPIDER_API CpuStorage final
   bool accounted() const noexcept { return lease_ != nullptr; }
   /** @brief Destroys bytes before releasing their reservation; never throws. */
   ~CpuStorage() noexcept;
+  /** @brief Capability checks for a native allocation. The native object
+   * remains borrowed until this storage owner is released. */
+  bool native_domain(const std::shared_ptr<const void>& domain) const noexcept {
+    return domain && native_domain_ == domain;
+  }
+  void* native_handle() const noexcept { return native_owner_.get(); }
+  bool writable_native() const noexcept { return native_writable_; }
 
  private:
-  friend class gpu_internal::Device;
   friend class BufferAllocator;
   friend class MutableBuffer;
   friend class TensorSpan;
@@ -129,11 +129,22 @@ class PHOTOSPIDER_API MutableBuffer final {
   std::size_t size() const noexcept;
   /** @brief Transfers sole mutable ownership into immutable shared storage. */
   std::shared_ptr<const CpuStorage> freeze() && noexcept;
+  /** @brief Adopt host-visible native bytes and an owning release object.
+   * Capacity must cover the logical size. Destroying the last view releases
+   * the native owner before its accounting lease. */
+  static Result<MutableBuffer> adopt_shared(
+      std::uint8_t* bytes, std::uint64_t size, std::uint64_t capacity,
+      std::shared_ptr<void> native, std::shared_ptr<const void> native_domain,
+      std::shared_ptr<const void> accounting_domain,
+      std::shared_ptr<void> lease);
+  /** @brief Retain backing while constructing a private result envelope.
+   * Publication must wait for the mutable producer to finish. */
+  std::shared_ptr<const CpuStorage> backing() const noexcept {
+    return storage_;
+  }
 
  private:
-  friend class gpu_internal::Device;
   friend class BufferAllocator;
-  friend class execution_internal::BlockMemory;
   std::shared_ptr<CpuStorage> storage_;
 };
 
@@ -216,9 +227,7 @@ class PHOTOSPIDER_API BufferAllocator final {
   bool owns_allocation(const CpuStorage& storage) const noexcept;
 
  private:
-  friend class gpu_internal::Device;
   friend class ResourceBudget;
-  friend class execution_internal::BlockMemory;
   Result<MutableBuffer> allocate_aligned_impl(std::uint64_t size,
                                               std::uint64_t alignment,
                                               bool dense_host) const;
@@ -229,12 +238,30 @@ class PHOTOSPIDER_API BufferAllocator final {
                                FailureObserver failure, bool requested) const;
   // Successful allocation increments: payload bytes, then host-owner metadata
   // bytes. Either increment may be zero; this never reserves new capacity.
+ public:
   using AllocationCommit = std::function<void(const std::shared_ptr<void>&,
                                               std::uint64_t, std::uint64_t)>;
-  std::function<Result<MutableBuffer>(std::uint64_t, const Reserve&,
-                                      std::shared_ptr<const void>,
-                                      const AllocationCommit&)>
-      native_allocate_;
+  using NativeAllocate = std::function<Result<MutableBuffer>(
+      std::uint64_t, const Reserve&, std::shared_ptr<const void>,
+      const AllocationCommit&)>;
+  /** @brief Bind a native shared-storage factory to this accounting domain. */
+  BufferAllocator native_adapter(NativeAllocate allocate) const;
+  /** @brief Use a pre-admitted block's per-allocation leases and accounting
+   * hook. */
+  void set_reservations(Reserve host, Reserve shared, AllocationCommit commit);
+  const Reserve& reservation() const { return reserve_; }
+  void set_reservation(Reserve reserve) { reserve_ = std::move(reserve); }
+  const AllocationCommit& allocation_commit() const {
+    return allocation_committed_;
+  }
+  Result<MutableBuffer> allocate_reserved(std::uint64_t bytes,
+                                          std::uint64_t alignment,
+                                          bool dense) const {
+    return allocate_aligned_impl(bytes, alignment, dense);
+  }
+
+ private:
+  NativeAllocate native_allocate_;
   AllocationCommit allocation_committed_;
   Reserve reserve_;
   // Alternate root accounting for a host-visible native allocation. Scoped

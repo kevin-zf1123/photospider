@@ -10,10 +10,10 @@
 #include <utility>
 #include <vector>
 
-#include "core/resource_observation.hpp"
 #include "data/fragment_atlas_work.hpp"
 #include "photospider/core/checked_math.hpp"
 #include "photospider/core/resource_allocator.hpp"
+#include "photospider/core/resource_observation.hpp"
 #include "photospider/core/status_helpers.hpp"
 
 namespace ps {

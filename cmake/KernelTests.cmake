@@ -230,6 +230,9 @@ photospider_add_kernel_test(test_result_objects Photospider::kernel tests/unit/k
 
 photospider_add_kernel_test(test_vulkan_gpu photospider_test_kernel tests/unit/kernel/test_vulkan_gpu.cpp)
 target_include_directories(test_vulkan_gpu PRIVATE src/lib)
+if(PHOTOSPIDER_ENABLE_TSAN)
+  target_compile_definitions(test_vulkan_gpu PRIVATE PHOTOSPIDER_TEST_NO_GLOBAL_ALLOCATOR_INTERPOSITION)
+endif()
 set_tests_properties(test_vulkan_gpu PROPERTIES SKIP_RETURN_CODE 77)
 
 
@@ -317,3 +320,59 @@ set_property(TEST
   APPEND PROPERTY LABELS abi)
 
 photospider_add_kernel_test(test_tensor_work Photospider::kernel tests/unit/kernel/test_tensor_work.cpp)
+
+foreach(plugin IN ITEMS scalar_planner identity_executor obsolete_operation)
+  add_library(${plugin}_fixture MODULE tests/fixtures/${plugin}.c)
+  target_link_libraries(${plugin}_fixture PRIVATE Photospider::operation_sdk)
+  target_compile_definitions(${plugin}_fixture PRIVATE PHOTOSPIDER_OPERATION_PLUGIN_BUILD)
+  set_target_properties(${plugin}_fixture PROPERTIES C_STANDARD 11 C_EXTENSIONS OFF)
+endforeach()
+photospider_add_kernel_test(test_provider_modules Photospider::compiler_default tests/integration/kernel/test_provider_modules.cpp)
+target_link_libraries(test_provider_modules PRIVATE Photospider::execution)
+add_dependencies(test_provider_modules scalar_planner_fixture identity_executor_fixture obsolete_operation_fixture
+  photospider_planner_module photospider_executor_module photospider_mapper_geometry_module)
+target_compile_definitions(test_provider_modules PRIVATE
+  PS_SCALAR_MODULE="$<TARGET_FILE:scalar_planner_fixture>" PS_IDENTITY_MODULE="$<TARGET_FILE:identity_executor_fixture>"
+  PS_DEFAULT_PLANNER="$<TARGET_FILE:photospider_planner_module>" PS_DEFAULT_EXECUTOR="$<TARGET_FILE:photospider_executor_module>"
+  PS_OBSOLETE_MODULE="$<TARGET_FILE:obsolete_operation_fixture>" PS_GEOMETRY_MODULE="$<TARGET_FILE:photospider_mapper_geometry_module>")
+photospider_add_kernel_test(test_tile_mapping Photospider::kernel tests/integration/kernel/test_tile_mapping.cpp)
+photospider_add_kernel_test(test_data_component Photospider::data tests/unit/kernel/test_data_component.cpp)
+add_library(ignored_mapper_failure MODULE tests/fixtures/mapper_module.c)
+target_link_libraries(ignored_mapper_failure PRIVATE Photospider::operation_sdk)
+target_compile_definitions(ignored_mapper_failure PRIVATE PHOTOSPIDER_OPERATION_PLUGIN_BUILD)
+target_compile_definitions(test_tile_mapping PRIVATE PS_ERROR_MAPPER="$<TARGET_FILE:ignored_mapper_failure>"
+  PS_GEOMETRY_MODULE="$<TARGET_FILE:photospider_mapper_geometry_module>")
+add_dependencies(test_tile_mapping ignored_mapper_failure photospider_mapper_geometry_module)
+photospider_add_kernel_test(test_module_retirement Photospider::plugin_host tests/unit/kernel/test_module_retirement.cpp)
+
+foreach(plugin IN ITEMS lowering_module retirement_executor)
+  add_library(${plugin}_fixture MODULE tests/fixtures/${plugin}.c)
+  target_link_libraries(${plugin}_fixture PRIVATE Photospider::operation_sdk)
+  target_compile_definitions(${plugin}_fixture PRIVATE PHOTOSPIDER_OPERATION_PLUGIN_BUILD)
+  target_compile_options(${plugin}_fixture PRIVATE -Wall -Wextra -Wpedantic -Werror)
+  set_target_properties(${plugin}_fixture PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON C_EXTENSIONS OFF)
+endforeach()
+add_library(bad_executor_version_fixture MODULE tests/fixtures/retirement_executor.c)
+target_link_libraries(bad_executor_version_fixture PRIVATE Photospider::operation_sdk)
+target_compile_definitions(bad_executor_version_fixture PRIVATE PHOTOSPIDER_OPERATION_PLUGIN_BUILD PS_BAD_EXECUTOR_VERSION)
+set_target_properties(bad_executor_version_fixture PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON C_EXTENSIONS OFF)
+photospider_add_kernel_test(test_c_lowering Photospider::kernel tests/integration/kernel/test_c_lowering.cpp)
+target_compile_definitions(test_c_lowering PRIVATE PS_LOWERING_MODULE="$<TARGET_FILE:lowering_module_fixture>")
+add_dependencies(test_c_lowering lowering_module_fixture)
+photospider_add_kernel_test(test_executor_retirement Photospider::kernel tests/integration/kernel/test_executor_retirement.cpp)
+target_compile_definitions(test_executor_retirement PRIVATE
+  PS_RETIREMENT_MODULE="$<TARGET_FILE:retirement_executor_fixture>"
+  PS_BAD_EXECUTOR_MODULE="$<TARGET_FILE:bad_executor_version_fixture>"
+  PS_OBSOLETE_MODULE="$<TARGET_FILE:obsolete_operation_fixture>")
+add_dependencies(test_executor_retirement retirement_executor_fixture bad_executor_version_fixture obsolete_operation_fixture)
+set_property(TEST test_c_lowering test_executor_retirement APPEND PROPERTY LABELS abi)
+if(APPLE AND PHOTOSPIDER_ENABLE_METAL)
+  photospider_add_kernel_test(test_dynamic_executor_storage Photospider::compiler_default tests/integration/kernel/test_dynamic_executor_storage.cpp)
+  target_link_libraries(test_dynamic_executor_storage PRIVATE Photospider::execution ${CMAKE_DL_LIBS})
+  target_compile_definitions(test_dynamic_executor_storage PRIVATE
+    PS_DEFAULT_EXECUTOR="$<TARGET_FILE:photospider_executor_module>"
+    PS_PHYSICAL_LIBRARY="$<TARGET_FILE:photospider_executor_physical>")
+  add_dependencies(test_dynamic_executor_storage photospider_executor_module)
+  set_property(TEST test_dynamic_executor_storage PROPERTY SKIP_RETURN_CODE 77)
+  set_property(TEST test_dynamic_executor_storage APPEND PROPERTY LABELS abi native gpu metal)
+endif()

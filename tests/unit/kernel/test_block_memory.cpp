@@ -5,8 +5,8 @@
 #include <thread>
 #include <utility>
 
-#include "execution/block_memory.hpp"
-#include "execution/diagnostics.hpp"
+#include "plugins/executors/physical/block_memory.hpp"
+#include "plugins/executors/physical/diagnostics.hpp"
 #include "support/physical_program_fixture.hpp"
 #include "support/status_check.hpp"
 

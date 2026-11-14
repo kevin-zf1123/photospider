@@ -78,8 +78,8 @@ ps_kernel_status_v8 validate_resources(void*, const void*,
                     ? PS_KERNEL_OK_V8
                     : PS_KERNEL_TYPE_MISMATCH_V8);
 }
-ps_kernel_status_v8 lower(void*, const ps_lowering_query_v8* query,
-                          const ps_operation_builder_v8* builder) {
+ps_kernel_status_v8 lower(void*, const ps_lowering_query_v9* query,
+                          const ps_operation_builder_v10* builder) {
   const ps_placement_v8 placement{PS_BACKEND_CPU_V8,
                                   PS_KERNEL_DOMAIN_HOST_V8,
                                   {"cpu", 3},
@@ -91,7 +91,7 @@ ps_kernel_status_v8 lower(void*, const ps_lowering_query_v8* query,
       std::uint32_t task = PS_ID_NONE_V8;
       auto result = builder->add_task(builder->context, {"scale", 5},
                                       {"scale-f64-v1", 12}, &placement, scratch,
-                                      0, &task);
+                                      0, 8, &task);
       if (result.code)
         return result;
       result = builder->read_input(builder->context, task, 0, request.member,
@@ -167,7 +167,7 @@ ps_kernel_status_v8 prepare_kernel(void*, const ps_kernel_preparation_v8* query,
   return status(PS_KERNEL_OK_V8);
 }
 const auto operation = [] {
-  ps_operation_v8 result{};
+  ps_operation_v10 result{};
   result.struct_size = sizeof(result);
   result.key = {"fixture.resource_scale", 22};
   result.flags = PS_OPERATION_CPU_V8 | PS_OPERATION_DETERMINISTIC_V8 |
@@ -185,11 +185,13 @@ const auto operation = [] {
   return result;
 }();
 void destroy(void*) {}
-const ps_operation_module_v8 api = {
-    sizeof(api), PS_OPERATION_MODULE_ABI_VERSION_8, &operation, 1, nullptr,
-    destroy};  // NOLINT(whitespace/indent_namespace)
+const ps_operation_module_v10 api = {
+    sizeof(api), PS_OPERATION_MODULE_ABI_VERSION_10,
+    &operation,  1,
+    nullptr,     destroy,
+    nullptr,     0};  // NOLINT(whitespace/indent_namespace)
 }  // namespace
-extern "C" PS_OPERATION_MODULE_EXPORT const ps_operation_module_v8*
-ps_operation_module_get_api_v8(void) {
+extern "C" PS_OPERATION_MODULE_EXPORT const ps_operation_module_v10*
+ps_operation_module_get_api_v10(void) {
   return &api;
 }

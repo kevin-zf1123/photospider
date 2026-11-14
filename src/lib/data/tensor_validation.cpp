@@ -1,4 +1,4 @@
-#include "data/tensor_validation.hpp"
+#include "photospider/data/tensor_validation.hpp"
 
 #include <algorithm>
 #include <array>
@@ -13,8 +13,8 @@
 #include <utility>
 #include <vector>
 
-#include "core/dense_layout_validation.hpp"
 #include "photospider/core/checked_math.hpp"
+#include "photospider/core/dense_layout_validation.hpp"
 
 namespace ps::input_internal {
 namespace {

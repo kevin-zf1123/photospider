@@ -7,8 +7,8 @@
 #include <utility>
 #include <vector>
 
-#include "execution/native_gpu.hpp"
 #include "photospider/execution/execution.hpp"
+#include "plugins/executors/physical/native_gpu.hpp"
 #include "support/fixed_native_fixture.hpp"
 #include "support/fixed_operation_fixture.hpp"
 

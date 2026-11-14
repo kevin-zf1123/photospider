@@ -4,6 +4,7 @@
 #include <stdint.h>
 
 #include "photospider/plugin/fixed_invocation_api.h"
+#include "photospider/plugin/fixed_invocation_v9_api.h"
 
 #if defined(_WIN32) && defined(PHOTOSPIDER_OPERATION_PLUGIN_BUILD)
 #define PS_OPERATION_MODULE_EXPORT __declspec(dllexport)
@@ -17,7 +18,7 @@
 extern "C" {
 #endif
 
-#define PS_OPERATION_MODULE_ABI_VERSION_8 8U
+#define PS_OPERATION_MODULE_ABI_VERSION_10 10U
 #define PS_OPERATION_DETERMINISTIC_V8 1U
 #define PS_OPERATION_PURE_V8 2U
 #define PS_OPERATION_CPU_V8 4U
@@ -204,7 +205,14 @@ typedef struct ps_placement_v8 {
   uint32_t backend, domain;
   ps_string_v8 profile, queue;
 } ps_placement_v8;
-typedef struct ps_lowering_query_v8 {
+struct ps_mapping_query_v1;
+typedef struct ps_mapping_need_v1 {
+  void* context;
+  ps_kernel_status_v8 (*emit)(void*, uint32_t input, uint32_t member,
+                              uint32_t schema_only, uint64_t begin,
+                              uint64_t end, uint32_t new_slot);
+} ps_mapping_need_v1;
+typedef struct ps_lowering_query_v9 {
   uint32_t struct_size;
   ps_static_query_v8 facts;
   const void* static_state;
@@ -217,25 +225,30 @@ typedef struct ps_lowering_query_v8 {
   uint32_t input_grid_count;
   const ps_tile_grid_v8* output_grids;
   uint32_t output_grid_count;
-} ps_lowering_query_v8;
+  void* mapping_context;
+  ps_kernel_status_v8 (*map)(void*, ps_string_v8 alias,
+                             const struct ps_mapping_query_v1*,
+                             const ps_mapping_need_v1*);
+} ps_lowering_query_v9;
 
 /** @brief Callback-local checked builder. IDs name this call's private tables.
  * Every function returns a bounded status; the first failure rejects the whole
  * lowering even if ignored. All methods are synchronous on the callback thread.
- * add_task takes Host/Device/Shared scratch bytes and effect=0/1. An effectful
+ * add_task takes Host/Device/Shared scratch bytes, effect=0/1, and invocation
+ * ABI 8 or 9. ABI 9 tasks require a CPU placement. An effectful
  * call emits one terminal effect. add_copy needs one matching read and write.
  * For GPU COPY, finalization declares one output-sized Shared scratch segment
  * per Host endpoint. Preparation consumes this serialized staging bound.
  * set_parameters copies bytes, at most maximum_work in aggregate per lowering.
  * Outputs/private tiles are full fixed-grid tiles with one exclusive producer.
  */
-typedef struct ps_operation_builder_v8 {
+typedef struct ps_operation_builder_v10 {
   uint32_t struct_size;
   void* context;
   ps_kernel_status_v8 (*add_task)(void*, ps_string_v8, ps_string_v8,
                                   const ps_placement_v8*,
-                                  const uint64_t scratch[3], uint32_t,
-                                  uint32_t*);
+                                  const uint64_t scratch[3], uint32_t effect,
+                                  uint32_t invocation_abi, uint32_t*);
   ps_kernel_status_v8 (*add_copy)(void*, const ps_placement_v8*, uint32_t*);
   ps_kernel_status_v8 (*add_temporary)(void*, const ps_schema_v8*, uint32_t*);
   ps_kernel_status_v8 (*read_input)(void*, uint32_t, uint32_t, uint32_t,
@@ -248,7 +261,7 @@ typedef struct ps_operation_builder_v8 {
   ps_kernel_status_v8 (*read_tile)(void*, uint32_t, uint32_t, uint32_t);
   ps_kernel_status_v8 (*depends_on)(void*, uint32_t, uint32_t);
   ps_kernel_status_v8 (*set_parameters)(void*, uint32_t, const void*, uint64_t);
-} ps_operation_builder_v8;
+} ps_operation_builder_v10;
 
 /** @brief Compiled task view. byte_offset is relative to the compiled tile.
  * bytes bounds that tile. A Device input binding may add a checked allocation
@@ -282,6 +295,79 @@ typedef struct ps_kernel_preparation_v8 {
   const struct ps_native_gpu_service_v2* native_gpu;
 } ps_kernel_preparation_v8;
 
+/** @brief Compile-time geometry ABI. Regions use half-open logical intervals.
+ * Source indices supplied to the sink select entries in sources. Each emit
+ * call creates one semantic read slot; intervals within that slot coalesce.
+ * All pointers are callback-local. Work and emitted reads are host-budgeted.
+ */
+#define PS_TILE_MAPPER_ABI_VERSION_1 1U
+typedef struct ps_mapping_region_v1 {
+  uint32_t rank;
+  uint64_t origin[8], extent[8];
+} ps_mapping_region_v1;
+typedef struct ps_mapping_source_v1 {
+  ps_tile_grid_v8 grid;
+  const ps_schema_v8* schema;
+} ps_mapping_source_v1;
+typedef struct ps_mapping_query_v1 {
+  uint32_t struct_size, output, member, source_count;
+  uint64_t tile, tile_extent;
+  ps_mapping_region_v1 region;
+  const ps_schema_v8* output_schema;
+  const ps_mapping_source_v1* sources;
+  const uint64_t* config;
+  uint32_t config_count;
+} ps_mapping_query_v1;
+typedef struct ps_mapping_sink_v1 {
+  uint32_t struct_size;
+  void* context;
+  ps_kernel_status_v8 (*regions)(void*, uint32_t slot,
+                                 const ps_mapping_region_v1*, uint32_t count);
+  ps_kernel_status_v8 (*interval)(void*, uint32_t slot, uint64_t begin,
+                                  uint64_t end);
+  ps_kernel_status_v8 (*descriptor)(void*, uint32_t slot);
+  ps_kernel_status_v8 (*consume)(void*, uint64_t work);
+} ps_mapping_sink_v1;
+typedef ps_kernel_status_v8 (*ps_map_v1)(void*, const ps_mapping_query_v1*,
+                                         const ps_mapping_sink_v1*);
+typedef struct ps_mapper_v1 {
+  uint32_t struct_size, abi_version;
+  ps_string_v8 contract, provider;
+  uint32_t contract_version, revision;
+  void* context;
+  ps_map_v1 solve;
+} ps_mapper_v1;
+
+typedef struct ps_mapper_requirement_v1 {
+  ps_string_v8 alias, contract, provider;
+  uint32_t version, revision;
+} ps_mapper_requirement_v1;
+typedef struct ps_tile_task_v9 {
+  uint32_t struct_size, invocation_abi;
+  ps_string_v8 symbol, contract;
+  ps_placement_v8 placement;
+  uint64_t scratch[3];
+  const void* parameters;
+  uint32_t parameter_bytes;
+} ps_tile_task_v9;
+/** @brief Tilewise lowering for the selected backend. Both callbacks receive
+ * PS_BACKEND_CPU_V8 or PS_BACKEND_GPU_V8 after immutable static state.
+ * configure runs once per lowering; describe runs for each requested output
+ * tile. All query pointers are callback-local. Callbacks may run concurrently
+ * for distinct lowerings and must not retain the supplied queries.
+ */
+typedef struct ps_tilewise_v10 {
+  uint32_t struct_size;
+  ps_string_v8 external_alias;
+  ps_map_v1 local;
+  ps_kernel_status_v8 (*describe)(void*, const ps_static_query_v8*,
+                                  const void* state, uint32_t backend,
+                                  const ps_mapping_query_v1*, ps_tile_task_v9*);
+  /* Optional. Writes up to 64 provider-defined configuration words. */
+  ps_kernel_status_v8 (*configure)(void*, const ps_static_query_v8*,
+                                   const void* state, uint32_t backend,
+                                   uint64_t words[64], uint32_t* count);
+} ps_tilewise_v10;
 /** @brief Immutable module-owned declaration, valid until module destroy.
  * 0..1024 inputs, 1..64 outputs, 0..128 parameters. Repeated inputs use one
  * trailing homogeneous contract after input_count fixed contracts; bounds are
@@ -291,13 +377,14 @@ typedef struct ps_kernel_preparation_v8 {
  * batch axes. PS_REPEATED_MATCH_NONE_V8 permits differing dtype/shape and
  * requires prepare for an active group. A disabled group uses NULL and zero
  * for repeated_input, both bounds and repeated_match. Other match codes fail.
- * A lower callback is mandatory. prepare is optional for
- * fixed prototypes; prepare_kernel is optional for COPY-only/elided calls.
- * Callbacks are reentrant, must not throw across the C ABI, and report statuses
- * from fixed_invocation_api.h. On any prepare/prepare_kernel return, ownership
- * of a populated output state/kernel passes to the host, including failure.
+ * Specify exactly one complete lower callback or tilewise declaration. prepare
+ * is optional for fixed prototypes; prepare_kernel is optional for
+ * COPY-only/elided calls. Callbacks are reentrant, must not throw across the C
+ * ABI, and report statuses from fixed_invocation_api.h. On any
+ * prepare/prepare_kernel return, ownership of a populated output state/kernel
+ * passes to the host, including failure.
  */
-typedef struct ps_operation_v8 {
+typedef struct ps_operation_v10 {
   uint32_t struct_size;
   ps_string_v8 key;
   uint32_t flags, input_count;
@@ -315,11 +402,17 @@ typedef struct ps_operation_v8 {
   ps_kernel_status_v8 (*validate_resources)(void*, const void*,
                                             const ps_resource_view_v8*,
                                             uint32_t);
-  ps_kernel_status_v8 (*lower)(void*, const ps_lowering_query_v8*,
-                               const ps_operation_builder_v8*);
+  ps_kernel_status_v8 (*lower)(void*, const ps_lowering_query_v9*,
+                               const ps_operation_builder_v10*);
   ps_kernel_status_v8 (*prepare_kernel)(void*, const ps_kernel_preparation_v8*,
                                         ps_prepared_kernel_v8*);
-} ps_operation_v8;
+  const ps_tilewise_v10* tilewise;
+  const ps_mapper_requirement_v1* mappings;
+  uint32_t mapping_count;
+  ps_kernel_status_v8 (*prepare_kernel_v9)(void*,
+                                           const ps_kernel_preparation_v8*,
+                                           ps_prepared_kernel_v9*);
+} ps_operation_v10;
 
 /** @brief Transactionally registered trusted native module. The host retains
  * this table and its code until every definition/static/kernel owner retires,
@@ -327,15 +420,17 @@ typedef struct ps_operation_v8 {
  * All tables require naturally aligned pointers and exact ABI/version sizes.
  * Native code is trusted; validation provides no process isolation.
  */
-typedef struct ps_operation_module_v8 {
+typedef struct ps_operation_module_v10 {
   uint32_t struct_size, abi_version;
-  const ps_operation_v8* operations;
+  const ps_operation_v10* operations;
   uint32_t operation_count;
   void* context;
   void (*destroy)(void*);
-} ps_operation_module_v8;
-PS_OPERATION_MODULE_EXPORT const ps_operation_module_v8*
-ps_operation_module_get_api_v8(void);
+  const ps_mapper_v1* mappers;
+  uint32_t mapper_count;
+} ps_operation_module_v10;
+PS_OPERATION_MODULE_EXPORT const ps_operation_module_v10*
+ps_operation_module_get_api_v10(void);
 
 #ifdef __cplusplus
 }
