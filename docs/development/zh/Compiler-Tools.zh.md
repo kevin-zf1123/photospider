@@ -2,7 +2,11 @@
 
 `psc` 是编译驱动程序；`psx` 加载并执行已编译 Plan。前端、校验、优化、规划和执行仍是可独立调用的库组件。驱动程序负责路径、JSON manifest、诊断、会话保留和输出发布。其职责划分参考 Clang 的编译驱动设计，由主目标决定执行哪些库阶段；实现不依赖 LLVM 或 LLVM IR。
 
-驱动程序使用物理 Plan v5 和固定 invocation ABI 8。外部算子通过 [operation module ABI 8](../../kernel-architecture/zh/Plugin-ABI.zh.md)提供静态 preparation、task lowering 和固定 kernel。只返回输入的 IR 可以使用空算子 registry 运行。
+驱动程序使用物理 Plan v5 和 CPU fixed invocation ABI 8/9。外部算子通过 [operation module ABI 10](../../kernel-architecture/zh/Plugin-ABI.zh.md)提供静态 preparation、task lowering 和固定 kernel。只返回输入的 IR 可以使用空算子 registry 运行。
+
+## 选择 planner 和 executor
+
+`psc input.json --load-planner ./planner.so --planner static-tiles -o image.psxp` 使用所选 planner。如 workflow 需要外部求解器，用 `--load-ops` 传入 mapper 模块。`psx image.psxp --load-executor ./executor.so --executor physical --bindings inputs.json -o results` 选择 executor。两类 provider 加载选项都可重复指定不同模块。宿主优先使用显式注册项，再补齐默认项；两个显式模块的同名 provider 会被拒绝。每个路径表示调用方选择的可信库。
 
 ## 构建与算子加载
 
@@ -12,7 +16,7 @@
 cmake --build build/kernel-dev --target psc psx -j 2
 ```
 
-`PHOTOSPIDER_BUILD_OPS=ON` 时，工具先注册内置算子，再按命令行顺序加载显式 `--load-ops PATH` 指定的受信任进程内 ABI 8 module；OFF 时 registry 初始为空。加载后冻结 registry。重复库、重复算子名称和不兼容契约均失败。`--list-operations` 输出已加载名称、traits 版本与 CPU/GPU 能力。Artifact 不指定或加载库。`--resources` 提供不可变静态资源身份与字节；每次运行的 Tensor 输入由 `psx --bindings` 提供。
+`PHOTOSPIDER_BUILD_OPS=ON` 时，工具先注册内置算子，再按命令行顺序加载显式 `--load-ops PATH` 指定的受信任进程内 ABI 10 module；OFF 时 registry 初始为空。加载后冻结 registry。重复库、重复算子名称和不兼容契约均失败。`--list-operations` 输出已加载名称、traits 版本与 CPU/GPU 能力。Artifact 不指定或加载库。`--resources` 提供不可变静态资源身份与字节；每次运行的 Tensor 输入由 `psx --bindings` 提供。
 
 工具私有 JSON codec 依赖 yyjson 0.13.0，固定提交 `6447536015f3d600f3d65323b10976103b337ca7`，附 MIT 许可证。配置前，按照 [yyjson 准备说明](../../../third_party/YYJSON.md)，将 `yyjson.c`、`yyjson.h` 和 `LICENSE` 放到 `third_party/yyjson/`。该目录由 Git 忽略，不包含在仓库检出内容中；CMake 不下载源码。设置 `PHOTOSPIDER_BUILD_TOOLS=OFF` 可关闭工具及其 yyjson 依赖。yyjson 不进入内核公共头文件或导出依赖。不支持 YAML 输入。
 
@@ -67,9 +71,9 @@ psc input.json -O optimize -O optimize --save-ir 1=once.psir -o twice.psxp
 
 `psc --list-planners` 列出注册名称、版本、说明和支持的 IR 形式。`psc --help-planner NAME` 显示指定定义及共享规划参数。这些查询无需输入文件，不加载算子库，不调用规划回调。未知帮助名称返回参数错误。`--print-pipeline` 查找所选定义并显示其名称与版本。
 
-库调用通过 `PlanningOptions::planner = "static-tiles"` 选择名称，`Compiler::plan` 和 `compile` 均使用该选项。将冻结的 `PlannerRegistry` 作为 `Compiler` 构造函数第三个参数传入即可使用自定义后端；省略时使用惰性初始化的默认目录。注册时拒绝重复名称、缺失回调和非法 IR 形式。`--backend` 独立控制 CPU/GPU placement。
+库调用通过 `PlanningOptions::planner = "static-tiles"` 选择名称，`Compiler::plan` 和 `compile` 均使用该选项。将冻结的 `PlannerRegistry` 作为 `Compiler` 构造函数第三个参数传入即可使用自定义后端；省略的目录会在构造时从默认目录补齐。注册时拒绝重复名称、缺失回调和非法 IR 形式。`--backend` 独立控制 CPU/GPU placement。
 
-`PlannerDefinition` 回调接收原始 `ValidatedIR`、本次回调专用的 `PlanBuilder` 和共享 `PlanningOptions`。Builder 提供只读链接声明和可编辑的物理 Task/Tile/Call/Block 表。编译器检查 CFG、schema、算子契约、placement、归一化输出选择及生成的 task 数量后发布 Plan。后端负责映射的语义正确性。参见[planner 构造契约](../../kernel-architecture/zh/Compiler-and-Execution.zh.md#物理-plan)。CLI 目录包含编译时注册的后端；`--load-ops` 只注册算子库。
+`PlannerDefinition` 回调接收原始 `ValidatedIR`、本次回调专用的 `PlanBuilder` 和共享 `PlanningOptions`。Builder 提供只读链接声明和可编辑的物理 Task/Tile/Call/Block 表。编译器检查 CFG、schema、算子契约、placement、归一化输出选择及生成的 task 数量后发布 Plan。后端负责映射的语义正确性。参见[planner 构造契约](../../kernel-architecture/zh/Compiler-and-Execution.zh.md#物理-plan)。CLI 先加载显式指定的 provider，再补齐缺失的默认项；`--load-ops` 注册算子和 mapper。
 
 输出选择保留控制流和 mandatory effect task。库的 `PlanningOptions::output_names` 用 `nullopt` 表示所有输出、空 vector 表示无输出。库 `output_requests` 中未出现的已选输出表示全部 tiles。CLI 请求 manifest 显式选择其列出的名称。运行请求只能缩小已保存的覆盖。
 
@@ -102,16 +106,16 @@ Plan 的每个输入必须恰好绑定一次，包括所选输出未使用的输
 
 | 源码区域 | 职责 |
 | --- | --- |
-| `src/tools/psc/` | 编译 invocation、动作图、IR 会话与 DAG JSON 前端 I/O。 |
-| `src/tools/psx/` | 执行 invocation、Plan 加载、运行绑定与 Results 导出。 |
-| `src/tools/common/` | 参数词法处理、诊断、进程信号、文件发布、JSON/schema 辅助、算子加载、资源与请求 manifest。 |
-| `src/lib/compiler/frontend.cpp`、`frontend_registry.cpp`、`frontend/DAG/dag.cpp` | 前端名称分发、注册目录、统一 IR 绑定及 DAG lowering。 |
-| `src/lib/compiler/optimizer.cpp` | 组织变换、输出校验与公开接口保持检查。 |
-| `src/lib/compiler/optimizer_registry.cpp`、`optimizers/deduplicate.cpp` | 注册目录/参数 schema，以及独立的可选示例变换。 |
-| `src/lib/compiler/planner.cpp`、`planner_registry.cpp`、`planners/static_tiles.cpp` | 按名称分发后端、注册目录、结果校验及注册的静态 tile 规划实现。 |
-| `src/lib/compiler/plan_linking.cpp`、`plan_validation.cpp`、`plan_selection.cpp` | 已保存 Plan 的链接、物理表校验与不调用 lowerer 的覆盖缩小。 |
+| `apps/psc/` | 编译 invocation、动作图、IR 会话与 DAG JSON 前端 I/O。 |
+| `apps/psx/` | 执行 invocation、Plan 加载、运行绑定与 Results 导出。 |
+| `apps/common/` | 参数词法处理、诊断、进程信号、文件发布、JSON/schema 辅助、算子加载、资源与请求 manifest。 |
+| `plugins/compiler/default/frontend.cpp`、`host/frontend_registry.cpp`、`plugins/frontends/dag/dag.cpp` | 前端名称分发、注册目录、统一 IR 绑定及 DAG lowering。 |
+| `plugins/compiler/default/optimizer.cpp` | 组织变换、输出校验与公开接口保持检查。 |
+| `host/optimizer_registry.cpp`、`plugins/optimizers/deduplicate/deduplicate.cpp` | 注册目录/参数 schema，以及独立的可选示例变换。 |
+| `plugins/compiler/default/planner.cpp`、`host/planner_registry.cpp`、`plugins/planners/static_tiles/static_tiles.cpp` | 按名称分发后端、注册目录、结果校验及注册的静态 tile 规划实现。 |
+| `sdk/program/plan_linking.cpp`、`plan_validation.cpp`、`plan_selection.cpp` | 已保存 Plan 的链接、物理表校验与不调用 lowerer 的覆盖缩小。 |
 
-公共工具库不持有编译会话或执行 context。仅为绑定或规划构造库 `Compiler` 不会初始化默认 optimizer 目录；显式优化或查询目录时才需要它。
+公共工具库不持有编译会话或执行 context。`Compiler` 的便捷构造函数从内置默认项补齐缺失的 frontend、optimizer 和 planner 目录。使用 `CompilerComponents` 可以显式提供目录；已保存 Plan 通过 `ProgramServices` 导入，独立于这些编译器目录。
 
 ## 文件、限制与诊断
 

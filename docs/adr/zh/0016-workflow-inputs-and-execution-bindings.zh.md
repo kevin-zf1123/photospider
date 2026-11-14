@@ -8,7 +8,7 @@ Workflow declaration 提供名称与 Result schema；每个 Run 按精确名称�
 `ResultRef`。编译器在执行前固定输入读取、物理 layout、内存 domain、COPY task
 和控制流。Payload owner 不进入编译产物与 identity。
 
-当前 operation module 与 fixed invocation 均使用 ABI 8。算子 lower 为物理 task，
+当前 operation module 使用 ABI 10，CPU fixed invocation 支持 ABI 8 和 9。算子 lower 为物理 task，
 并 prepare 不可变 kernel。Invocation 借用 Plan 固定的 input/output view 和
 scratch；payload 不能增加 producer task 或扩大已编译读取。
 

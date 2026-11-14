@@ -42,4 +42,4 @@ Workflow 输入 id 和 node id 分属不同命名空间。最多 4096 个输入�
 
 ## 5. 限制与非目标
 
-Result 不具有持久序列化或恢复契约。静态 schema 和 tile 几何不意味着稠密驻留。Batch 轴不携带时间含义。内核不提供动态 field 行或独立的整体 Result 执行模式。已实现的 operation module 与 fixed invocation 契约使用 ABI 8，精确大小与所有权见 [Plugin ABI](Plugin-ABI.zh.md)。ADR 0022 中历史性的 staged/前缀协商提议不定义当前实现。
+Result 不具有持久序列化或恢复契约。静态 schema 和 tile 几何不意味着稠密驻留。Batch 轴不携带时间含义。内核不提供动态 field 行或独立的整体 Result 执行模式。Operation module 使用 ABI 10。CPU kernel 使用 fixed invocation ABI 8 或 9，GPU kernel 使用 fixed invocation ABI 8。精确大小与所有权见 [Plugin ABI](Plugin-ABI.zh.md)。ADR 0022 中历史性的 staged/前缀协商提议不定义当前实现。

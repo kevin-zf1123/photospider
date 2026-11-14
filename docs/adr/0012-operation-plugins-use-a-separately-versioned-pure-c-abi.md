@@ -1,7 +1,7 @@
 # ADR 0012: Operation Plugins Use Versioned C Contracts
 
 - Status: Accepted
-- Implementation note (2026-10-20): the pure C boundary remains the accepted decision. Package 0.39.0 implements operation module ABI 8 and fixed invocation ABI 8. [ADR 0022](0022-freeze-operation-c-abi-v3.md) remains a historical Proposed continuation design; its staged records and prefix-negotiation proposal are not the current ABI.
+- Implementation note (2026-11-13): the pure C boundary remains the accepted decision. Package 0.40.0 implements operation module ABI 10 and fixed invocation ABI 8/9. [ADR 0022](0022-freeze-operation-c-abi-v3.md) remains a historical Proposed continuation design; its staged records and prefix-negotiation proposal are not the current ABI.
 
 ## 1. Core summary
 
@@ -22,11 +22,11 @@ Module code remains mapped while any definition, static preparation or prepared 
 ```c
 #include "photospider/plugin/operation_module_api.h"
 
-PS_OPERATION_MODULE_EXPORT const ps_operation_module_v8*
-ps_operation_module_get_api_v8(void);
+PS_OPERATION_MODULE_EXPORT const ps_operation_module_v10*
+ps_operation_module_get_api_v10(void);
 ```
 
-The standalone C11 header defines exact-size module ABI 8 and includes fixed invocation ABI 8. OperationTraits version is 30. Native shader preparation uses the separately versioned native kernel service ABI 2. There is no current data-provider C table.
+The standalone C11 header defines exact-size module ABI 10 and includes the typed fixed invocation 8 and 9 interfaces. OperationTraits version is 30. Native shader preparation uses the separately versioned native kernel service ABI 2. There is no current data-provider C table.
 
 A module declares operation contracts and static prepare/resource-validation/lowering/kernel-preparation callbacks. The host validates versions and record sizes, alignment, pointer/count pairs, bounded strings and arrays, closed enum/flag combinations, checked arithmetic, required callbacks and cleanup ownership. The module header is checked before attaching its destroy hook and reading nested records. All declarations validate in a private candidate; a malformed declaration, duplicate key or freeze race publishes no partial registry update.
 

@@ -40,78 +40,61 @@ Public headers use public kernel types and retain native implementation objects 
 | `compiler/compiler.hpp` | Stage orchestration over frozen registries. |
 | `compiler/artifact.hpp` | IR/Plan text import, export, inspection and file helpers. |
 
-Execution headers depend directly on the Plan model. Callers that instantiate `Compiler` include `compiler/compiler.hpp` or the kernel umbrella explicitly. Compiler construction and artifact import initialize only the catalogs required by the requested stage.
+Execution headers depend directly on the Plan model. Callers that instantiate `Compiler` include `compiler/compiler.hpp` or the kernel umbrella explicitly. The default `Compiler` constructor assembles frontend, optimizer and planner catalogs; the `CompilerComponents` constructor accepts an explicit component selection. Plan import uses the frozen operation catalog and `ProgramServices` without constructing a compiler.
 
-| Private source | Responsibility |
+## Source ownership and applications
+
+| Source tree | Responsibility |
 | --- | --- |
-| `src/lib/compiler/compiler.cpp` | Registry ownership and analyze/optional-optimize/plan orchestration. |
-| `frontend.cpp`, `frontend_registry.cpp`, `frontend/DAG/dag.cpp` | Frontend dispatch, catalog and DAG dependency-path lowering. |
-| `ir_validation.cpp`, `dependency_paths.hpp` | Common IR validation, operation binding and private path lowering. |
-| `optimizer.cpp`, `optimizer_registry.cpp`, `optimizers/deduplicate.cpp` | Transform invocation, output validation, catalog and optional deduplication. |
-| `planner.cpp`, `planner_registry.cpp`, `planners/static_tiles.cpp` | Backend dispatch, catalog and static instruction generation. |
-| `plan_linking.cpp`, `plan_validation.cpp`, `plan_selection.cpp` | Declaration/placement linking, saved instruction verification and coverage narrowing. |
-| `static_mapping.cpp`, `identity.cpp` | Static dependency helpers and canonical content/cache identities. |
-| `artifact.cpp`, `artifact_text.cpp` | Artifact linking and bounded text grammar. |
+| `src/lib/core/`, `src/lib/data/` | Status, cancellation, resource accounting, Tensor/Result storage, views and Region primitives. Data includes only core/data headers. |
+| `sdk/model/` | Workflow document/context and physical Task/Tile/Call/Block models and validation. |
+| `sdk/operation/` | Operation registration, C ABI adapters, static preparation, checked program construction and mapping dispatch. |
+| `sdk/program/` | IR binding, Plan linking/validation/selection, canonical identities and artifact codecs. |
+| `sdk/execution/` | Provider-facing execution API, Plan/data services, binding preflight and host thread retirement. |
+| `plugins/compiler/default/` | Compiler stage orchestration and frontend/optimizer/planner dispatch. |
+| `plugins/frontends/dag/`, `plugins/optimizers/deduplicate/`, `plugins/planners/static_tiles/` | Concrete DAG frontend, optional deduplication and static tile planner. |
+| `plugins/executors/physical/` | Physical scheduling, block memory, cache, CPU workers and optional native GPU execution. |
+| `plugins/mappers/geometry/` | Compile-time geometry solvers and their registration/module entries. |
+| `host/` | Catalog assembly, default component factories, provider loading, planner module bridge and host-owned Metal callbacks. |
+| `apps/common/`, `apps/psc/`, `apps/psx/`, `apps/benchmark/` | Shared CLI I/O, compiler driver, executor driver and optional benchmark client. |
+| `plugins/ops/common/domain/`, `plugins/ops/<NN-family>/` | Operations-domain SDK and bundled operation implementations. |
+| `tests/fixtures/`, `tests/unit/kernel/`, `tests/integration/kernel/` | Synthetic ABI producers and maintained kernel behavior tests. |
+| `tests/package/`, `tests/tools/` | Package metadata contracts and application behavior tests. |
 
-The source names in the last seven rows are relative to `src/lib/compiler/`. Plan import links saved declarations and verifies saved code without invoking an optimizer, mapper or planner. Full stage and lifetime contracts are in [Compiler and Execution](../kernel-architecture/Compiler-and-Execution.md).
+Plan import in `sdk/program/` links saved declarations and verifies the physical tables without invoking a frontend, optimizer, mapper or planner. The execution SDK consumes that bound Plan and an explicitly selected provider. The physical provider owns scheduling and GPU implementation dependencies. `src/lib/core/` and `src/lib/data/` have no reverse dependency on the compiler, operation catalog or executor.
 
-## Private layout and applications
+The common CLI library owns neither a compiler session nor an execution context. `psc` links compiler and compile-time mapper components; `psx` links execution components and can import `.psxp` without a compiler or mapper catalog. Their entry points dispatch into separate typed driver libraries. CLI JSON uses the private, pinned yyjson source described in [YYJSON.md](../../third_party/YYJSON.md); its declarations do not enter public headers.
 
-```text
-src/lib/
-  core/          checked arithmetic, status factories and resource primitives
-  data/          Tensor/Result storage, views, regions and budgets
-  compiler/      stage implementations and artifact codecs
-  graph/         workflow document/context implementation
-  execution/     Plan interpreter, scheduling, publication and cache
-  plugin/        registries, DSO loading and C ABI host adapters
-
-src/tools/
-  common/        CLI parsing, diagnostics, signals, JSON and file/manifests I/O
-  psc/           compiler driver, action graph, IR session and DAG JSON input
-  psx/           executor driver, runtime bindings and Result export
-  benchmark/     optional raw benchmark client implementation
-
-plugins/ops/common/domain/ operations-domain SDK implementations
-plugins/ops/<NN-family>/   bundled operation implementations and helpers
-
-tests/fixtures/            synthetic operations and ABI modules
-tests/unit/kernel/       kernel behavior tests
-tests/integration/kernel/ kernel execution and ABI behavior tests
-tests/package/           package metadata contracts
-tests/tools/             application and optional benchmark behavior tests
-```
-
-`src/lib/core/` contains primitives independent of other kernel modules. Data implementations include only core/data headers. Compiler stages use operation metadata and static preparation; execution consumes the Plan and invokes operation programs. The common CLI library owns neither a compiler session nor an execution context. `psc` and `psx` have separate typed invocations and driver libraries; the entry points only dispatch into those drivers.
-
-CLI JSON uses the private, pinned yyjson source described in [YYJSON.md](../../third_party/YYJSON.md). Its declarations do not enter installed kernel headers. File formats and application contracts are documented in [Compiler Tools](../development/Compiler-Tools.md) and [Compiler Tool Formats](../development/Compiler-Tool-Formats.md).
+Full stage/lifetime contracts are in [Compiler and Execution](../kernel-architecture/Compiler-and-Execution.md). File and application contracts are in [Compiler Tools](../development/Compiler-Tools.md) and [Compiler Tool Formats](../development/Compiler-Tool-Formats.md).
 
 ## Targets and dependency direction
 
-| Target | Installation condition | Role |
+The component definitions in `cmake/KernelComponents.cmake` establish these boundaries. Component names below use the `Photospider::` namespace; executable and private target names are written explicitly.
+
+| Target | Build condition | Role |
 | --- | --- | --- |
-| `photospider` / `Photospider::kernel` | always | Embedded compiler/executor and operation ABI host. |
-| `Photospider::operation_sdk` | always | Header-only trusted operation DSO ABI. |
-| `Photospider::ops_sdk` | `PHOTOSPIDER_BUILD_OPS_SDK=ON` | Domain contracts, resources and numerical helpers over public kernel APIs. |
-| `Photospider::ops`, `Photospider::ops_headers` | `PHOTOSPIDER_BUILD_OPS=ON` | Separate bundled implementation library and authoring include root. |
-| `Photospider::benchmark_tools` | `PHOTOSPIDER_BUILD_BENCHMARK_TOOLS=ON` | Raw benchmark client over public kernel APIs. |
-| `psc`, `psx` | `PHOTOSPIDER_BUILD_TOOLS=ON` | Compiler and executor executables. |
-| `photospider_cli_json`, `photospider_cli_common`, `photospider_psc`, `photospider_psx` | build only | Private CLI support and driver libraries. |
-| Test executables and fixture modules | build only | Maintained program behavior and package contracts. |
+| `data`, `model` | always | Storage/resource primitives and physical/workflow models. |
+| `plugin_host`, `operation_runtime`, `program` | always | Provider lifetime/loading, operation contracts and bound Plan/artifact services. |
+| `operation_sdk` | always | Header-only C operation/provider ABI; pure C producers need no kernel linkage. |
+| `compiler`, `compiler_default` | `PHOTOSPIDER_BUILD_COMPILER=ON` | Compiler orchestration; the default assembly adds DAG, deduplicate and static-tiles providers. |
+| `frontend_dag`, `optimizer_deduplicate`, `planner_static_tiles`, `mapper_geometry` | compiler enabled | Independently linkable compile-time implementations. |
+| `execution`, `executor_physical`, `execution_default` | `PHOTOSPIDER_BUILD_EXECUTOR=ON` | Provider-facing execution SDK, physical implementation and their default assembly. |
+| `metal_host` | executor and Metal enabled on Apple | Host-owned Metal completion and page-release callbacks. |
+| `kernel` (`photospider`) | compiler and executor enabled | Interface convenience target over `compiler_default` and `execution_default`. |
+| `ops_sdk` | `PHOTOSPIDER_BUILD_OPS_SDK=ON` | Domain contracts, immutable resources and numerical helpers. |
+| `ops_runtime`, `ops_headers` | `PHOTOSPIDER_BUILD_OPS=ON` | Runtime registration/implementations and public bundled-operation headers. |
+| `ops` | ops and compiler enabled | Runtime ops plus workflow authoring helpers and the default geometry mapper catalog. |
+| `benchmark_tools` | `PHOTOSPIDER_BUILD_BENCHMARK_TOOLS=ON` | Optional raw benchmark client. |
+| `psc`, `psx` | tools enabled plus the corresponding compiler/executor option | Separate compiler and executor executables. |
+| `result_files` | tools and executor enabled | Installed static Result file-export library. |
+| `photospider_cli_common`, `photospider_cli_json` | tools enabled | Installed/exported support archives for CLI I/O and JSON. |
+| `photospider_psc`, `photospider_psx`, test fixtures | build only | Private drivers and focused behavior tests. |
 
-Tools default to ON; bundled operations and benchmark tools default to OFF. Bundled operations require the ops SDK. Enabling ops also links their registration into the CLI environment; a kernel-only CLI accepts explicitly loaded operation libraries.
+Compiler, executor and tools default to ON; bundled operations and benchmark tools default to OFF. Bundled operations require the ops SDK. CLI environment code registers `ops_runtime` when enabled. The compile-time `ops` convenience library adds `compiler_default` and `mapper_geometry`; execution-only use of `ops_runtime` does not introduce those dependencies.
 
-```text
-psc driver -> compiler/artifact APIs -> operation metadata and preparation
-psx driver -> artifact/execution APIs -> operation runtime programs
-both drivers -> common CLI I/O -> private yyjson
+A compiler-only build disables `PHOTOSPIDER_BUILD_EXECUTOR`; an execution-only build disables `PHOTOSPIDER_BUILD_COMPILER`. The latter does not create `test_cli_io`, which exercises both compiler and executor APIs. Dynamic provider tests link `compiler_default` and `execution` explicitly and build the provider module as a separate dependency, so the host does not preload the physical executor.
 
-bundled ops -> ops SDK -> public kernel APIs
-benchmark client -> public kernel APIs
-photospider-daemon -> installed Photospider::kernel
-```
-
-The kernel has no dependency on tool drivers, bundled operations or daemon source. Installation-consumer testing is excluded during kernel development; retained package tests check package metadata. Native operation loading is a trusted in-process boundary.
+Shared `ops` retains the package VERSION/SOVERSION and hidden implementation visibility. Its static form retains position-independent code. Kernel components have no dependency on CLI drivers, bundled operations or daemon source. Installation-consumer testing remains excluded during kernel development; retained package tests check package metadata. Native modules are trusted in-process extensions.
 
 ## Naming and documentation
 

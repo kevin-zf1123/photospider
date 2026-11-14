@@ -31,7 +31,7 @@ Preparation 将每个 task 链接到不可变 kernel。Run 将就绪 CPU task �
 
 ## 3. 契约与接口
 
-Operation module 使用 `photospider/plugin/operation_module_api.h`（ABI 8）。固定 invocation 使用 `fixed_invocation_api.h`（ABI 8）。Kernel preparation 可以从 `native_kernel_api.h` 借用 `ps_native_gpu_service_v2`：
+Operation module 使用 `photospider/plugin/operation_module_api.h`（ABI 10）。固定 invocation 使用 `fixed_invocation_api.h`（ABI 8）。Kernel preparation 可以从 `native_kernel_api.h` 借用 `ps_native_gpu_service_v2`：
 
 ```c
 #include <photospider/plugin/native_kernel_api.h>

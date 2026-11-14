@@ -140,4 +140,4 @@ Value kind 为 Input（0）、Argument（1）、Produced（2）和 Imported（3�
 
 产物文本上限为 64 MiB。物理表共享 4194304 条记录上限，物理引用共享 16777216 项上限。Task 参数字节与结构校验共同消耗独立的 268435456 单位 work 预算，不计为依赖边。导入与导出使用同一物理校验契约。
 
-文本支持分号行注释和转义字符串，参数类型为 `i64`、`f64`、`f64_bits`、`bool`、`string`，编码保留 IEEE-754 位。精确有界语法见 `src/lib/compiler/artifact_text.cpp`，往返测试见 `tests/unit/kernel/test_physical_compiler.cpp`。v1–v4 拒绝并提示重新导出。Identity 检测内容变化，不认证代码或文件。Package、document schema、C ABI、artifact 版本是独立版本轴。
+文本支持分号行注释和转义字符串，参数类型为 `i64`、`f64`、`f64_bits`、`bool`、`string`，编码保留 IEEE-754 位。精确有界语法见 `sdk/program/artifact_text.cpp`，往返测试见 `tests/unit/kernel/test_physical_compiler.cpp`。v1–v4 拒绝并提示重新导出。Identity 检测内容变化，不认证代码或文件。Package、document schema、C ABI、artifact 版本是独立版本轴。

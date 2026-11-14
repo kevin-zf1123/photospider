@@ -2,9 +2,31 @@
 
 [Chinese reader version](zh/Plugin-ABI.zh.md).
 
+## Provider selection and compilation
+
+`Photospider::data` owns storage, Result publication and resource accounting. `Photospider::model`, `operation_runtime` and `program` add the physical tables, operations and bound Plan services in dependency order. An execution-only host imports a v5 Plan with its frozen runtime operation catalog and links the executor SDK. A compiler-only host can bind, plan and export with its compiler components. `Photospider::kernel` supplies the default compiler and physical executor. `Photospider::ops_runtime` registers built-in operations for execution. `Photospider::ops` also supplies the authoring helpers and default compile-time mapping catalog.
+
+A planner module exports `ps_planner_module_get_api_v1`. Its callback can inspect calls and grids, request static per-call lowering, and append tasks or submit complete physical tables. Physical table transport uses the physical block grammar, its call bindings and the host's construction limits. The host validates the resulting graph, output coverage, inputs and resources before publishing an immutable Plan. A linked static-tiles planner and its dynamic module use the same graph expansion code.
+
+Set `PHOTOSPIDER_BUILD_EXECUTOR=OFF` to build only the compiler CLI, or `PHOTOSPIDER_BUILD_COMPILER=OFF` to build only the executor CLI. `Photospider::execution` accepts an explicit provider registry. `Photospider::execution_default` adds the linked physical implementation.
+
+An executor module exports `ps_executor_module_get_api_v2`. The registry checks its Plan version, backends, memory domains and invocation mask before preparation. A prepared owner belongs to the creating context. The submission snapshot is borrowed synchronously. An asynchronous provider retains the snapshot services it needs, owns each accepted task through completion, and drains its work and observers on close. Host services expose the compiled tables, prepared kernels, result construction and retained backing. A provider that needs to publish an intermediate call export can query the pure C service `PS_EXECUTOR_VALUE_RESULTS_V1` with revision `"1"`. Its `make_result` accepts the physical value ID and creates a builder with the bound schema and the context’s resource budget. The named result builder serves final outputs. The resource root retains the provider lease for native allocations. A host joiner keeps dynamically loaded worker code live through thread exit. Metal completion and page-release blocks are owned by the host. The bundled physical module negotiates a same-build SDK extension before accessing shared Program, Result and resource objects. A different SDK build returns a type mismatch. Independent C executors use the versioned host services directly.
+
+### Executor retirement events
+
+`ps_executor_module_v2` and `ps_executor_submit_v2` use executor ABI 2. The unchanged host, Plan, result and owner records retain version 1. The loader requires `ps_executor_module_get_api_v2`; an old entry is rejected without fallback.
+
+`ps_executor_submit_v2::retire` receives `call, outcome, failed_task, status` after the sequence, activation and source-call identifiers. `PS_EXECUTOR_TASK_NONE_V2` is `UINT32_MAX`; task zero is valid. A Failed event requires a non-OK status and a task belonging to that call, with no values. Succeeded and Elided require OK and NONE; Elided also has no values. Call/source/task membership and the envelope are checked against the retained submitted Plan even when no observer is installed. Invalid events return `InvalidArgument`. Success supplies exactly the declared value IDs, with sealed Results matching the compiled schemas and coverage.
+
+The host copies the failed task into `CallRecord::failed_task` and derives its status detail as Backend/Run with the supplied source call and task IDs. Status code, reason and opaque domain code are preserved by the normal status conversion. Asynchronous providers retain submission services through their use and finish observer delivery before join/close returns. An observer exception closes delivery for that Run. After accepted work drains, the host preserves the failing source call and sequence in the terminal error.
+
+### Operation and mapper selection
+
+An operation module exports operations, mappers, or both through `ps_operation_module_get_api_v10`. Duplicate definitions or a concurrent freeze reject the transaction. Each operation supplies a complete lowerer or a tilewise task description. Direct mapping converts the output's logical region through each projected input grid. Local or external solvers emit ordered source slots containing tile intervals or schema-only reads. External requirements identify an alias, contract, provider, contract version and implementation revision. A planning session resolves them when demanded and accounts for repeated work. The bound v5 Plan records the resulting reads, writes, placement, parameters and scratch. Import, selection and kernel preparation use those records independently of the mapping catalog.
+
 ## Scope and ownership
 
-Trusted native modules export operation module ABI 8. The loader copies static declarations into `OperationRegistry`; C modules and C++ `OperationDefinition` callbacks then use the same `OperationProgram` builder, physical Plan validator and fixed invocation ABI. OperationTraits uses version 30.
+Trusted native modules export operation module ABI 10. The loader copies static declarations into `OperationRegistry`; C modules and C++ `OperationDefinition` callbacks then use the same `OperationProgram` builder, physical Plan validator and fixed invocation ABI. OperationTraits uses version 30.
 
 The registry retains the module while definitions, static preparations or prepared kernels need its code. The compiler owns static metadata and the physical task graph. `PreparedPlan` owns linked kernels and resources; each Run owns its bindings, output allocations, scratch and completion state. CPU kernels receive fixed affine views and write preallocated outputs under the [unchecked execution contract](Compiler-and-Execution.md).
 
@@ -14,13 +36,13 @@ The registry retains the module while definitions, static preparations or prepar
 #include "photospider/plugin/operation_module_api.h"
 
 /* The module supplies this function and an immutable table. */
-PS_OPERATION_MODULE_EXPORT const ps_operation_module_v8*
-ps_operation_module_get_api_v8(void);
+PS_OPERATION_MODULE_EXPORT const ps_operation_module_v10*
+ps_operation_module_get_api_v10(void);
 ```
 
 `operation_module_api.h` is a standalone C11 header. It includes `fixed_invocation_api.h` for status, layout, invocation and prepared-kernel records. Define `PHOTOSPIDER_OPERATION_PLUGIN_BUILD` when building the producer. `Photospider::operation_sdk` supplies the include directory and requires no kernel linkage for a C producer.
 
-The module table contains its exact `struct_size`, `abi_version = 8`, 1..1024 operation records, a context and a required `destroy` callback. Each operation declares its key, capability flags, input contracts, output prototypes, scalar parameter vocabulary, optional static preparation and resource validation, mandatory lowering, and optional kernel preparation. COPY-only or entirely elided operations may omit kernel preparation.
+The module table contains its exact `struct_size`, `abi_version = 10`, 0..1024 operation records and 0..1024 mapper records (at least one definition), a context and a required `destroy` callback. Each operation declares its key, capability flags, input contracts, output prototypes, scalar parameter vocabulary, optional static preparation and resource validation, a lowerer or tilewise descriptor, and optional kernel preparation. COPY-only or entirely elided operations may omit kernel preparation.
 
 | Record | Static meaning |
 | --- | --- |
@@ -53,7 +75,7 @@ Schema scopes use `PS_SCHEMA_COMPLETE_BUNDLE_V8 = 1`, `PS_SCHEMA_INDEPENDENT_CHU
 
 An operation has at most 1024 inputs, 64 outputs and 128 parameter declarations. Repeated inputs add one trailing homogeneous contract after the fixed input prefix, with explicit minimum/maximum bounds. `input_count = UINT32_MAX` and a null projection pointer select all original inputs; zero selects no payload inputs. Static preparation can narrow the registered projection. Schema-only dependence is declared separately during lowering.
 
-`load_plugin(path)` accepts an explicit path of 1..4096 bytes with no embedded NUL. Missing ABI 8 entry points fail `TypeMismatch`. A null, misaligned, wrong-size or wrong-version module table fails `InvalidArgument`. The loader checks the module header before attaching its destroy hook and reading nested records. It validates every declaration in a private candidate registry, then publishes all operations atomically. Malformed declarations, duplicate keys or a concurrent freeze leave the registry unchanged.
+`load_plugin(path)` accepts an explicit path of 1..4096 bytes with no embedded NUL. Missing ABI 10 entry points fail `TypeMismatch`. A null, misaligned, wrong-size or wrong-version module table fails `InvalidArgument`. The loader checks the module header before attaching its destroy hook and reading nested records. It validates every declaration in a private candidate registry, then publishes all operations atomically. Malformed declarations, duplicate keys or a concurrent freeze leave the registry unchanged.
 
 ## Static preparation and resources
 
@@ -61,7 +83,7 @@ For C++ operations, `OperationTraits` declares input arity and port constraints,
 
 Lowering declares each task's scratch by memory domain and each output tile's allocation contract. Shared intermediate computation uses private SSA values and task edges. An operation with `side_effect_free = false` must lower exactly one terminal effect task; the planner retains that call even when its outputs are unselected. Block admission derives output capacity and per-lane scratch from the physical tables before executing kernels.
 
-`ps_operation_v8::prepare` receives `ps_static_query_v8`, synchronous preparation services and an initially empty `ps_operation_state_v8` output. The host copies input schemas before entering static callbacks and preserves parameter values, including floating-point bit patterns. The callback may set each output once, retain its default prototype by omitting it, and declare resource identities through `require_resource`.
+`ps_operation_v10::prepare` receives `ps_static_query_v8`, synchronous preparation services and an initially empty `ps_operation_state_v8` output. The host copies input schemas before entering static callbacks and preserves parameter values, including floating-point bit patterns. The callback may set each output once, retain its default prototype by omitting it, and declare resource identities through `require_resource`.
 
 The returned state is immutable and shared across output selections, lowering, kernel preparation and concurrent Runs. A nonnull context requires a release callback. A null context may still have a release callback and retains its cleanup owner. Ownership of a populated state transfers to the host on both success and failure; the host releases it exactly once. Retained callback inputs must be copied into operation-owned storage.
 
@@ -71,11 +93,11 @@ Preparation services copy supplied metadata before returning. They accept calls 
 
 ## Lowering into a physical Plan
 
-`ps_operation_v8::lower` receives resolved input/output schemas, parameters, static state, tile extent, backend, member grids, selected output tile intervals and construction limits. Each grid names its original port/member and gives its full shape, tile count, rows, columns and batch-axis mask. The requested intervals are half-open member-local tile indices.
+`ps_operation_v10::lower` receives resolved input/output schemas, parameters, static state, tile extent, backend, member grids, selected output tile intervals and construction limits. Each grid names its original port/member and gives its full shape, tile count, rows, columns and batch-axis mask. The requested intervals are half-open member-local tile indices.
 
-`ps_operation_builder_v8` exposes the checked construction operations:
+`ps_operation_builder_v10` exposes the checked construction operations:
 
-- `add_task` declares a kernel symbol/contract, placement, scratch by memory domain and an optional terminal effect.
+- `add_task` declares a kernel symbol/contract, placement, scratch by memory domain, an optional terminal effect and an explicit invocation ABI (8 or 9). ABI 9 requires CPU placement; invalid selections latch a builder failure.
 - `add_copy` declares an explicit transfer with one matching read and write. Its backend is chosen independently of numerical tasks: a native GPU Plan may contain CPU COPY tasks for Host/Shared transfers. A CpuExact request requires CPU tasks. GPU lowering may explicitly mix CPU/GPU numerical tasks when the operation advertises the respective capabilities; Device endpoints require GPU COPY placement. The builder declares one dense Shared scratch segment per Host endpoint of a GPU COPY, sized to its output bytes. This declaration participates in serialized Plan validation and per-lane admission.
 - `add_temporary`, `write_temporary` and `read_tile` connect private SSA tiles within the call.
 - `read_input`, `read_input_schema` and `write_output` declare payload reads, metadata dependence and exclusive output tiles.
@@ -85,10 +107,12 @@ IDs are local to the call's builder. Every materialized output is a complete fix
 
 Private tasks provide shared intermediate computation. Their tile edges determine readiness, while call order determines retirement. Schema-only reads create no payload dependency. Serialized Plan import restores the saved tables and rebinds static preparation; it does not call lowering.
 
+`ps_tilewise_v10::configure` and `describe` both receive the selected `PS_BACKEND_CPU_V8` or `PS_BACKEND_GPU_V8` after `static_state`. Configure runs once per lowering and supplies at most 64 configuration words to mapping; describe selects each requested tile's symbol, placement, invocation ABI, parameters and scratch. Queries are borrowed only during the callback, and callbacks may run concurrently for separate lowerings. The unchanged lowering query, tile task, mapper and fixed invocation records retain their independent versions.
+
 ## Kernel preparation and invocation
 
 ```c
-/* Signature of ps_operation_v8::prepare_kernel. */
+/* Signature of ps_operation_v10::prepare_kernel. */
 ps_kernel_status_v8 prepare_kernel(
     void* user_data, const ps_kernel_preparation_v8* query,
     ps_prepared_kernel_v8* result);
@@ -110,11 +134,11 @@ The executor also links asynchronous GPU entry points over Host, Shared or Devic
 
 ### Typed CPU invocation 9
 
-Trusted C++ registrations may supply `OperationDefinition::prepare_kernel_v9` for a CPU `KernelDesc` with `abi_version=9`. The independent C records in `fixed_invocation_v9_api.h` are `ps_prepared_kernel_v9` and `ps_kernel_invocation_v9`. Both require their own exact `sizeof(record)` and version 9; the envelope contains an ordinary exact-size/version-8 `views` record and a `ps_kernel_work_v9` service. No version-8 record is enlarged or interpreted as a version-9 prefix. Preparation and invocation use typed entry points. A descriptor with no matching factory is rejected, without ABI downgrade. Calling the v8 invoke overload on a v9-only preparation is rejected before provider entry.
+Trusted C modules supply `ps_operation_v10::prepare_kernel_v9`, and C++ registrations supply `OperationDefinition::prepare_kernel_v9` for a CPU `KernelDesc` with `abi_version=9`. The independent C records in `fixed_invocation_v9_api.h` are `ps_prepared_kernel_v9` and `ps_kernel_invocation_v9`. Both require their own exact `sizeof(record)` and version 9; the envelope contains an ordinary exact-size/version-8 `views` record and a `ps_kernel_work_v9` service. No version-8 record is enlarged or interpreted as a version-9 prefix. Preparation and invocation use typed entry points. A descriptor with no matching factory is rejected, without ABI downgrade. Calling the v8 invoke overload on a v9-only preparation is rejected before provider entry.
 
 The thread-safe work service admits `{work, stages}` against the current Run and its shared Context root before numerical work. Zero/zero polls cancellation or the sticky Run budget failure. Budget rejection returns `ResourceExhausted` with `WorkLimit` or `StageLimit`; cancellation can return `Cancelled`. The service context is borrowed only until synchronous CPU return, is specific to this invocation/Run, and must never be retained in prepared state or passed to another Run. The host retains owners through CPU return. Provider arithmetic must establish its required rounding/underflow environment; the host fence saves and restores the callback environment. Capacity exceptions retain their resource-failure classification.
 
-FRQ-01..06 use this C++ CPU path exclusively. Existing FRQ invocation-8 Plans require recompilation. Other invocation-8 CPU/GPU operations and operation module ABI 8 remain supported unchanged. The module-8 transport does not export the C++ v9 factory; native kernel service ABI 2 and psir/psxp v5 layouts are unchanged.
+FRQ-01..06 use the typed CPU invocation 9 factory. The operation module exports separate CPU preparation callbacks for invocation 8 and invocation 9.
 
 ## Native kernel preparation
 

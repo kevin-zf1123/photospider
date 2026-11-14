@@ -1,7 +1,7 @@
 # ADR 0022：所有算子冻结同一套按前缀协商的 C ABI
 
 - 状态：Proposed
-- 实现边界（2026-10-20）：本文保持为历史 Proposed 设计，不是当前二进制契约。Package 0.39 实现 exact-size operation module ABI 8、fixed invocation ABI 8 和 native kernel service ABI 2。静态 lowering 与固定 completion 模型取代下文 staged continuation surface；不暗示已实现 prefix negotiation 或提议中的统一 import 策略。参见 [Plugin ABI](../../kernel-architecture/zh/Plugin-ABI.zh.md)。
+- 实现边界（2026-11-13）：本文保持为历史 Proposed 设计，不是当前二进制契约。Package 0.40 实现 exact-size operation module ABI 10、fixed invocation ABI 8/9 和 native kernel service ABI 2。静态 lowering 与固定 completion 模型取代下文 staged continuation surface；不暗示已实现 prefix negotiation 或提议中的统一 import 策略。参见 [Plugin ABI](../../kernel-architecture/zh/Plugin-ABI.zh.md)。
 - 英文权威文档：[ADR 0022](../0022-freeze-operation-c-abi-v3.md)
 - 相关：[ADR 0012](0012-operation-plugins-use-a-separately-versioned-pure-c-abi.zh.md)、[ADR 0014](0014-compiler-document-and-plan-versions-are-independent.zh.md)、[ADR 0015](0015-breaking-product-boundary-scope-reset.zh.md)、[ADR 0016](0016-workflow-inputs-and-execution-bindings.zh.md)、[ADR 0023](0023-track-dependencies-between-fixed-tiles.zh.md)
 

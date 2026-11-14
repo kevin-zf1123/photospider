@@ -2,7 +2,7 @@
 
 英文为权威来源，中文读者版位于本目录。[Compiler 与 Executor 设计](Compiler-and-Execution.zh.md)、[并行模型](Parallel-Execution-Model.zh.md)、[tile 存储](Cache-Model.zh.md)、[依赖](Dependency-Data.zh.md)和[术语](Terminology.zh.md)规定 breaking replacement。文档的提案状态独立于实现进度。
 
-当前 C++ 路径编译物理 Task/Tile/Call/Block 表并执行 prepared CPU kernel。[Plugin ABI](Plugin-ABI.zh.md)说明 operation module ABI 8、固定 invocation 与所有权。[Compiler 工具](../../development/zh/Compiler-Tools.zh.md)说明 v5 artifact CLI。[Fragment atlas](Fragment-Atlas.zh.md)说明独立的 Tensor packing 工具。固定执行器已准备并执行真实 Metal/Vulkan kernel，支持 Shared/Device 存储与显式 COPY。[原生测量](Parallel-Execution-Model.zh.md#原生测量)记录工作负载、容量、计时和 drain 证据。既有 ADR 保持决策记录，新 Plan 设计列出替换范围。
+当前 C++ 路径编译物理 Task/Tile/Call/Block 表并执行 prepared CPU kernel。[Plugin ABI](Plugin-ABI.zh.md)说明 operation module ABI 10、固定 invocation 与所有权。[Compiler 工具](../../development/zh/Compiler-Tools.zh.md)说明 v5 artifact CLI。[Fragment atlas](Fragment-Atlas.zh.md)说明独立的 Tensor packing 工具。固定执行器已准备并执行真实 Metal/Vulkan kernel，支持 Shared/Device 存储与显式 COPY。[原生测量](Parallel-Execution-Model.zh.md#原生测量)记录工作负载、容量、计时和 drain 证据。既有 ADR 保持决策记录，新 Plan 设计列出替换范围。
 
 ## 核心模型
 

@@ -183,7 +183,7 @@ Times below are submit-through-join wall time in milliseconds, median [minimum, 
 | copy | 320 | 15.478 [9.713, 16.670] | 218.304 [214.495, 222.044] |
 | split | 256 | 17.966 [15.666, 27.726] | 231.466 [224.023, 237.124] |
 | coalesced_tight | rejected | 0.096 [0.080, 0.098] | 0.137 [0.071, 0.153] |
-| split_tight | 256 | 16.618 [16.284, 33.307] | 237.665 [230.399, 244.129] |
+| split_tight | 256 | 16.618 [16.284, 33.307] | 237.665 [230.409, 244.129] |
 | cancel | cancelled after GPU issue | 2.792 [2.515, 2.987] | 21.011 [19.994, 23.223] |
 
 The single-call median throughput was 16,074 tasks/s on Metal and 1,111 tasks/s on Vulkan with four GPU credits; one credit produced 4,101 and 409 tasks/s respectively. This measures the complete small-task pipeline, including host submission, allocation and completion costs. It does not measure shader arithmetic throughput. Successful task/submission and output-allocation counts were 64, 256, 256 and 320 for the four main cases. The COPY count includes CPU tasks; its native GPU submission count was 192.

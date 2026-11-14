@@ -40,78 +40,61 @@ plugins/ops/include/photospider/
 | `compiler/compiler.hpp` | 基于冻结 registry 的阶段编排。 |
 | `compiler/artifact.hpp` | IR/Plan 文本导入、导出、检查与文件辅助。 |
 
-Execution 头文件直接依赖 Plan 模型。实例化 `Compiler` 的调用方显式包含 `compiler/compiler.hpp` 或内核汇总头文件。Compiler 构造与 artifact 导入只初始化所请求阶段需要的 catalog。
+Execution 头文件直接依赖 Plan 模型。实例化 `Compiler` 的调用方显式包含 `compiler/compiler.hpp` 或内核汇总头文件。默认 `Compiler` 构造器组装 frontend、optimizer 和 planner catalog；`CompilerComponents` 构造器接受显式组件选择。Plan 导入使用冻结的 operation catalog 与 `ProgramServices`，无需构造 compiler。
 
-| 私有源码 | 职责 |
+## 源码职责与应用
+
+| 源码目录 | 职责 |
 | --- | --- |
-| `src/lib/compiler/compiler.cpp` | Registry 所有权与 analyze/可选 optimize/plan 编排。 |
-| `frontend.cpp`、`frontend_registry.cpp`、`frontend/DAG/dag.cpp` | Frontend 派发、catalog 与 DAG 依赖路径 lowering。 |
-| `ir_validation.cpp`、`dependency_paths.hpp` | 通用 IR 校验、operation 绑定与私有路径 lowering。 |
-| `optimizer.cpp`、`optimizer_registry.cpp`、`optimizers/deduplicate.cpp` | 变换调用、输出校验、catalog 与可选去重。 |
-| `planner.cpp`、`planner_registry.cpp`、`planners/static_tiles.cpp` | 后端派发、catalog 与静态指令生成。 |
-| `plan_linking.cpp`、`plan_validation.cpp`、`plan_selection.cpp` | 声明与 placement 链接、保存指令的验证以及 coverage 缩小。 |
-| `static_mapping.cpp`、`identity.cpp` | 静态依赖辅助与规范内容/cache identity。 |
-| `artifact.cpp`、`artifact_text.cpp` | Artifact 链接与有界文本语法。 |
+| `src/lib/core/`、`src/lib/data/` | Status、取消、资源计账、Tensor/Result 存储、视图与 Region 原语。Data 只包含 core/data 头文件。 |
+| `sdk/model/` | Workflow document/context，以及物理 Task/Tile/Call/Block 模型与校验。 |
+| `sdk/operation/` | 算子注册、C ABI 适配、静态 preparation、受检 program 构造与映射分派。 |
+| `sdk/program/` | IR 绑定、Plan 链接/校验/裁剪、规范 identity 与 artifact codec。 |
+| `sdk/execution/` | 面向 provider 的执行 API、Plan/data 服务、binding preflight 与宿主线程退休。 |
+| `plugins/compiler/default/` | 编译阶段编排与 frontend/optimizer/planner 分派。 |
+| `plugins/frontends/dag/`、`plugins/optimizers/deduplicate/`、`plugins/planners/static_tiles/` | DAG 前端、可选去重与静态 tile planner 的具体实现。 |
+| `plugins/executors/physical/` | 物理调度、block memory、cache、CPU worker 与可选原生 GPU 执行。 |
+| `plugins/mappers/geometry/` | 编译期几何求解器及注册/module 入口。 |
+| `host/` | Catalog 组装、默认组件工厂、provider 加载、planner module bridge，以及宿主持有的 Metal callback。 |
+| `apps/common/`、`apps/psc/`、`apps/psx/`、`apps/benchmark/` | CLI 公共 I/O、编译端 driver、执行端 driver 与可选 benchmark 客户端。 |
+| `plugins/ops/common/domain/`、`plugins/ops/<NN-family>/` | 算子领域 SDK 与内置算子实现。 |
+| `tests/fixtures/`、`tests/unit/kernel/`、`tests/integration/kernel/` | 合成 ABI producer 与持续维护的内核行为测试。 |
+| `tests/package/`、`tests/tools/` | 包元数据契约与应用行为测试。 |
 
-后七行中的源码名称相对于 `src/lib/compiler/`。Plan 导入链接已保存的声明并验证已保存代码，过程中不调用 optimizer、mapper 或 planner。完整的阶段与生命周期契约见 [Compiler and Execution](../../kernel-architecture/zh/Compiler-and-Execution.zh.md)。
+`sdk/program/` 中的 Plan 导入链接已保存的声明并校验物理表，不调用 frontend、optimizer、mapper 或 planner。执行 SDK 消费绑定后的 Plan 和显式选择的 provider。Physical provider 拥有调度与 GPU 实现依赖。`src/lib/core/`、`src/lib/data/` 不反向依赖 compiler、operation catalog 或 executor。
 
-## 私有布局与应用
+CLI 公共库不拥有 compiler session 或 execution context。`psc` 链接 compiler 和编译期 mapper 组件；`psx` 链接 execution 组件，可在没有 compiler 或 mapper catalog 时导入 `.psxp`。可执行入口分别派发到类型化 driver 库。CLI JSON 使用 [YYJSON.md](../../../third_party/YYJSON.md) 所述固定版本的私有 yyjson 源码，其声明不进入公共头文件。
 
-```text
-src/lib/
-  core/          带溢出检查的算术、status 工厂与资源原语
-  data/          Tensor/Result 存储、视图、region 与预算
-  compiler/      阶段实现与 artifact codec
-  graph/         workflow document/context 实现
-  execution/     Plan 解释器、调度、发布与缓存
-  plugin/        registry、DSO 加载与 C ABI 宿主适配
-
-src/tools/
-  common/        CLI 解析、诊断、信号、JSON 与文件/manifest I/O
-  psc/           compiler driver、action graph、IR session 与 DAG JSON 输入
-  psx/           executor driver、运行时绑定与 Result 导出
-  benchmark/     可选的原始 benchmark 客户端实现
-
-plugins/ops/common/domain/ 算子领域 SDK 实现
-plugins/ops/<NN-family>/   内置算子实现与辅助
-
-tests/fixtures/            合成算子与 ABI 模块
-tests/unit/kernel/        内核行为测试
-tests/integration/kernel/ 内核执行与 ABI 行为测试
-tests/package/            包元数据契约
-tests/tools/              应用与可选 benchmark 行为测试
-```
-
-`src/lib/core/` 包含不依赖其他内核模块的原语。Data 实现只包含 core/data 头文件。Compiler 阶段使用 operation metadata 与静态 preparation；execution 消费 Plan 并调用 operation program。CLI 公共库不拥有 compiler session 或 execution context。`psc` 与 `psx` 分别拥有类型化 invocation 和 driver 库；可执行入口仅派发到对应 driver。
-
-CLI JSON 使用 [YYJSON.md](../../../third_party/YYJSON.md) 所述固定版本的私有 yyjson 源码，其声明不进入安装后的内核头文件。文件格式与应用契约见 [Compiler Tools](../../development/zh/Compiler-Tools.zh.md) 和 [Compiler Tool Formats](../../development/zh/Compiler-Tool-Formats.zh.md)。
+完整阶段与生命周期契约见 [Compiler and Execution](../../kernel-architecture/zh/Compiler-and-Execution.zh.md)。文件及应用契约见 [Compiler Tools](../../development/zh/Compiler-Tools.zh.md) 和 [Compiler Tool Formats](../../development/zh/Compiler-Tool-Formats.zh.md)。
 
 ## Target 与依赖方向
 
-| Target | 安装条件 | 职责 |
+`cmake/KernelComponents.cmake` 定义组件边界。下表中的组件名称使用 `Photospider::` 命名空间；可执行文件与私有 target 使用其显式名称。
+
+| Target | 构建条件 | 职责 |
 | --- | --- | --- |
-| `photospider` / `Photospider::kernel` | 始终安装 | 可嵌入的 compiler/executor 与 operation ABI 宿主。 |
-| `Photospider::operation_sdk` | 始终安装 | 仅含头文件的可信 operation DSO ABI。 |
-| `Photospider::ops_sdk` | `PHOTOSPIDER_BUILD_OPS_SDK=ON` | 基于公开内核 API 的领域契约、资源与数值辅助。 |
-| `Photospider::ops`、`Photospider::ops_headers` | `PHOTOSPIDER_BUILD_OPS=ON` | 独立内置算子实现库与编写辅助 include 根目录。 |
-| `Photospider::benchmark_tools` | `PHOTOSPIDER_BUILD_BENCHMARK_TOOLS=ON` | 基于公开内核 API 的原始 benchmark 客户端。 |
-| `psc`、`psx` | `PHOTOSPIDER_BUILD_TOOLS=ON` | 编译器与执行器可执行文件。 |
-| `photospider_cli_json`、`photospider_cli_common`、`photospider_psc`、`photospider_psx` | 仅构建 | 私有 CLI 支持库与 driver 库。 |
-| 测试可执行文件与 fixture 模块 | 仅构建 | 维护程序行为与包契约。 |
+| `data`、`model` | 始终构建 | 存储/资源原语与物理/workflow 模型。 |
+| `plugin_host`、`operation_runtime`、`program` | 始终构建 | Provider 生命周期与加载、operation 契约、绑定后 Plan/artifact 服务。 |
+| `operation_sdk` | 始终构建 | 仅含头文件的 C operation/provider ABI；纯 C producer 无需链接内核。 |
+| `compiler`、`compiler_default` | `PHOTOSPIDER_BUILD_COMPILER=ON` | 编译编排；默认组装增加 DAG、deduplicate 与 static-tiles provider。 |
+| `frontend_dag`、`optimizer_deduplicate`、`planner_static_tiles`、`mapper_geometry` | compiler 启用 | 可独立链接的编译期实现。 |
+| `execution`、`executor_physical`、`execution_default` | `PHOTOSPIDER_BUILD_EXECUTOR=ON` | 面向 provider 的执行 SDK、physical 实现及两者的默认组装。 |
+| `metal_host` | Apple 上启用 executor 和 Metal | 宿主持有的 Metal completion 与页释放 callback。 |
+| `kernel`（`photospider`） | compiler 与 executor 均启用 | 组合 `compiler_default` 和 `execution_default` 的 interface 便利 target。 |
+| `ops_sdk` | `PHOTOSPIDER_BUILD_OPS_SDK=ON` | 领域契约、不可变资源与数值 helper。 |
+| `ops_runtime`、`ops_headers` | `PHOTOSPIDER_BUILD_OPS=ON` | 运行时注册/实现与内置算子公共头文件。 |
+| `ops` | ops 和 compiler 均启用 | Runtime ops、workflow 编写 helper 与默认几何 mapper catalog。 |
+| `benchmark_tools` | `PHOTOSPIDER_BUILD_BENCHMARK_TOOLS=ON` | 可选原始 benchmark 客户端。 |
+| `psc`、`psx` | tools 与相应的 compiler/executor 选项启用 | 独立的编译端、执行端可执行文件。 |
+| `result_files` | tools 与 executor 启用 | 安装的静态 Result 文件导出库。 |
+| `photospider_cli_common`、`photospider_cli_json` | tools 启用 | 安装并导出的 CLI I/O 与 JSON 支持归档。 |
+| `photospider_psc`、`photospider_psx`、测试 fixture | 仅构建 | 私有 driver 与定向行为测试。 |
 
-工具默认 ON，内置算子与 benchmark 工具默认 OFF。内置算子依赖 ops SDK。启用 ops 还会将其注册入口链接到 CLI environment；仅包含内核的 CLI 接受显式加载的 operation library。
+Compiler、executor 与 tools 默认 ON，内置算子与 benchmark 工具默认 OFF。内置算子依赖 ops SDK。启用 ops 时，CLI environment 注册 `ops_runtime`。编译期 `ops` 便利库增加 `compiler_default` 和 `mapper_geometry`；仅执行所需的 `ops_runtime` 不引入这些依赖。
 
-```text
-psc driver -> compiler/artifact API -> operation metadata 与 preparation
-psx driver -> artifact/execution API -> operation runtime program
-两个 driver -> CLI 公共 I/O -> 私有 yyjson
+仅编译的构建关闭 `PHOTOSPIDER_BUILD_EXECUTOR`；仅执行的构建关闭 `PHOTOSPIDER_BUILD_COMPILER`。后者不生成同时使用 compiler/executor API 的 `test_cli_io`。动态 provider 测试显式链接 `compiler_default` 和 `execution`，并把 provider module 作为单独的构建依赖，保证宿主不会预先加载 physical executor。
 
-内置 ops -> ops SDK -> 公开内核 API
-benchmark 客户端 -> 公开内核 API
-photospider-daemon -> installed Photospider::kernel
-```
-
-内核不依赖工具 driver、内置算子或 daemon 源码。内核开发阶段排除安装消费测试；保留的包测试检查包元数据。原生 operation 加载属于可信的进程内边界。
+共享 `ops` 保留包 VERSION/SOVERSION 与隐藏实现符号的属性，静态版本保留位置无关代码。内核组件不依赖 CLI driver、内置算子或 daemon 源码。内核开发阶段继续排除安装消费测试；保留的包测试检查包元数据。原生模块属于可信的进程内扩展。
 
 ## 命名与文档
 

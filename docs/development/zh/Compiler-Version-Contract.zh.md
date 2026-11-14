@@ -2,15 +2,16 @@
 
 ## 当前契约
 
-Package 0.39.0 使用 SameMinorVersion 兼容规则和 SOVERSION `0.39`。C++ consumer 和外部 C operation module 必须针对匹配头文件重建。Operation module ABI 8 与 fixed invocation ABI 8 要求记录大小精确匹配。加载器要求 `ps_operation_module_get_api_v8`；入口缺失时返回 `TypeMismatch`，module 版本或大小非法时返回 `InvalidArgument`。
+Package 0.40.0 使用 SameMinorVersion 兼容规则和 SOVERSION `0.40`。C++ consumer 和外部 C operation module 必须针对匹配头文件重建。Operation module ABI 10 与 CPU fixed invocation ABI 8/9 要求记录大小精确匹配。加载器要求 `ps_operation_module_get_api_v10`；入口缺失时返回 `TypeMismatch`，module 版本或大小非法时返回 `InvalidArgument`。
 
 | 契约 | 版本 |
 | --- | --- |
-| Package | 0.39.0 |
+| Package | 0.40.0 |
 | WorkflowDocument | 7 |
 | OperationTraits | 30 |
-| Operation module C ABI | 8, exact-size |
-| Fixed kernel invocation C ABI | 8, exact-size |
+| Operation module C ABI | 10, exact-size |
+| Fixed kernel invocation C ABI | 8 and 9, exact-size |
+| Planner provider / executor provider / mapper | 1 / 2 / 1 |
 | Native kernel preparation service ABI | 2 |
 | `.psir` / `.psxp` 文本格式 | 5 |
 | Result schema encoding | `photospider.result-schema.v6` |
@@ -20,6 +21,8 @@ Package 0.39.0 使用 SameMinorVersion 兼容规则和 SOVERSION `0.39`。C++ co
 | 已保存算子契约 | `fixed-operation-contract-v3` |
 
 这些版本轴相互独立。Module ABI 描述静态准备、物理 lowering 和 kernel preparation。Invocation ABI 描述不可变输入、独占输出与 scratch、取消和完成。Native service 2 在 Shared 与 Device 存储上准备 Metal 或 Vulkan kernel；显式 GPU COPY 通过已准入的 Shared staging 支持 Host 端点。其可用性取决于构建和所选设备。所有权、记录大小和支持的内存域见 [plugin ABI](../../kernel-architecture/zh/Plugin-ABI.zh.md)。
+
+Operation module ABI 10 为受检 C builder 增加显式 invocation 选择，并向两个 tilewise callback 传入 backend。Executor provider ABI 2 为 call 退休增加失败任务标识。受影响的原生模块需要重新构建；fixed invocation 8/9、mapper 1、native service 2 和 v5 artifact 继续保持独立契约。
 
 ## Compiler 阶段与产物
 

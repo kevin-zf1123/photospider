@@ -2,7 +2,7 @@
 
 所有已注册的 Core 标量／COPY 算子、未带后缀的算术／归约／scan／expression／LUT key，以及下文描述的数值 profile 族均使用物理 task。参见[执行契约](Compiler-and-Execution.zh.md)。
 
-Bundled 源码定义了未带后缀的有限域算术与 clamp、固定标量归约、有序扫描，以及带 profile 的数值算子族。各 key 的参数、执行和输出契约不同，调用方应按完整 key 选择。这些是 `plugins/ops/01-numeric/` 中的 bundled operations，不是内核代码；内核只提供它们所用的通用 Result 执行、资源、取消和失败契约。这些算子使用 module ABI 8 和 fixed invocation ABI 8。数值工作报告、LUT bake 报告和质量报告是算子 SDK 类型（`photospider/ops/numeric/`）；见 [Atom 错误与质量](Atom-Errors-and-Quality.zh.md)。
+Bundled 源码定义了未带后缀的有限域算术与 clamp、固定标量归约、有序扫描，以及带 profile 的数值算子族。各 key 的参数、执行和输出契约不同，调用方应按完整 key 选择。这些是 `plugins/ops/01-numeric/` 中的 bundled operations，不是内核代码；内核只提供它们所用的通用 Result 执行、资源、取消和失败契约。这些算子使用 module ABI 10 和 fixed invocation ABI 8/9。数值工作报告、LUT bake 报告和质量报告是算子 SDK 类型（`photospider/ops/numeric/`）；见 [Atom 错误与质量](Atom-Errors-and-Quality.zh.md)。
 
 ## 未带后缀的 Result 数值算子
 

@@ -31,7 +31,7 @@ Each build selects at most one native backend: Metal on supported Apple builds o
 
 ## 3. Contracts and APIs
 
-Operation modules use `photospider/plugin/operation_module_api.h` (ABI 8). Fixed invocations use `fixed_invocation_api.h` (ABI 8). Kernel preparation may borrow `ps_native_gpu_service_v2` from `native_kernel_api.h`:
+Operation modules use `photospider/plugin/operation_module_api.h` (ABI 10). Fixed invocations use `fixed_invocation_api.h` (ABI 8). Kernel preparation may borrow `ps_native_gpu_service_v2` from `native_kernel_api.h`:
 
 ```c
 #include <photospider/plugin/native_kernel_api.h>

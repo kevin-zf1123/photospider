@@ -4,7 +4,7 @@
 
 ## Current implementation
 
-Package 0.39.0 uses `ValidatedIR` for every validated IR version. Analysis, optional named optimization and named physical planning remain separate operations. Ordered Call IDs define retirement and effect order; task dependencies define issue order. The planner produces immutable physical Task/Tile/Call/Block tables. Explicit CFG loops retain activation semantics. See the [version contract](../development/Compiler-Version-Contract.md).
+Package 0.40.0 uses `ValidatedIR` for every validated IR version. Analysis, optional named optimization and named physical planning remain separate operations. Ordered Call IDs define retirement and effect order; task dependencies define issue order. The planner produces immutable physical Task/Tile/Call/Block tables. Explicit CFG loops retain activation semantics. See the [version contract](../development/Compiler-Version-Contract.md).
 
 `.psir` and `.psxp` use format 5. Older artifacts require recompilation/re-export; there is no continuation Plan translation. Import validates the saved tables and rebinds static contracts/resources without running an optimizer, lowerer or planner. Device preparation is a later explicit operation.
 
@@ -25,10 +25,10 @@ IR content identity excludes provenance such as parent version and transformatio
 | WorkflowDocument schema | 7 |
 | Result schema encoding | 6 |
 | OperationTraits | 30 |
-| Operation module / fixed invocation C ABI | 8 / 8 |
+| Operation module / fixed invocation C ABI | 10 / 8, 9 |
 | Native kernel service | 2 |
 | IR / Plan artifact format | 5 / 5 |
-| Package / SOVERSION | 0.39.0 / 0.39 |
+| Package / SOVERSION | 0.40.0 / 0.40 |
 
 The compiler encodes closed document fields, normalized parameters, copied operation contracts, static specialization and declared resource identities in the applicable content domain. Physical identity additionally includes schemas, layouts, tiles, placements, tasks, adjacency, call membership, CFG, selections and reservation bounds.
 

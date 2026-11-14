@@ -2,9 +2,31 @@
 
 [英文权威文档](../Plugin-ABI.md)。
 
+## Provider 选择与编译
+
+`Photospider::data` 管理存储、Result 发布和资源计账。`Photospider::model`、`operation_runtime` 和 `program` 依次提供物理表、算子及绑定后的 Plan 服务。仅执行的宿主链接 executor SDK，通过冻结的运行时算子目录导入 v5 Plan。仅编译的宿主通过 compiler 组件绑定、规划并导出 Plan。`Photospider::kernel` 提供默认 compiler 和 physical executor。`Photospider::ops_runtime` 注册执行所需的内置算子。`Photospider::ops` 还提供 workflow 编写接口和默认编译期映射目录。
+
+Planner 模块导出 `ps_planner_module_get_api_v1`。回调可读取 call 和 grid，按需请求单个 call 的静态 lowering，并追加任务或返回完整物理表。物理表传输使用 physical block 语法、调用绑定和宿主的构造预算。宿主在发布不可变 Plan 前核验任务图、输出覆盖、输入契约和资源。链接版和动态版 static-tiles 共用规划实现。
+
+设置 `PHOTOSPIDER_BUILD_EXECUTOR=OFF` 可只构建编译端 CLI，设置 `PHOTOSPIDER_BUILD_COMPILER=OFF` 可只构建执行端 CLI。`Photospider::execution` 接受显式 provider 目录，`Photospider::execution_default` 增加链接版 physical 实现。
+
+Executor 模块导出 `ps_executor_module_get_api_v2`。准备阶段核验 Plan 版本、backend、内存域和 invocation mask。Prepared owner 归属创建它的 context。提交快照在同步调用内借用。异步 provider 保留需要的快照服务，持有已接受任务至完成，并在关闭时排空执行和观察回调。宿主服务提供物理表、prepared kernel、Result 构造和存储保活。Provider 在相应模块租约有效期间释放 native allocation 和回调。发布中间 call 导出值时，provider 可通过修订号 `"1"` 查询纯 C 服务 `PS_EXECUTOR_VALUE_RESULTS_V1`。其 `make_result` 接收物理 value ID，按已绑定的 schema 和 context 资源预算创建 builder。最终输出也可以按名称创建。资源根持有执行器租约，宿主保留动态线程的租约直到 join 完成。Metal completion block 和页释放 block 由宿主持有。随包的 physical 模块先协商同构建的 SDK 扩展，再访问公共 Program、Result 和资源对象。SDK 构建身份不同会返回类型不匹配。独立 C executor 直接调用带版本的宿主服务。
+
+### Executor 退休事件
+
+`ps_executor_module_v2` 与 `ps_executor_submit_v2` 使用 executor ABI 2；布局未变的 host、Plan、result 和 owner 记录保持版本 1。Loader 要求 `ps_executor_module_get_api_v2`，不回退到旧入口。
+
+`ps_executor_submit_v2::retire` 在 sequence、activation、source-call 标识之后接收 `call, outcome, failed_task, status`。`PS_EXECUTOR_TASK_NONE_V2` 为 `UINT32_MAX`，任务 0 是合法 ID。Failed 要求非 OK status、属于该 call 的任务和空 values。Succeeded、Elided 要求 OK 与 NONE，Elided 的 values 也必须为空。宿主对照保留的提交 Plan 校验 call/source/task 归属及 envelope，即使没有 observer 也执行校验。非法事件返回 `InvalidArgument`。成功事件必须提供该 call 声明的全部导出值，各 Result 的 schema 和覆盖区域须与物理计划一致。
+
+宿主将失败任务写入 `CallRecord::failed_task`，并在 status detail 中设置 Backend/Run 及对应 source call/task ID。Status code、reason 与不透明 domain code 经过正常 status 转换保留。异步 provider 在使用期间持有提交服务，并在 join/close 返回前完成 observer 交付。观察回调抛出异常后，宿主停止向该 Run 交付后续记录，并在已接受工作排空后返回带节点和退休序号的错误。
+
+### Operation 与 mapper 选择
+
+Operation 模块通过 `ps_operation_module_get_api_v10` 导出算子、mapper 或两者。重名或并发冻结导致整批注册失败。算子提供完整 lowerer 或逐 tile 任务描述。Direct 将输出逻辑区域分别投影到实际输入 grid。Local 和 External 以有序 source slot 返回 tile 区间或仅 schema 的依赖。外部依赖声明 alias、contract、provider、契约版本和实现修订号。规划会话按需解析依赖并对重复求解计费。v5 Plan 保存最终读写、placement、参数和 scratch。导入、裁剪和 kernel preparation 均直接使用这些记录。
+
 ## 范围与职责
 
-受信任的 native module 导出 operation module ABI 8。Loader 将静态声明复制到 `OperationRegistry`；C module 与 C++ `OperationDefinition` 回调使用相同的 `OperationProgram` builder、物理 Plan validator 和固定 invocation ABI。OperationTraits 使用版本 30。
+受信任的 native module 导出 operation module ABI 10。Loader 将静态声明复制到 `OperationRegistry`；C module 与 C++ `OperationDefinition` 回调使用相同的 `OperationProgram` builder、物理 Plan validator 和固定 invocation ABI。OperationTraits 使用版本 30。
 
 Definition、静态 preparation 或 prepared kernel 需要模块代码时，registry 及其派生 owner 保留模块。Compiler 拥有静态 metadata 与物理任务图。`PreparedPlan` 拥有已链接 kernel 和资源；每个 Run 拥有 bindings、输出分配、scratch 和完成状态。CPU kernel 接收固定仿射 view，并按 [unchecked 执行契约](Compiler-and-Execution.zh.md)写入预分配输出。
 
@@ -14,13 +36,13 @@ Definition、静态 preparation 或 prepared kernel 需要模块代码时，regi
 #include "photospider/plugin/operation_module_api.h"
 
 /* 模块提供此函数及不可变表。 */
-PS_OPERATION_MODULE_EXPORT const ps_operation_module_v8*
-ps_operation_module_get_api_v8(void);
+PS_OPERATION_MODULE_EXPORT const ps_operation_module_v10*
+ps_operation_module_get_api_v10(void);
 ```
 
 `operation_module_api.h` 是独立的 C11 头文件，通过 `fixed_invocation_api.h` 引入 status、layout、invocation 与 prepared-kernel 记录。构建生产者时定义 `PHOTOSPIDER_OPERATION_PLUGIN_BUILD`。`Photospider::operation_sdk` 提供 include 目录，C 生产者无需链接内核。
 
-Module 表包含精确的 `struct_size`、`abi_version = 8`、1..1024 条 operation 记录、context 和必需的 `destroy` 回调。每个 operation 声明 key、能力标志、输入契约、输出原型、标量参数词汇、可选静态 preparation 与资源校验、必需 lowering，以及可选 kernel preparation。仅包含 COPY 或完全 elided 的 operation 可以省略 kernel preparation。
+Module 表包含精确的 `struct_size`、`abi_version = 10`、0..1024 条 operation 和 0..1024 条 mapper 记录（两者合计至少一条）、context 和必需的 `destroy` 回调。每个 operation 声明 key、能力标志、输入契约、输出原型、标量参数词汇、可选静态 preparation 与资源校验、完整 lowerer 或 tilewise 声明，以及可选 kernel preparation。仅包含 COPY 或完全 elided 的 operation 可以省略 kernel preparation。
 
 | 记录 | 静态含义 |
 | --- | --- |
@@ -53,7 +75,7 @@ Schema scope 使用 `PS_SCHEMA_COMPLETE_BUNDLE_V8 = 1`、`PS_SCHEMA_INDEPENDENT_
 
 一个 operation 最多有 1024 个输入、64 个输出与 128 个参数声明。重复输入在固定输入前缀后增加一个同构契约，并显式声明最小/最大数量。`input_count = UINT32_MAX` 配合空投影指针选择全部原始输入；零表示不读取 payload 输入。静态 preparation 可以收窄注册投影。Schema-only 依赖在 lowering 时单独声明。
 
-`load_plugin(path)` 接受 1..4096 bytes 且不含内嵌 NUL 的显式路径。缺少 ABI 8 入口时返回 `TypeMismatch`。空、未对齐、大小错误或版本错误的 module 表返回 `InvalidArgument`。Loader 检查 module header 后才挂接 destroy hook 并读取嵌套记录。它在私有候选 registry 中验证全部声明，然后原子发布所有 operation。声明非法、key 重复或并发 freeze 均不改变当前 registry。
+`load_plugin(path)` 接受 1..4096 bytes 且不含内嵌 NUL 的显式路径。缺少 ABI 10 入口时返回 `TypeMismatch`。空、未对齐、大小错误或版本错误的 module 表返回 `InvalidArgument`。Loader 检查 module header 后才挂接 destroy hook 并读取嵌套记录。它在私有候选 registry 中验证全部声明，然后原子发布所有 operation。声明非法、key 重复或并发 freeze 均不改变当前 registry。
 
 ## 静态 preparation 与资源
 
@@ -61,7 +83,7 @@ Schema scope 使用 `PS_SCHEMA_COMPLETE_BUNDLE_V8 = 1`、`PS_SCHEMA_INDEPENDENT_
 
 Lowering 按内存域声明每个 task 的 scratch，并声明每个输出 tile 的分配契约。共享中间计算使用私有 SSA value 与 task edge。`side_effect_free = false` 的 operation 必须恰好生成一个 terminal effect task；即使输出未被选择，planner 仍保留该 call。Block admission 在 kernel 执行前依据物理表计算输出容量与每个 lane 的 scratch。
 
-`ps_operation_v8::prepare` 接收 `ps_static_query_v8`、同步 preparation 服务和初始为空的 `ps_operation_state_v8` 输出。Host 在静态回调前复制输入 schema，并保留参数值及其浮点位模式。回调可以为每个输出设置一次 schema，省略的输出保留原型；通过 `require_resource` 声明资源 identity。
+`ps_operation_v10::prepare` 接收 `ps_static_query_v8`、同步 preparation 服务和初始为空的 `ps_operation_state_v8` 输出。Host 在静态回调前复制输入 schema，并保留参数值及其浮点位模式。回调可以为每个输出设置一次 schema，省略的输出保留原型；通过 `require_resource` 声明资源 identity。
 
 返回的 state 不可变，在输出选择、lowering、kernel preparation 和并发 Run 之间共享。非空 context 必须提供 release 回调。空 context 也可以带 release 回调，其清理 owner 仍被保留。无论成功或失败，已填充 state 的所有权都转交 host，并由 host 恰好释放一次。需要保留的回调输入必须复制到算子拥有的存储。
 
@@ -71,11 +93,11 @@ Preparation 服务在返回前复制提交的 metadata。服务仅接受回调�
 
 ## Lowering 为物理 Plan
 
-`ps_operation_v8::lower` 接收已解析的输入/输出 schema、参数、静态 state、tile extent、backend、member grid、选定输出 tile 区间和构造限制。每个 grid 标识原始 port/member，并给出完整 shape、tile 数量、行列数和 batch-axis mask。请求区间是 member 局部 tile 索引的半开区间。
+`ps_operation_v10::lower` 接收已解析的输入/输出 schema、参数、静态 state、tile extent、backend、member grid、选定输出 tile 区间和构造限制。每个 grid 标识原始 port/member，并给出完整 shape、tile 数量、行列数和 batch-axis mask。请求区间是 member 局部 tile 索引的半开区间。
 
-`ps_operation_builder_v8` 提供经过检查的构造方法：
+`ps_operation_builder_v10` 提供经过检查的构造方法：
 
-- `add_task` 声明 kernel symbol/contract、placement、各内存域 scratch 和可选终端 effect。
+- `add_task` 声明 kernel symbol/contract、placement、各内存域 scratch、可选终端 effect，以及显式 invocation ABI（8 或 9）。ABI 9 要求 CPU placement；非法选择锁存 builder 失败。
 - `add_copy` 声明显式传输，要求一项相匹配的读取与写入。其 backend 独立于数值 task 选择：native GPU Plan 可包含用于 Host/Shared 传输的 CPU COPY task。CpuExact 请求要求 CPU task。GPU lowering 可在 operation 声明的能力范围内显式混合 CPU/GPU 数值 task；包含 Device 端点的 COPY 要求 GPU placement。Builder 为 GPU COPY 的每个 Host 端点声明一段 dense Shared scratch，大小等于输出字节数。该声明参与序列化 Plan 校验和每个 lane 的准入。
 - `add_temporary`、`write_temporary` 和 `read_tile` 连接 call 内的私有 SSA tile。
 - `read_input`、`read_input_schema` 和 `write_output` 声明 payload 读取、metadata 依赖和独占输出 tile。
@@ -85,10 +107,12 @@ ID 属于当前 call 的 builder。每个物化输出是完整固定网格 tile�
 
 私有 task 提供共享中间计算。Tile 边决定就绪条件，call 顺序决定退休顺序。Schema-only read 不产生 payload 依赖。序列化 Plan 的导入恢复已保存的表并重新绑定静态 preparation，不调用 lowering。
 
+`ps_tilewise_v10::configure` 与 `describe` 均在 `static_state` 后接收选定的 `PS_BACKEND_CPU_V8` 或 `PS_BACKEND_GPU_V8`。Configure 在每次 lowering 中调用一次，向 mapping 提供至多 64 个配置 word；describe 为每个请求 tile 选择 symbol、placement、invocation ABI、参数和 scratch。Query 仅在 callback 期间借用，不同 lowering 可以并发调用。布局未变的 lowering query、tile task、mapper 和 fixed invocation 记录保持各自独立版本。
+
 ## Kernel preparation 与调用
 
 ```c
-/* ps_operation_v8::prepare_kernel 的签名。 */
+/* ps_operation_v10::prepare_kernel 的签名。 */
 ps_kernel_status_v8 prepare_kernel(
     void* user_data, const ps_kernel_preparation_v8* query,
     ps_prepared_kernel_v8* result);
@@ -110,11 +134,11 @@ Executor 也可链接使用 Host、Shared 或 Device 存储的异步 GPU 入口�
 
 ### Typed CPU invocation 9
 
-可信 C++ registration 可为 `abi_version=9` 的 CPU `KernelDesc` 提供 `OperationDefinition::prepare_kernel_v9`。`fixed_invocation_v9_api.h` 中独立声明 `ps_prepared_kernel_v9` 与 `ps_kernel_invocation_v9`，各自要求精确 `sizeof(record)` 和版本 9；外层 envelope 包含保持精确 size/version 8 的普通 `views` 记录及 `ps_kernel_work_v9` 服务。v8 记录的大小和语义保持不变，不作 prefix 协商。Preparation 与 invocation 使用对应的 typed 入口；没有匹配 factory 时拒绝，不降级 ABI。用 v8 invoke 重载调用 v9-only preparation 会在 provider 入口前拒绝。
+可信 C module 通过 `ps_operation_v10::prepare_kernel_v9`、C++ registration 通过 `OperationDefinition::prepare_kernel_v9` 为 `abi_version=9` 的 CPU `KernelDesc` 提供工厂。`fixed_invocation_v9_api.h` 中独立声明 `ps_prepared_kernel_v9` 与 `ps_kernel_invocation_v9`，各自要求精确 `sizeof(record)` 和版本 9；外层 envelope 包含保持精确 size/version 8 的普通 `views` 记录及 `ps_kernel_work_v9` 服务。v8 记录的大小和语义保持不变，不作 prefix 协商。Preparation 与 invocation 使用对应的 typed 入口；没有匹配 factory 时拒绝，不降级 ABI。用 v8 invoke 重载调用 v9-only preparation 会在 provider 入口前拒绝。
 
 线程安全的 work 服务在数值计算前，对本次 Run 与共享 Context root 准入 `{work, stages}`。零/零调用查询取消或 sticky Run 预算失败。预算拒绝返回 `ResourceExhausted` 及 `WorkLimit`/`StageLimit`，取消可返回 `Cancelled`。服务 context 仅借用至同步 CPU 返回，属于本 invocation/Run，不得存入 prepared state 或传给其他 Run。Host 持有全部 owner 至 CPU 返回。Provider 算术建立所需舍入和 gradual-underflow 环境，host fence 保存并恢复 callback 环境；容量异常保留资源失败分类。
 
-FRQ-01..06 仅使用该 C++ CPU 路径，旧 FRQ invocation 8 Plan 需要重新编译。其他 invocation 8 CPU/GPU 算子及 operation module ABI 8 保持支持。Module 8 transport 不导出 C++ v9 factory；native kernel service ABI 2 及 psir/psxp v5 布局保持不变。
+FRQ-01..06 使用 CPU invocation 9 的独立工厂。Operation module 分别导出 invocation 8 和 9 的 kernel preparation 回调。
 
 ## Native kernel preparation
 

@@ -9,7 +9,7 @@ owning `ResultRef` under that exact name. The compiler fixes input reads,
 physical layouts, memory domains, COPY tasks and control flow before execution.
 Payload owners remain outside compiler artifacts and identity.
 
-The current operation module and fixed invocation interfaces are ABI 8.
+The current operation module interface is ABI 10 and the CPU fixed invocation interfaces are ABI 8 and 9.
 Operations lower to physical tasks and prepare immutable kernels. Invocation
 borrows the Plan's fixed input/output views and scratch; payload cannot add
 producer tasks or widen a compiled read.

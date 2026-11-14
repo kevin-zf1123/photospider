@@ -2,15 +2,16 @@
 
 ## Current contract
 
-Package 0.39.0 uses SameMinorVersion compatibility and SOVERSION `0.39`. C++ consumers and external C operation modules must rebuild against matching headers. Operation module ABI 8 and fixed invocation ABI 8 require exact record sizes. The loader requires `ps_operation_module_get_api_v8`; a missing entry returns `TypeMismatch`, while a malformed module version or size returns `InvalidArgument`.
+Package 0.40.0 uses SameMinorVersion compatibility and SOVERSION `0.40`. C++ consumers and external C operation modules must rebuild against matching headers. Operation module ABI 10 and CPU fixed invocation ABIs 8 and 9 require exact record sizes. The loader requires `ps_operation_module_get_api_v10`; a missing entry returns `TypeMismatch`, while a malformed module version or size returns `InvalidArgument`.
 
 | Contract | Version |
 | --- | --- |
-| Package | 0.39.0 |
+| Package | 0.40.0 |
 | WorkflowDocument | 7 |
 | OperationTraits | 30 |
-| Operation module C ABI | 8, exact-size |
-| Fixed kernel invocation C ABI | 8, exact-size |
+| Operation module C ABI | 10, exact-size |
+| Fixed kernel invocation C ABI | 8 and 9, exact-size |
+| Planner provider / executor provider / mapper | 1 / 2 / 1 |
 | Native kernel preparation service ABI | 2 |
 | `.psir` / `.psxp` text format | 5 |
 | Result schema encoding | `photospider.result-schema.v6` |
@@ -20,6 +21,8 @@ Package 0.39.0 uses SameMinorVersion compatibility and SOVERSION `0.39`. C++ con
 | Saved operation contract | `fixed-operation-contract-v3` |
 
 These version axes are independent. The module ABI describes static preparation, physical lowering and kernel preparation. The invocation ABI describes immutable inputs, exclusive outputs and scratch, cancellation and completion. Native service 2 prepares Metal or Vulkan kernels over Shared and Device storage; explicit GPU COPY tasks also support Host endpoints through admitted Shared staging. Its availability depends on the build and selected device. See the [plugin ABI](../kernel-architecture/Plugin-ABI.md) for ownership, sizes and supported domains.
+
+Operation module ABI 10 adds explicit invocation selection to the checked C builder and backend selection to both tilewise callbacks. Executor provider ABI 2 adds failed-task identity to call retirement. These changes require rebuilding affected native modules; the fixed invocation 8/9, mapper 1, native service 2 and v5 artifact contracts remain separate.
 
 ## Compiler stages and artifacts
 

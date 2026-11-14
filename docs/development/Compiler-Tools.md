@@ -2,7 +2,11 @@
 
 `psc` is the compilation driver; `psx` loads and executes an already compiled Plan. Frontend, validation, optimization, planning and execution remain independently callable library components. The driver owns file paths, JSON manifests, diagnostics, session retention and output publication. It follows the compiler-driver separation used by Clang: selecting a target determines which library stages run. It does not embed LLVM or use LLVM IR.
 
-The drivers use physical Plan v5 and fixed invocation ABI 8. External operations provide static preparation, task lowering and fixed kernels through [operation module ABI 8](../kernel-architecture/Plugin-ABI.md). Input-only IR can run with an empty operation registry.
+The drivers use physical Plan v5 and CPU fixed invocation ABI 8/9. External operations provide static preparation, task lowering and fixed kernels through [operation module ABI 10](../kernel-architecture/Plugin-ABI.md). Input-only IR can run with an empty operation registry.
+
+## Selecting a planner or executor
+
+`psc input.json --load-planner ./planner.so --planner static-tiles -o image.psxp` uses the selected planner. Pass a mapper-only operation module with `--load-ops` when the workflow requires its solver. `psx image.psxp --load-executor ./executor.so --executor physical --bindings inputs.json -o results` selects the executor. Either provider option can be repeated with distinct modules. Explicit registrations take precedence over bundled defaults. Modules declaring the same provider twice are rejected. Each path names a trusted library chosen by the caller.
 
 ## Build and operation loading
 
@@ -12,7 +16,7 @@ The drivers use physical Plan v5 and fixed invocation ABI 8. External operations
 cmake --build build/kernel-dev --target psc psx -j 2
 ```
 
-When `PHOTOSPIDER_BUILD_OPS=ON`, both tools register the built-in operation library before loading explicit `--load-ops` libraries. With ops OFF the registry starts empty. Each repeated `--load-ops PATH` loads a trusted in-process ABI 8 module, in command-line order. The registry is then frozen. Duplicate libraries, operation names or incompatible contracts fail. `--list-operations` prints loaded keys, traits versions and CPU/GPU capabilities. Libraries are not named or loaded by artifacts. `--resources` supplies immutable resource identities and bytes; per-run Tensor inputs belong in `psx --bindings`.
+When `PHOTOSPIDER_BUILD_OPS=ON`, both tools register the built-in operation library before loading explicit `--load-ops` libraries. With ops OFF the registry starts empty. Each repeated `--load-ops PATH` loads a trusted in-process operation module using ABI 10, in command-line order. The registry is then frozen. Duplicate libraries, operation names or incompatible contracts fail. `--list-operations` prints loaded keys, traits versions and CPU/GPU capabilities. Libraries are not named or loaded by artifacts. `--resources` supplies immutable resource identities and bytes; per-run Tensor inputs belong in `psx --bindings`.
 
 The tool-private JSON codec requires yyjson 0.13.0, commit `6447536015f3d600f3d65323b10976103b337ca7`, with its MIT license. Before configuring, follow the [yyjson preparation instructions](../../third_party/YYJSON.md) to place `yyjson.c`, `yyjson.h` and `LICENSE` in `third_party/yyjson/`. This directory is ignored by Git and absent from repository checkouts; CMake does not download the source. Set `PHOTOSPIDER_BUILD_TOOLS=OFF` to disable the tools and their yyjson requirement. yyjson is not a kernel header or exported dependency. No YAML input is supported.
 
@@ -67,9 +71,9 @@ These options are accepted only when generating a Plan:
 
 `psc --list-planners` lists registered names, versions, descriptions and supported IR forms. `psc --help-planner NAME` displays one definition and the shared planning switches. These queries require no input file, load no operation libraries and invoke no planning callbacks. Unknown help names return argument errors. `--print-pipeline` resolves the selected definition and displays its name and version.
 
-Library callers select a name with `PlanningOptions::planner = "static-tiles"`; both `Compiler::plan` and `compile` use this option. Pass a frozen `PlannerRegistry` as the third `Compiler` constructor argument to supply custom backends; omitted registries use the lazy default catalog. Registration rejects duplicate names, missing callbacks and invalid IR forms. `--backend` independently controls CPU/GPU placement.
+Library callers select a name with `PlanningOptions::planner = "static-tiles"`; both `Compiler::plan` and `compile` use this option. Pass a frozen `PlannerRegistry` as the third `Compiler` constructor argument to supply custom backends; omitted registries are filled from the default catalogs during construction. Registration rejects duplicate names, missing callbacks and invalid IR forms. `--backend` independently controls CPU/GPU placement.
 
-A `PlannerDefinition` callback receives the original `ValidatedIR`, a callback-local `PlanBuilder` and the shared `PlanningOptions`. The builder exposes read-only linked declarations and editable physical Task/Tile/Call/Block tables. The compiler checks CFG, schemas, operation contracts, placement, normalized output selection and the emitted task count before publishing a Plan. Backends are responsible for semantic mapping. See the [planner construction contract](../kernel-architecture/Compiler-and-Execution.md#physical-plan). CLI catalogs contain compiled-in registrations; `--load-ops` registers operation libraries only.
+A `PlannerDefinition` callback receives the original `ValidatedIR`, a callback-local `PlanBuilder` and the shared `PlanningOptions`. The builder exposes read-only linked declarations and editable physical Task/Tile/Call/Block tables. The compiler checks CFG, schemas, operation contracts, placement, normalized output selection and the emitted task count before publishing a Plan. Backends are responsible for semantic mapping. See the [planner construction contract](../kernel-architecture/Compiler-and-Execution.md#physical-plan). The CLI loads explicit provider paths before adding missing defaults. `--load-ops` registers operations and mappers.
 
 Control flow and mandatory effect tasks survive output selection. Library `PlanningOptions::output_names` distinguishes all outputs (`nullopt`) from none (empty vector). Missing entries in the library `output_requests` map mean all tiles of a selected output. CLI request manifests explicitly select their named outputs. Runtime requests may only narrow saved coverage.
 
@@ -102,16 +106,16 @@ The executable entry points call separate driver libraries. Their parameter sche
 
 | Source area | Responsibility |
 | --- | --- |
-| `src/tools/psc/` | Compiler invocation, action graph, IR session and DAG JSON frontend I/O. |
-| `src/tools/psx/` | Executor invocation, Plan loading, runtime bindings and Results export. |
-| `src/tools/common/` | Argument tokenization, diagnostics, process signals, file publication, JSON/schema helpers, operation loading, resources and request manifests. |
-| `src/lib/compiler/frontend.cpp`, `frontend_registry.cpp`, `frontend/DAG/dag.cpp` | Frontend name dispatch, catalog, common IR binding and DAG lowering. |
-| `src/lib/compiler/optimizer.cpp` | Transformation orchestration, output validation and public-interface preservation. |
-| `src/lib/compiler/optimizer_registry.cpp`, `optimizers/deduplicate.cpp` | Catalog/option schemas and the separate optional example transform. |
-| `src/lib/compiler/planner.cpp`, `planner_registry.cpp`, `planners/static_tiles.cpp` | Named backend dispatch, catalog, result validation and the registered static tile planner. |
-| `src/lib/compiler/plan_linking.cpp`, `plan_validation.cpp`, `plan_selection.cpp` | Saved-Plan linking, physical-table verification and coverage narrowing without lowering. |
+| `apps/psc/` | Compiler invocation, action graph, IR session and DAG JSON frontend I/O. |
+| `apps/psx/` | Executor invocation, Plan loading, runtime bindings and Results export. |
+| `apps/common/` | Argument tokenization, diagnostics, process signals, file publication, JSON/schema helpers, operation loading, resources and request manifests. |
+| `plugins/compiler/default/frontend.cpp`, `host/frontend_registry.cpp`, `plugins/frontends/dag/dag.cpp` | Frontend name dispatch, catalog, common IR binding and DAG lowering. |
+| `plugins/compiler/default/optimizer.cpp` | Transformation orchestration, output validation and public-interface preservation. |
+| `host/optimizer_registry.cpp`, `plugins/optimizers/deduplicate/deduplicate.cpp` | Catalog/option schemas and the separate optional example transform. |
+| `plugins/compiler/default/planner.cpp`, `host/planner_registry.cpp`, `plugins/planners/static_tiles/static_tiles.cpp` | Named backend dispatch, catalog, result validation and the registered static tile planner. |
+| `sdk/program/plan_linking.cpp`, `plan_validation.cpp`, `plan_selection.cpp` | Saved-Plan linking, physical-table verification and coverage narrowing without lowering. |
 
-The common tool library owns neither a compiler session nor an execution context. Constructing a library `Compiler` for binding or planning does not initialize the default optimizer catalog; only an explicit optimization or catalog query needs it.
+The common tool library owns neither a compiler session nor an execution context. The convenience `Compiler` constructor fills missing frontend, optimizer and planner catalogs from bundled defaults. Use `CompilerComponents` to supply explicit catalogs; saved Plan import uses `ProgramServices` independently of those compiler catalogs.
 
 ## Files, limits and diagnostics
 

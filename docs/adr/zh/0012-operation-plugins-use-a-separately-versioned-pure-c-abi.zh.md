@@ -1,7 +1,7 @@
 # ADR 0012：Operation 插件使用版本化 C 契约
 
 - 状态：已接受
-- 实现说明（2026-10-20）：纯 C 边界保持为已接受决策。Package 0.39.0 实现 operation module ABI 8 与 fixed invocation ABI 8。[ADR 0022](0022-freeze-operation-c-abi-v3.zh.md) 保持为历史 Proposed continuation 设计；其 staged record 和 prefix negotiation 提议不是当前 ABI。
+- 实现说明（2026-11-13）：纯 C 边界保持为已接受决策。Package 0.40.0 实现 operation module ABI 10 与 fixed invocation ABI 8/9。[ADR 0022](0022-freeze-operation-c-abi-v3.zh.md) 保持为历史 Proposed continuation 设计；其 staged record 和 prefix negotiation 提议不是当前 ABI。
 
 ## 1. 核心摘要
 
@@ -22,11 +22,11 @@ Operation 插件通过版本化 C 接口跨越 kernel 边界。Host 在发布 re
 ```c
 #include "photospider/plugin/operation_module_api.h"
 
-PS_OPERATION_MODULE_EXPORT const ps_operation_module_v8*
-ps_operation_module_get_api_v8(void);
+PS_OPERATION_MODULE_EXPORT const ps_operation_module_v10*
+ps_operation_module_get_api_v10(void);
 ```
 
-独立 C11 header 定义 exact-size module ABI 8，并包含 fixed invocation ABI 8。OperationTraits 为 30。Native shader preparation 使用独立版本化的 native kernel service ABI 2。当前没有 data-provider C table。
+独立 C11 header 定义 exact-size module ABI 10，并包含 fixed invocation ABI 8/9。OperationTraits 为 30。Native shader preparation 使用独立版本化的 native kernel service ABI 2。当前没有 data-provider C table。
 
 Module 声明 operation 契约，以及 static prepare、resource validation、lowering、kernel preparation 回调。Host 校验版本与 record size、alignment、pointer/count pair、有界字符串/数组、封闭 enum/flag、checked arithmetic、必要回调及清理所有权。先校验 module header，再接管 destroy hook 并读取嵌套记录。全部声明在私有 candidate 中验证；非法声明、重复 key 或 freeze 竞争不会发布部分 registry 更新。
 

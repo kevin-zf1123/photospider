@@ -4,7 +4,7 @@
 
 ## 当前实现
 
-Package 0.39.0 的所有合法 IR 版本统一使用 `ValidatedIR`。Analysis、可选命名 optimization 与命名 physical planning 保持分离。Call ID 顺序定义 retirement/effect 顺序，task dependency 定义 issue 顺序。Planner 生成不可变物理 Task/Tile/Call/Block 表，显式 CFG loop 保留 activation 语义。参见[版本契约](../../development/zh/Compiler-Version-Contract.zh.md)。
+Package 0.40.0 的所有合法 IR 版本统一使用 `ValidatedIR`。Analysis、可选命名 optimization 与命名 physical planning 保持分离。Call ID 顺序定义 retirement/effect 顺序，task dependency 定义 issue 顺序。Planner 生成不可变物理 Task/Tile/Call/Block 表，显式 CFG loop 保留 activation 语义。参见[版本契约](../../development/zh/Compiler-Version-Contract.zh.md)。
 
 `.psir` 与 `.psxp` 使用 format 5。旧 artifact 需要重新编译/导出，不提供 continuation Plan 转换。Import 校验保存的表并重新绑定静态契约/resource，不执行 optimizer、lowerer 或 planner。Device preparation 是后续显式阶段。
 
@@ -25,10 +25,10 @@ IR content identity 不含 parent version 与变换历史等 provenance。Plan i
 | WorkflowDocument schema | 7 |
 | Result schema encoding | 6 |
 | OperationTraits | 30 |
-| Operation module / fixed invocation C ABI | 8 / 8 |
+| Operation module / fixed invocation C ABI | 10 / 8, 9 |
 | Native kernel service | 2 |
 | IR / Plan artifact format | 5 / 5 |
-| Package / SOVERSION | 0.39.0 / 0.39 |
+| Package / SOVERSION | 0.40.0 / 0.40 |
 
 Compiler 在相应 content domain 编码封闭文档字段、规范化参数、复制的 operation 契约、静态特化与声明的 resource identity。Physical identity 还包括 schema、layout、tile、placement、task、邻接表、call membership、CFG、selection 与 reservation bound。
 

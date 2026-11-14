@@ -183,7 +183,7 @@ nsys export --type=sqlite --force-overwrite=true -o build/physical-benchmark/CAS
 | copy | 320 | 15.478 [9.713, 16.670] | 218.304 [214.495, 222.044] |
 | split | 256 | 17.966 [15.666, 27.726] | 231.466 [224.023, 237.124] |
 | coalesced_tight | 拒绝 | 0.096 [0.080, 0.098] | 0.137 [0.071, 0.153] |
-| split_tight | 256 | 16.618 [16.284, 33.307] | 237.665 [230.399, 244.129] |
+| split_tight | 256 | 16.618 [16.284, 33.307] | 237.665 [230.409, 244.129] |
 | cancel | GPU issue 后取消 | 2.792 [2.515, 2.987] | 21.011 [19.994, 23.223] |
 
 四个 GPU credit 时，单 call median 吞吐为 Metal 16,074 task/s、Vulkan 1,111 task/s；一个 credit 时分别为 4,101 和 409 task/s。它衡量包含 host 提交、分配和完成成本的小 task 完整流水线，不是 shader 算术吞吐。四个主要 case 的成功 task/submission 与输出 allocation 数量分别为 64、256、256、320。COPY 数量包含 CPU task，其 native GPU submission 为 192。

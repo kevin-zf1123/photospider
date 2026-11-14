@@ -8,7 +8,7 @@ The installed `Photospider::kernel` target provides:
 
 - schema-7 `WorkflowDocument` source graphs and immutable per-run `ExecutionBindings`;
 - immutable validated IR with optional ordered optimization;
-- operation module ABI 8, fixed invocation ABI 8 and OperationTraits 30, with closed typed parameters and immutable physical Task/Tile/Call/Block planning;
+- operation module ABI 10, fixed invocation ABI 8/9 and OperationTraits 30, with closed typed parameters and immutable physical Task/Tile/Call/Block planning;
 - CPU-required and GPU-optional fixed execution through `prepare`, `submit` and `join`, with dependency-driven issue and ordered call retirement;
 - operation support is defined by each registered contract; see [image operations](docs/kernel-architecture/Image-Operations.md) and the [built-in operations index](docs/built-in_ops/README.md);
 - static `Result` members and unified `Tensor`, explicit operation-bound validation, rank-general `Region`, affine layout, immutable bytes, native Shared/Device storage and explicit COPY tasks;
@@ -56,7 +56,7 @@ cmake --install build --prefix /desired/photospider-prefix
 ```
 
 ```cmake
-find_package(Photospider 0.39 CONFIG REQUIRED COMPONENTS kernel)
+find_package(Photospider 0.40 CONFIG REQUIRED COMPONENTS kernel)
 target_link_libraries(app PRIVATE Photospider::kernel)
 ```
 
@@ -78,7 +78,7 @@ SDK target `Photospider::ops_sdk`, which uses only kernel public interfaces.
 not supply compiled implementations on its own.
 
 ```cmake
-find_package(Photospider 0.39 CONFIG REQUIRED COMPONENTS kernel ops)
+find_package(Photospider 0.40 CONFIG REQUIRED COMPONENTS kernel ops)
 target_link_libraries(app PRIVATE Photospider::ops)
 ```
 
