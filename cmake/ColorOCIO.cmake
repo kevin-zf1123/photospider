@@ -90,6 +90,12 @@ function(ps_configure_ocio)
   set(YAML_CPP_BUILD_TOOLS OFF)
   set(YAML_CPP_INSTALL OFF)
   set(YAML_CPP_FORMAT_SOURCE OFF)
+  # The pinned yaml-cpp 0.8 baseline predates the policies supported by CMake 4.
+  # Keep the compatibility floor local to these private color dependencies.
+  if(CMAKE_VERSION VERSION_GREATER_EQUAL "4.0" AND
+     (NOT DEFINED CMAKE_POLICY_VERSION_MINIMUM OR CMAKE_POLICY_VERSION_MINIMUM VERSION_LESS "3.5"))
+    set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
+  endif()
   add_subdirectory("${ps_color_yaml_SOURCE_DIR}" color-engines/yaml EXCLUDE_FROM_ALL)
   # Bootstrap the pinned parser's process-lifetime regex storage before any
   # invocation allocator is active. This private header is not exported.

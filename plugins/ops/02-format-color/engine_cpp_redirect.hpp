@@ -53,8 +53,7 @@ void* realloc(void*, std::size_t) PS_ENGINE_ASM("ps_engine_realloc");
 // NOLINTNEXTLINE(readability/casting)
 void free(void*) PS_ENGINE_ASM("ps_engine_free");
 char* strdup(const char*) PS_ENGINE_ASM("ps_engine_strdup");
-int posix_memalign(void**, std::size_t, std::size_t)
-    PS_ENGINE_ASM("ps_engine_posix_memalign");
+int ps_engine_posix_memalign(void**, std::size_t, std::size_t);
 void ps_engine_cpp_tick(std::uint64_t);
 void ps_engine_ocio_bridge(const char*);
 void ps_engine_ocio_record(const char*, const char*);
@@ -63,4 +62,7 @@ void ps_engine_ocio_file_leave(int);
 int ps_engine_ocio_strict_interpolation(void);
 }
 
+// Clang's x86 intrinsic header redeclares aligned allocation. Use the private
+// name there without changing the system function's exception specification.
+#define posix_memalign ps_engine_posix_memalign
 #undef PS_ENGINE_ASM
